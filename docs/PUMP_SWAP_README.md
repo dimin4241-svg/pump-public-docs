@@ -102,7 +102,23 @@ at https://solscan.io/account/GseMAnNDvntR5uFePZ51yZBXzNSn7GdFPkfHwfr6d77J#accou
   },
   "lp_supply": {
     "type": "u64",
-    "data": "4193388284800"
+    "data": "4194352106721"
+  },
+  "coin_creator": {
+    "type": "pubkey",
+    "data": "5L5k7gtNLbeXdzpvNrFshg1E1id1ceUDfc6vPUTxp98q"
+  },
+  "is_mayhem_mode": {
+    "type": "bool",
+    "data": false
+  },
+  "is_cashback_coin": {
+    "type": "bool",
+    "data": false
+  },
+  "virtual_quote_reserves": {
+    "type": "i128",
+    "data": "0"
   }
 }
 ```
@@ -123,6 +139,35 @@ at https://solscan.io/account/GseMAnNDvntR5uFePZ51yZBXzNSn7GdFPkfHwfr6d77J#accou
   into the pool, then they burn their `lp_mint` tokens, the `Pool::lp_supply` will still reflect the original supply
   of the `lp_mint`. This way, the pool differentiates between `lp_mint` tokens burnt by users directly and those burnt
   by the `withdraw` instruction.
+- The `coin_creator` is the pubkey that accrues the coin-creator fees for this pool (see
+  [PUMP_SWAP_CREATOR_FEE_README](PUMP_SWAP_CREATOR_FEE_README.md)). On pools that predate coin-creator fees it is
+  `Pubkey::default()` (`11111111111111111111111111111111`).
+- The `is_mayhem_mode` flag indicates whether the pool operates in mayhem mode.
+- The `is_cashback_coin` flag indicates whether the coin's creator fee is routed as cashback (see
+  [PUMP_CASHBACK_README](PUMP_CASHBACK_README.md)).
+- The `virtual_quote_reserves` (`i128`) is an additional (appended) quote-reserve amount that a pool may carry. Quotes must be
+  computed against the pool's **effective quote reserves**, not the raw quote-vault token balance, see
+  [Quoting: effective quote reserves](#quoting-effective-quote-reserves). It is `0` on all pools today, so effective
+  quote reserves currently equal the raw vault balance; some pools may carry a non-zero value in the future.
+
+## Quoting: effective quote reserves
+
+Buys and sells are priced on the pool's **effective quote reserves**, which are the raw quote-vault token balance plus
+`Pool::virtual_quote_reserves`:
+
+```text
+effective_quote_reserves = pool_quote_token_account.amount + Pool::virtual_quote_reserves
+```
+
+- Use `effective_quote_reserves` (not the raw `pool_quote_token_account.amount`) wherever you quote, price, or index a
+  pool, for both `buy` and `sell`.
+- `virtual_quote_reserves` is `0` on all pools today, so effective quote reserves equal the raw vault balance and quotes
+  are unchanged. Integrating against effective quote reserves now is safe and keeps your quotes correct if a pool later
+  carries a non-zero `virtual_quote_reserves`.
+- The base side is unchanged: base reserves are still the raw `pool_base_token_account.amount`.
+
+Indexers: the `BuyEvent` and `SellEvent` logs include `virtual_quote_reserves` (appended field), so effective quote
+reserves can be reconstructed directly from the event stream.
 
 ## Instructions
 

@@ -271,6 +271,184 @@ export type PumpAmm = {
       ];
     },
     {
+      name: "boostBuyAndBurn";
+      discriminator: [105, 68, 6, 175, 0, 7, 35, 162];
+      accounts: [
+        {
+          name: "pool";
+        },
+        {
+          name: "authority";
+          writable: true;
+          signer: true;
+        },
+        {
+          name: "globalConfig";
+          pda: {
+            seeds: [
+              {
+                kind: "const";
+                value: [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  95,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103,
+                ];
+              },
+            ];
+          };
+        },
+        {
+          name: "baseMint";
+          writable: true;
+          relations: ["pool"];
+        },
+        {
+          name: "quoteMint";
+          relations: ["pool"];
+        },
+        {
+          name: "poolBaseTokenAccount";
+          writable: true;
+          relations: ["pool"];
+        },
+        {
+          name: "poolQuoteTokenAccount";
+          writable: true;
+          relations: ["pool"];
+        },
+        {
+          name: "boostVaultAuthority";
+          pda: {
+            seeds: [
+              {
+                kind: "const";
+                value: [98, 111, 111, 115, 116, 95, 118, 97, 117, 108, 116];
+              },
+              {
+                kind: "account";
+                path: "pool";
+              },
+            ];
+          };
+        },
+        {
+          name: "boostVault";
+          writable: true;
+          pda: {
+            seeds: [
+              {
+                kind: "account";
+                path: "boostVaultAuthority";
+              },
+              {
+                kind: "account";
+                path: "quoteTokenProgram";
+              },
+              {
+                kind: "account";
+                path: "quoteMint";
+              },
+            ];
+            program: {
+              kind: "const";
+              value: [
+                140,
+                151,
+                37,
+                143,
+                78,
+                36,
+                137,
+                241,
+                187,
+                61,
+                16,
+                41,
+                20,
+                142,
+                13,
+                131,
+                11,
+                90,
+                19,
+                153,
+                218,
+                255,
+                16,
+                132,
+                4,
+                142,
+                123,
+                216,
+                219,
+                233,
+                248,
+                89,
+              ];
+            };
+          };
+        },
+        {
+          name: "baseTokenProgram";
+        },
+        {
+          name: "quoteTokenProgram";
+        },
+        {
+          name: "eventAuthority";
+          pda: {
+            seeds: [
+              {
+                kind: "const";
+                value: [
+                  95,
+                  95,
+                  101,
+                  118,
+                  101,
+                  110,
+                  116,
+                  95,
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121,
+                ];
+              },
+            ];
+          };
+        },
+        {
+          name: "program";
+        },
+      ];
+      args: [
+        {
+          name: "quoteAmountIn";
+          type: "u64";
+        },
+        {
+          name: "minBaseAmountBurned";
+          type: "u64";
+        },
+      ];
+    },
+    {
       name: "buy";
       docs: [
         "For cashback coins, optionally pass user_volume_accumulator_wsol_ata as remaining_accounts[0].",
@@ -2411,6 +2589,179 @@ export type PumpAmm = {
       args: [];
     },
     {
+      name: "initBoost";
+      discriminator: [140, 233, 33, 94, 132, 90, 194, 143];
+      accounts: [
+        {
+          name: "pool";
+          writable: true;
+        },
+        {
+          name: "globalConfig";
+          pda: {
+            seeds: [
+              {
+                kind: "const";
+                value: [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  95,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103,
+                ];
+              },
+            ];
+          };
+        },
+        {
+          name: "creator";
+          writable: true;
+          signer: true;
+        },
+        {
+          name: "baseMint";
+          relations: ["pool"];
+        },
+        {
+          name: "quoteMint";
+          relations: ["pool"];
+        },
+        {
+          name: "poolBaseTokenAccount";
+          relations: ["pool"];
+        },
+        {
+          name: "poolQuoteTokenAccount";
+          writable: true;
+          relations: ["pool"];
+        },
+        {
+          name: "boostVaultAuthority";
+          pda: {
+            seeds: [
+              {
+                kind: "const";
+                value: [98, 111, 111, 115, 116, 95, 118, 97, 117, 108, 116];
+              },
+              {
+                kind: "account";
+                path: "pool";
+              },
+            ];
+          };
+        },
+        {
+          name: "boostVault";
+          writable: true;
+          pda: {
+            seeds: [
+              {
+                kind: "account";
+                path: "boostVaultAuthority";
+              },
+              {
+                kind: "account";
+                path: "quoteTokenProgram";
+              },
+              {
+                kind: "account";
+                path: "quoteMint";
+              },
+            ];
+            program: {
+              kind: "const";
+              value: [
+                140,
+                151,
+                37,
+                143,
+                78,
+                36,
+                137,
+                241,
+                187,
+                61,
+                16,
+                41,
+                20,
+                142,
+                13,
+                131,
+                11,
+                90,
+                19,
+                153,
+                218,
+                255,
+                16,
+                132,
+                4,
+                142,
+                123,
+                216,
+                219,
+                233,
+                248,
+                89,
+              ];
+            };
+          };
+        },
+        {
+          name: "quoteTokenProgram";
+        },
+        {
+          name: "systemProgram";
+          address: "11111111111111111111111111111111";
+        },
+        {
+          name: "associatedTokenProgram";
+          address: "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
+        },
+        {
+          name: "eventAuthority";
+          pda: {
+            seeds: [
+              {
+                kind: "const";
+                value: [
+                  95,
+                  95,
+                  101,
+                  118,
+                  101,
+                  110,
+                  116,
+                  95,
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121,
+                ];
+              },
+            ];
+          };
+        },
+        {
+          name: "program";
+        },
+      ];
+      args: [];
+    },
+    {
       name: "initUserVolumeAccumulator";
       discriminator: [94, 6, 202, 115, 255, 96, 232, 183];
       accounts: [
@@ -2946,6 +3297,61 @@ export type PumpAmm = {
       ];
     },
     {
+      name: "setBoostAuthority";
+      discriminator: [227, 149, 76, 42, 130, 39, 234, 205];
+      accounts: [
+        {
+          name: "admin";
+          signer: true;
+          relations: ["globalConfig"];
+        },
+        {
+          name: "globalConfig";
+          writable: true;
+        },
+        {
+          name: "boostAuthority";
+        },
+        {
+          name: "systemProgram";
+          address: "11111111111111111111111111111111";
+        },
+        {
+          name: "eventAuthority";
+          pda: {
+            seeds: [
+              {
+                kind: "const";
+                value: [
+                  95,
+                  95,
+                  101,
+                  118,
+                  101,
+                  110,
+                  116,
+                  95,
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121,
+                ];
+              },
+            ];
+          };
+        },
+        {
+          name: "program";
+        },
+      ];
+      args: [];
+    },
+    {
       name: "setCoinCreator";
       docs: [
         "Sets Pool::coin_creator from Metaplex metadata creator or BondingCurve::creator",
@@ -3341,6 +3747,27 @@ export type PumpAmm = {
         },
       ];
       args: [];
+    },
+    {
+      name: "toggleBoost";
+      discriminator: [117, 161, 160, 74, 223, 137, 118, 99];
+      accounts: [
+        {
+          name: "admin";
+          signer: true;
+          relations: ["globalConfig"];
+        },
+        {
+          name: "globalConfig";
+          writable: true;
+        },
+      ];
+      args: [
+        {
+          name: "enabled";
+          type: "bool";
+        },
+      ];
     },
     {
       name: "toggleCashbackEnabled";
@@ -4227,6 +4654,10 @@ export type PumpAmm = {
       discriminator: [147, 250, 108, 120, 247, 29, 67, 222];
     },
     {
+      name: "boostBuyAndBurnEvent";
+      discriminator: [63, 69, 28, 22, 48, 92, 194, 185];
+    },
+    {
       name: "buyEvent";
       discriminator: [103, 244, 82, 31, 44, 245, 119, 119];
     },
@@ -4267,6 +4698,10 @@ export type PumpAmm = {
       discriminator: [97, 97, 215, 144, 93, 146, 22, 124];
     },
     {
+      name: "initBoostEvent";
+      discriminator: [174, 124, 74, 249, 4, 81, 246, 17];
+    },
+    {
       name: "initUserVolumeAccumulatorEvent";
       discriminator: [134, 36, 13, 72, 232, 101, 130, 216];
     },
@@ -4285,6 +4720,10 @@ export type PumpAmm = {
     {
       name: "setBondingCurveCoinCreatorEvent";
       discriminator: [242, 231, 235, 102, 65, 99, 189, 211];
+    },
+    {
+      name: "setBoostAuthorityEvent";
+      discriminator: [89, 128, 240, 141, 91, 202, 71, 105];
     },
     {
       name: "setMetaplexCoinCreatorEvent";
@@ -4552,6 +4991,51 @@ export type PumpAmm = {
       code: 6058;
       name: "buybackFeeRecipientMissing";
     },
+    {
+      code: 6059;
+      name: "missingCashbackAccounts";
+      msg: "Cashback trade is missing the required remaining accounts";
+    },
+    {
+      code: 6060;
+      name: "invalidCashbackAccumulator";
+      msg: "Cashback user_volume_accumulator account is invalid";
+    },
+    {
+      code: 6061;
+      name: "invalidCashbackAccumulatorAta";
+      msg: "Cashback user_volume_accumulator ATA is missing or invalid";
+    },
+    {
+      code: 6062;
+      name: "invalidPoolV2";
+      msg: "pool_v2 remaining account is missing or invalid";
+    },
+    {
+      code: 6063;
+      name: "insufficientRealQuoteReserves";
+      msg: "BOOST: sell output exceeds the real quote vault. effective = real + virtual is pricing-only; payout is capped at real_vault, so quote min(out, real_vault)";
+    },
+    {
+      code: 6064;
+      name: "boostPoolLiquidityUnsupported";
+      msg: "BOOST: deposit/withdraw don't apply to boost pools";
+    },
+    {
+      code: 6065;
+      name: "poolCannotBoost";
+      msg: "BOOST: pool cannot be boosted (no virtual reserves)";
+    },
+    {
+      code: 6066;
+      name: "boostDisabled";
+      msg: "BOOST: boost is disabled";
+    },
+    {
+      code: 6067;
+      name: "seedLockViolation";
+      msg: "BOOST: lp_supply must never drop below the circulating LP mint supply";
+    },
   ];
   types: [
     {
@@ -4662,6 +5146,62 @@ export type PumpAmm = {
           {
             name: "isCashbackCoin";
             type: "bool";
+          },
+        ];
+      };
+    },
+    {
+      name: "boostBuyAndBurnEvent";
+      type: {
+        kind: "struct";
+        fields: [
+          {
+            name: "timestamp";
+            type: "i64";
+          },
+          {
+            name: "mint";
+            type: "pubkey";
+          },
+          {
+            name: "bondingCurve";
+            type: "pubkey";
+          },
+          {
+            name: "pool";
+            type: "pubkey";
+          },
+          {
+            name: "authority";
+            type: "pubkey";
+          },
+          {
+            name: "quoteAmountInRequested";
+            type: "u64";
+          },
+          {
+            name: "quoteAmountInUsed";
+            type: "u64";
+          },
+          {
+            name: "baseAmountBurned";
+            type: "u64";
+          },
+          {
+            name: "virtualQuoteReserves";
+            type: "i128";
+          },
+          {
+            name: "realQuoteReservesAfter";
+            type: "u64";
+          },
+          {
+            name: "baseReservesAfter";
+            type: "u64";
+          },
+          {
+            name: "boostVaultRemaining";
+            type: "u64";
           },
         ];
       };
@@ -4806,6 +5346,18 @@ export type PumpAmm = {
           },
           {
             name: "buybackFee";
+            type: "u64";
+          },
+          {
+            name: "virtualQuoteReserves";
+            type: "i128";
+          },
+          {
+            name: "canBoost";
+            type: "bool";
+          },
+          {
+            name: "baseSupply";
             type: "u64";
           },
         ];
@@ -5373,6 +5925,14 @@ export type PumpAmm = {
             name: "buybackBasisPoints";
             type: "u64";
           },
+          {
+            name: "boostAuthority";
+            type: "pubkey";
+          },
+          {
+            name: "boostEnabled";
+            type: "bool";
+          },
         ];
       };
     },
@@ -5408,6 +5968,38 @@ export type PumpAmm = {
             type: {
               array: ["u64", 30];
             };
+          },
+        ];
+      };
+    },
+    {
+      name: "initBoostEvent";
+      type: {
+        kind: "struct";
+        fields: [
+          {
+            name: "timestamp";
+            type: "i64";
+          },
+          {
+            name: "mint";
+            type: "pubkey";
+          },
+          {
+            name: "bondingCurve";
+            type: "pubkey";
+          },
+          {
+            name: "pool";
+            type: "pubkey";
+          },
+          {
+            name: "virtualQuoteReserves";
+            type: "i128";
+          },
+          {
+            name: "realQuoteReservesAfter";
+            type: "u64";
           },
         ];
       };
@@ -5524,6 +6116,13 @@ export type PumpAmm = {
           {
             name: "isCashbackCoin";
             type: "bool";
+          },
+          {
+            name: "virtualQuoteReserves";
+            docs: [
+              "For non-boost pools, value is 0, so the behavior is identical to legacy pools.",
+            ];
+            type: "i128";
           },
         ];
       };
@@ -5663,6 +6262,18 @@ export type PumpAmm = {
             name: "buybackFee";
             type: "u64";
           },
+          {
+            name: "virtualQuoteReserves";
+            type: "i128";
+          },
+          {
+            name: "canBoost";
+            type: "bool";
+          },
+          {
+            name: "baseSupply";
+            type: "u64";
+          },
         ];
       };
     },
@@ -5689,6 +6300,30 @@ export type PumpAmm = {
           },
           {
             name: "coinCreator";
+            type: "pubkey";
+          },
+        ];
+      };
+    },
+    {
+      name: "setBoostAuthorityEvent";
+      type: {
+        kind: "struct";
+        fields: [
+          {
+            name: "timestamp";
+            type: "i64";
+          },
+          {
+            name: "admin";
+            type: "pubkey";
+          },
+          {
+            name: "oldBoostAuthority";
+            type: "pubkey";
+          },
+          {
+            name: "newBoostAuthority";
             type: "pubkey";
           },
         ];
