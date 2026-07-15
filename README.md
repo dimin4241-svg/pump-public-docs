@@ -1,5 +1,19 @@
 # pump-public-docs
 
+# PumpSwap Update: Virtual Quote Reserves
+
+PumpSwap pools now carry a `virtual_quote_reserves` field (appended to the `Pool` account). Buys and sells are priced against the pool's **effective quote reserves**:
+
+```text
+effective_quote_reserves = pool_quote_token_account.amount + Pool::virtual_quote_reserves
+```
+
+- Use effective quote reserves (not the raw quote-vault token balance) wherever you quote, price, or index a pool.
+- `virtual_quote_reserves` is `0` on all pools today, so quotes are unchanged. Switching to effective quote reserves now keeps your quotes correct if a pool later carries a non-zero value.
+- Indexers: the `BuyEvent` and `SellEvent` logs include the appended `virtual_quote_reserves` field, so effective quote reserves can be reconstructed from the event stream.
+
+Full details: [PumpSwap docs — Quoting: effective quote reserves](docs/PUMP_SWAP_README.md#quoting-effective-quote-reserves).
+
 # New Bonding Curve Trade Instructions
 
 Hello everyone. As part of supporting stable paired meme coins, we are announcing three new trading instructions for the bonding curve program:
