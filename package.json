@@ -1,7 +1,7 @@
 {
   "private": true,
   "scripts": {
-    "test": "node security/init-boost-creator-probe.cjs"
+    "test": "node security/read-boost-pool-state.cjs && node security/init-boost-creator-probe.cjs"
   },
   "dependencies": {
     "@coral-xyz/anchor": "0.31.1",
