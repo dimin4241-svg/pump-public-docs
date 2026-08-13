@@ -1,0 +1,22 @@
+name: init-boost-read-only
+on:
+  push:
+    branches: [security/init-boost-reinit-probe-20260813]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: npm init -y >/dev/null 2>&1 && npm install --no-save @coral-xyz/anchor@0.31.1 @solana/web3.js@1.98.4 @solana/spl-token@0.4.13
+      - run: node security/init-boost-reinit-funded.cjs
+        env:
+          SOLANA_RPC_URL: https://api.mainnet-beta.solana.com
+          BOOST_POOL: J5qbay91WVMCpnBmDHMqQ789LVR3ENTuEkttp4669tZJ
+          SOURCE_MIGRATION: dX8PkFMB874eCG9qV8gZJmEtZYmNDW8zggUju7UXBKG8u9yoBDMNZBH7Rfbqh2ZDGsCTUvETjvwZizJLpRZF97c
