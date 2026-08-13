@@ -77,13 +77,18 @@ async function main() {
     const { blockhash } = await connection.getLatestBlockhash("confirmed");
     const msg = new TransactionMessage({ payerKey: feePayer, recentBlockhash: blockhash, instructions: [ix] }).compileToV0Message();
     const tx = new VersionedTransaction(msg);
-    const result = await connection.simulateTransaction(tx, { commitment: "confirmed", sigVerify: false });
+    const result = await connection.simulateTransaction(tx, {
+      commitment: "confirmed",
+      sigVerify: false,
+      innerInstructions: true,
+    });
     return {
       label,
       creator: creator.toBase58(),
       creatorLamports: (await connection.getAccountInfo(creator, "confirmed"))?.lamports ?? 0,
       err: result.value.err,
       unitsConsumed: result.value.unitsConsumed ?? null,
+      innerInstructions: result.value.innerInstructions ?? null,
       logs: result.value.logs ?? [],
     };
   }
