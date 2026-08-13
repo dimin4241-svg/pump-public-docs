@@ -1,0 +1,36 @@
+name: PumpSwap BOOST auth probe
+
+on:
+  push:
+    branches:
+      - security/boost-auth-probe-20260813
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install probe dependencies
+        run: |
+          npm init -y >/dev/null 2>&1
+          npm install --no-save \
+            @coral-xyz/anchor@0.31.1 \
+            @solana/web3.js@1.98.4 \
+            @solana/spl-token@0.4.13 \
+            bn.js@5.2.2
+
+      - name: Simulate configured vs unrelated BOOST authority
+        env:
+          SOLANA_RPC_URL: https://api.mainnet-beta.solana.com
+          BOOST_POOL: J5qbay91WVMCpnBmDHMqQ789LVR3ENTuEkttp4669tZJ
+        run: node security/boost-auth-probe.mjs
