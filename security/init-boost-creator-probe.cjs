@@ -15,7 +15,9 @@ const {
 
 const RPC = process.env.SOLANA_RPC_URL ?? "https://api.mainnet-beta.solana.com";
 const PROGRAM_ID = new PublicKey("pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA");
-const POOL_KEY = new PublicKey("HAUeLaBj5T3r1wvEsAW7AgukKLzVL5peXScF2Z4pU88M");
+const POOL_KEY = new PublicKey(
+  process.env.BOOST_POOL ?? "HAUeLaBj5T3r1wvEsAW7AgukKLzVL5peXScF2Z4pU88M",
+);
 
 function pda(seed, ...keys) {
   return PublicKey.findProgramAddressSync(
@@ -95,6 +97,7 @@ async function main() {
   console.log(JSON.stringify({
     pool: POOL_KEY.toBase58(),
     poolCreator: pool.creator.toBase58(),
+    virtualQuoteReserves: pool.virtualQuoteReserves.toString(),
     boostVault: boostVault.toBase58(),
     results,
   }, null, 2));
