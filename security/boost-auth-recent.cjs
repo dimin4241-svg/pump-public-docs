@@ -21,6 +21,8 @@ const PROGRAM_ID = new PublicKey("pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA");
 const BOOST_BUY_AND_BURN_DISC = Buffer.from([105, 68, 6, 175, 0, 7, 35, 162]);
 const U64_MAX = new BN("18446744073709551615");
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 function pda(seed, ...extra) {
   return PublicKey.findProgramAddressSync(
     [Buffer.from(seed), ...extra.map((x) => x.toBuffer())],
@@ -55,6 +57,24 @@ function sameDisc(data) {
   }
 }
 
+async function getParsedTransactionThrottled(connection, signature) {
+  let lastError;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    try {
+      return await connection.getParsedTransaction(signature, {
+        commitment: "confirmed",
+        maxSupportedTransactionVersion: 0,
+      });
+    } catch (error) {
+      lastError = error;
+      const text = String(error);
+      if (!text.includes("Too many requests") && !text.includes("429")) throw error;
+      await sleep(1200 * (attempt + 1));
+    }
+  }
+  throw lastError;
+}
+
 async function main() {
   if (!RPC.includes("mainnet") && process.env.ALLOW_CUSTOM_RPC !== "1") {
     throw new Error("Safety stop: expected mainnet read/simulation RPC");
@@ -73,31 +93,26 @@ async function main() {
   console.log(`Configured boost authority: ${configuredBoostAuthority.toBase58()}`);
   const sigRows = await connection.getSignaturesForAddress(
     configuredBoostAuthority,
-    { limit: 100 },
+    { limit: 40 },
     "confirmed",
   );
   console.log(`Recent authority signatures: ${sigRows.length}`);
 
   const recentBoostCalls = [];
-  for (let start = 0; start < sigRows.length; start += 20) {
-    const batch = sigRows.slice(start, start + 20);
-    const txs = await connection.getParsedTransactions(
-      batch.map((x) => x.signature),
-      { commitment: "confirmed", maxSupportedTransactionVersion: 0 },
-    );
-    for (let i = 0; i < txs.length; i++) {
-      const tx = txs[i];
-      if (!tx) continue;
-      for (const ix of tx.transaction.message.instructions) {
-        if (!("data" in ix) || !("accounts" in ix)) continue;
-        if (!ix.programId.equals(PROGRAM_ID) || !sameDisc(ix.data)) continue;
-        recentBoostCalls.push({
-          signature: batch[i].signature,
-          slot: tx.slot,
-          accounts: ix.accounts.map((x) => x.toBase58()),
-        });
-      }
+  for (const row of sigRows.slice(0, 25)) {
+    const tx = await getParsedTransactionThrottled(connection, row.signature);
+    await sleep(650);
+    if (!tx) continue;
+    for (const ix of tx.transaction.message.instructions) {
+      if (!("data" in ix) || !("accounts" in ix)) continue;
+      if (!ix.programId.equals(PROGRAM_ID) || !sameDisc(ix.data)) continue;
+      recentBoostCalls.push({
+        signature: row.signature,
+        slot: tx.slot,
+        accounts: ix.accounts.map((x) => x.toBase58()),
+      });
     }
+    if (recentBoostCalls.length >= 8) break;
   }
   console.log(`Recent boost_buy_and_burn calls: ${recentBoostCalls.length}`);
 
@@ -127,7 +142,7 @@ async function main() {
     const transactionVault = new PublicKey(call.accounts[8]);
     const vaultInfo = await connection.getAccountInfo(transactionVault, "confirmed");
     const amount = readTokenAmount(vaultInfo);
-    const row = {
+    const candidate = {
       pool: poolKey.toBase58(),
       signature: call.signature,
       slot: call.slot,
@@ -138,8 +153,8 @@ async function main() {
       boostVaultAmount: amount.toString(),
       virtualQuoteReserves: pool.virtualQuoteReserves?.toString?.() ?? null,
     };
-    candidates.push(row);
-    console.log(JSON.stringify(row));
+    candidates.push(candidate);
+    console.log(`BOOST_CANDIDATE ${JSON.stringify(candidate)}`);
     if (vaultInfo && amount > 0n && transactionVault.equals(derivedVault)) {
       target = {
         call,
@@ -163,7 +178,7 @@ async function main() {
   }
 
   const quoteAmount = target.vaultAmount > 1_000_000n ? 1_000_000n : target.vaultAmount;
-  let feePayer = globalConfig.admin;
+  const feePayer = globalConfig.admin;
   const feePayerInfo = await connection.getAccountInfo(feePayer, "confirmed");
   if (!feePayerInfo || !feePayerInfo.owner.equals(SystemProgram.programId) || feePayerInfo.lamports < 1_000_000) {
     throw new Error("Global admin cannot serve as simulation-only fee payer");
