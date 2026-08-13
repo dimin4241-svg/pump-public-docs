@@ -16,7 +16,7 @@ function b58decode(s) {
     if (v < 0) throw new Error('bad base58');
     let carry = v;
     for (let j = 0; j < bytes.length; j++) { carry += bytes[j] * 58; bytes[j] = carry & 255; carry >>= 8; }
-    while (carry) { bytes.push(carry & 255; carry >>= 8; }
+    while (carry) { bytes.push(carry & 255); carry >>= 8; }
   }
   for (let k = 0; k < s.length && s[k] === '1'; k++) bytes.push(0);
   return Buffer.from(bytes.reverse());
