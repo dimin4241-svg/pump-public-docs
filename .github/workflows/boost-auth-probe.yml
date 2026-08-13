@@ -1,4 +1,4 @@
-name: Inspect local validator harness patches
+name: Inspect exact crate local validator source
 
 on:
   push:
@@ -16,15 +16,34 @@ concurrency:
 jobs:
   inspect:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
-      - name: Print existing local-validator harness patches
+      - name: Fetch exact crate through Cargo and inspect local harness source
         run: |
+          set -euo pipefail
           git clone -q https://gist.github.com/dimin4241-svg/fa148417da8131fd3f4ac3a76bfbba7d.git /tmp/vqr-gist
-          echo '=== local_mainnet_harness.patch ==='
-          cat /tmp/vqr-gist/local_mainnet_harness.patch
-          echo '=== local_validator_dependency_pins.patch ==='
-          cat /tmp/vqr-gist/local_validator_dependency_pins.patch
-          echo '=== natural_mainnet_harness_cargo.patch ==='
-          cat /tmp/vqr-gist/natural_mainnet_harness_cargo.patch
+          mkdir -p /tmp/fetch/src
+          cat > /tmp/fetch/Cargo.toml <<'EOF'
+          [package]
+          name = "fetch-pump"
+          version = "0.0.0"
+          edition = "2021"
+          [dependencies]
+          pump-rust-client = "=0.1.10"
+          EOF
+          echo 'fn main(){}' > /tmp/fetch/src/main.rs
+          cd /tmp/fetch
+          cargo fetch -q
+          SRC=$(find "$HOME/.cargo/registry/src" -maxdepth 2 -type d -name 'pump-rust-client-0.1.10' | head -n 1)
+          test -n "$SRC"
+          cp -a "$SRC" /tmp/pump-rust-client-0.1.10
+          cd /tmp/pump-rust-client-0.1.10
+          echo '=== ORIGINAL LOCAL VALIDATOR FILES ==='
+          find . -maxdepth 4 -type f | grep -E 'local.validator|validator.*\.rs|tests/common' | sort || true
+          echo '=== CARGO FEATURES/BINS ==='
+          grep -n -A60 -B10 'local-validator' Cargo.toml | head -n 360 || true
+          echo '=== TEST COMMON ==='
+          if [ -f tests/common/mod.rs ]; then sed -n '1,520p' tests/common/mod.rs; fi
+          echo '=== VALIDATOR SOURCE ==='
+          for f in $(find . -maxdepth 4 -type f | grep -E 'local.validator.*\.rs$|validator.*\.rs$' | head -n 10); do echo "--- $f"; sed -n '1,520p' "$f"; done
