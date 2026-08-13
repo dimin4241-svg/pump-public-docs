@@ -27,10 +27,10 @@ jobs:
             @coral-xyz/anchor@0.31.1 \
             @solana/web3.js@1.98.4 \
             @solana/spl-token@0.4.13 \
-            bn.js@5.2.2
+            bn.js@5.2.2 \
+            bs58@6.0.0
 
-      - name: Simulate configured vs unrelated BOOST authority
+      - name: Discover recent active BOOST pool and compare authorities
         env:
           SOLANA_RPC_URL: https://api.mainnet-beta.solana.com
-          BOOST_POOL: J5qbay91WVMCpnBmDHMqQ789LVR3ENTuEkttp4669tZJ
-        run: node security/boost-auth-probe.cjs
+        run: node security/boost-auth-recent.cjs
