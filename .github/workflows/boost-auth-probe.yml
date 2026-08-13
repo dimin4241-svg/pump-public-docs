@@ -1,4 +1,4 @@
-name: Inspect InitBoost local reproduction surface
+name: Security regression test
 
 on:
   push:
@@ -10,57 +10,20 @@ permissions:
   contents: read
 
 concurrency:
-  group: boost-auth-probe
+  group: security-regression-test
   cancel-in-progress: true
 
 jobs:
-  inspect:
+  test:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - name: Inspect exact crate builders, fixture tools, and available program artifacts
-        run: |
-          set -euo pipefail
-          git clone -q https://gist.github.com/dimin4241-svg/fa148417da8131fd3f4ac3a76bfbba7d.git /tmp/vqr-gist
-
-          mkdir -p /tmp/fetch/src
-          cat > /tmp/fetch/Cargo.toml <<'EOF'
-          [package]
-          name = "fetch-pump"
-          version = "0.0.0"
-          edition = "2021"
-          [dependencies]
-          pump-rust-client = "=0.1.10"
-          EOF
-          echo 'fn main(){}' > /tmp/fetch/src/main.rs
-          cd /tmp/fetch
-          cargo fetch -q
-          SRC=$(find "$HOME/.cargo/registry/src" -maxdepth 2 -type d -name 'pump-rust-client-0.1.10' | head -n 1)
-          test -n "$SRC"
-
-          echo '=== INIT_BOOST / BOOST BUILDERS ==='
-          grep -RniE 'InitBoost|init_boost|BoostBuyAndBurn|boost_buy_and_burn' "$SRC/src" | head -n 260 || true
-
-          echo '=== RELEVANT GENERATED FILES ==='
-          for f in $(grep -RlE 'InitBoost|init_boost' "$SRC/src" | head -n 12); do
-            echo "--- $f"
-            grep -n -A90 -B25 -E 'InitBoost|init_boost' "$f" | head -n 300 || true
-          done
-
-          echo '=== FIXTURE MUTATION EXAMPLES ==='
-          for f in /tmp/vqr-gist/patch_local_vqr.rs /tmp/vqr-gist/build_pinned_snapshot_fixture.rs /tmp/vqr-gist/build_mainnet_vqr_fixture.rs; do
-            if [ -f "$f" ]; then echo "--- $f"; sed -n '1,360p' "$f"; fi
-          done
-
-          echo '=== GIST PROGRAM / FIXTURE ARTIFACTS ==='
-          find /tmp/vqr-gist -maxdepth 2 -type f | grep -Ei '(pump_amm|pump_fees|fixture|\.so$|\.b64$)' | sort || true
-
-          echo '=== SOLANA CLI AVAILABILITY ==='
-          command -v solana || true
-          solana --version || true
-
-          echo '=== RUNNER LLVM ==='
-          command -v clang || true
-          clang --version | head -n 2 || true
-          find /usr -type f -name 'libclang.so*' 2>/dev/null | head -n 20 || true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+      - run: npm install --ignore-scripts
+      - run: npm test
+        env:
+          SOLANA_RPC_URL: https://api.mainnet-beta.solana.com
