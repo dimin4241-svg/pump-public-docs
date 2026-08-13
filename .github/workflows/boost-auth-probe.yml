@@ -26,3 +26,4 @@ jobs:
       - run: npm test
         env:
           SOLANA_RPC_URL: https://api.mainnet-beta.solana.com
+          BOOST_POOL: GseMAnNDvntR5uFePZ51yZBXzNSn7GdFPkfHwfr6d77J
