@@ -1,4 +1,4 @@
-name: Pump migrate_v2 BOOST shape sample
+name: Pump migrate_v2 no-init retry classification
 
 on:
   push:
@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  sample:
+  classify:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -26,10 +26,7 @@ jobs:
         run: |
           npm init -y >/dev/null 2>&1
           npm install --no-save @solana/web3.js@1.98.4
-      - name: Sample recent migrate_v2 calls read-only
+      - name: Check BOOST-vault history for successful no-init calls
         env:
           SOLANA_RPC_URL: https://api.mainnet-beta.solana.com
-          WITHDRAW_AUTHORITY: 39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg
-          SIG_LIMIT: "100"
-          MIGRATE_LIMIT: "30"
-        run: node security/sample-migrate-v2-boost-shapes.cjs
+        run: node security/check-noinit-migrate-retries.cjs
