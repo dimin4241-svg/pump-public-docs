@@ -46,7 +46,8 @@ async function main() {
     ASSOCIATED_TOKEN_PROGRAM_ID,
   );
 
-  // Existing funded system account used as simulation-only fee payer.
+  // Existing funded system account used only inside simulateTransaction.
+  // No transaction is broadcast by this probe.
   const feePayer = new PublicKey("FFWtrEQ4B4PKQoVuHYzZq8FabGkVatYzDpEVHsK5rrhF");
   const feeInfo = await connection.getAccountInfo(feePayer, "confirmed");
   if (!feeInfo || !feeInfo.owner.equals(SystemProgram.programId)) throw new Error("bad simulation payer");
@@ -78,6 +79,7 @@ async function main() {
     return {
       label,
       creator: creator.toBase58(),
+      creatorLamports: (await connection.getAccountInfo(creator, "confirmed"))?.lamports ?? 0,
       err: result.value.err,
       unitsConsumed: result.value.unitsConsumed ?? null,
       logs: result.value.logs ?? [],
@@ -86,10 +88,16 @@ async function main() {
 
   const results = [
     await simulate("pool_creator", pool.creator),
-    await simulate("random_creator", random.publicKey),
+    await simulate("random_unfunded_creator", random.publicKey),
+    await simulate("funded_unrelated_creator", feePayer),
   ];
   console.log("INIT_BOOST_CREATOR_PROBE_START");
-  console.log(JSON.stringify({ pool: POOL_KEY.toBase58(), poolCreator: pool.creator.toBase58(), results }, null, 2));
+  console.log(JSON.stringify({
+    pool: POOL_KEY.toBase58(),
+    poolCreator: pool.creator.toBase58(),
+    boostVault: boostVault.toBase58(),
+    results,
+  }, null, 2));
   console.log("INIT_BOOST_CREATOR_PROBE_END");
 }
 
