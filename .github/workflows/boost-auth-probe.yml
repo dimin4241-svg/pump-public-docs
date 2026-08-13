@@ -1,4 +1,4 @@
-name: Inspect patched local validator helpers
+name: Inspect local validator harness patches
 
 on:
   push:
@@ -16,26 +16,15 @@ concurrency:
 jobs:
   inspect:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
-      - name: Prepare exact 0.1.10 harness tree and print helpers
+      - name: Print existing local-validator harness patches
         run: |
           git clone -q https://gist.github.com/dimin4241-svg/fa148417da8131fd3f4ac3a76bfbba7d.git /tmp/vqr-gist
-          curl -L -sS https://crates.io/api/v1/crates/pump-rust-client/0.1.10/download -o /tmp/pump.crate
-          mkdir -p /tmp/crate && tar -xf /tmp/pump.crate -C /tmp/crate
-          cd /tmp/crate/pump-rust-client-0.1.10
-          patch -p1 < /tmp/vqr-gist/local_mainnet_harness.patch >/dev/null
-          patch -p1 < /tmp/vqr-gist/local_validator_dependency_pins.patch >/dev/null
-          patch -p1 < /tmp/vqr-gist/natural_mainnet_harness_cargo.patch >/dev/null
-          echo '=== CARGO LOCAL VALIDATOR ==='
-          grep -n -A45 -B8 'local-validator' Cargo.toml | head -n 240 || true
-          echo '=== LOCAL VALIDATOR SOURCE CANDIDATES ==='
-          find . -maxdepth 4 -type f | grep -E 'local.validator|common.*rs|validator.*rs' | sort
-          echo '=== LOCAL VALIDATOR BIN ==='
-          for f in $(find . -maxdepth 4 -type f | grep -E 'local.validator.*\.rs$|validator.*\.rs$' | head -n 8); do echo "--- $f"; sed -n '1,360p' "$f"; done
-          echo '=== TEST COMMON ==='
-          find tests -maxdepth 2 -type f -name '*.rs' -print | sort
-          if [ -f tests/common/mod.rs ]; then sed -n '1,420p' tests/common/mod.rs; fi
-          echo '=== HARNESS PATCH START ==='
-          sed -n '1,220p' /tmp/vqr-gist/local_mainnet_harness.patch
+          echo '=== local_mainnet_harness.patch ==='
+          cat /tmp/vqr-gist/local_mainnet_harness.patch
+          echo '=== local_validator_dependency_pins.patch ==='
+          cat /tmp/vqr-gist/local_validator_dependency_pins.patch
+          echo '=== natural_mainnet_harness_cargo.patch ==='
+          cat /tmp/vqr-gist/natural_mainnet_harness_cargo.patch
