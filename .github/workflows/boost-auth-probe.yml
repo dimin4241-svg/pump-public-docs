@@ -33,4 +33,4 @@ jobs:
         env:
           SOLANA_RPC_URL: https://api.mainnet-beta.solana.com
           BOOST_POOL: J5qbay91WVMCpnBmDHMqQ789LVR3ENTuEkttp4669tZJ
-        run: node security/boost-auth-probe.mjs
+        run: node security/boost-auth-probe.cjs
