@@ -32,14 +32,6 @@ function flattenIdlAccounts(accounts, prefix='') {
   return out;
 }
 
-function printableIx(ix) {
-  return {
-    programId: ix.programId?.toBase58?.() || null,
-    accounts: (ix.accounts || []).map(x => x.toBase58()),
-    dataPrefix: ('data' in ix) ? Buffer.from(b58decode(ix.data)).subarray(0,8).toString('hex') : null,
-  };
-}
-
 async function main() {
   if (!RPC.includes('mainnet') && process.env.ALLOW_CUSTOM_RPC !== '1') throw new Error('read-only mainnet RPC expected');
   const pumpIdl = JSON.parse(fs.readFileSync('idl/pump.json','utf8'));
@@ -69,6 +61,7 @@ async function main() {
     key,
   }));
 
+  const logs = tx.meta?.logMessages || [];
   const result = {
     signature: SIG,
     slot: tx.slot,
@@ -85,10 +78,9 @@ async function main() {
       actualCount: ix.accounts.length,
       accounts: ix.accounts.map((x,i) => ({index:i,name:initNames[i] || `extra_${i-initNames.length}`,key:x.toBase58()})),
     })),
-    logsAroundBoost: (tx.meta?.logMessages || []).filter(x => /MigrateV2|InitBoost|BOOST|boost/i.test(x)),
+    logsAroundBoost: logs.filter(x => /MigrateV2|InitBoost|BOOST|boost|Program data:/i.test(x)),
   };
 
-  // Map each inner init_boost account back to the outer migrate account position.
   for (const call of result.initBoostCalls) {
     call.outerMigratePositions = call.accounts.map(a => ({
       initName: a.name,
