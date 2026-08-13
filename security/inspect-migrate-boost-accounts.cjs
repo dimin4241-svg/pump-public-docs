@@ -16,12 +16,19 @@ function b58decode(s) {
     if (v < 0) throw new Error('bad base58');
     let carry = v;
     for (let j = 0; j < bytes.length; j++) { carry += bytes[j] * 58; bytes[j] = carry & 255; carry >>= 8; }
-    while (carry) { bytes.push(carry & 255); carry >>= 8; }
+    while (carry) { bytes.push(carry & 255; carry >>= 8; }
   }
   for (let k = 0; k < s.length && s[k] === '1'; k++) bytes.push(0);
   return Buffer.from(bytes.reverse());
 }
 function matches(data, disc) { try { const b = b58decode(data); return b.length >= 8 && b.subarray(0,8).equals(disc); } catch { return false; } }
+function dataInfo(ix) {
+  if (!('data' in ix)) return null;
+  try {
+    const b = b58decode(ix.data);
+    return { len:b.length, prefix8:b.subarray(0,8).toString('hex'), base64:b.toString('base64') };
+  } catch { return null; }
+}
 
 function flattenIdlAccounts(accounts, prefix='') {
   const out = [];
@@ -52,7 +59,8 @@ async function main() {
   const migrateIx = outer[migrateIndex];
 
   const innerGroup = (tx.meta?.innerInstructions || []).find(x => x.index === migrateIndex);
-  const initIxs = (innerGroup?.instructions || []).filter(ix => 'data' in ix && ix.programId.equals(AMM) && matches(ix.data, INIT_BOOST));
+  const innerInstructions = innerGroup?.instructions || [];
+  const initIxs = innerInstructions.filter(ix => 'data' in ix && ix.programId.equals(AMM) && matches(ix.data, INIT_BOOST));
 
   const actualMigrateAccounts = migrateIx.accounts.map(x => x.toBase58());
   const named = actualMigrateAccounts.map((key, i) => ({
@@ -73,6 +81,12 @@ async function main() {
     migrateAccounts: named,
     initBoostInnerCount: initIxs.length,
     initBoostIdlRequiredCount: initNames.length,
+    allInner: innerInstructions.map((ix, index) => ({
+      index,
+      programId: ix.programId.toBase58(),
+      accountsCount: ix.accounts?.length ?? 0,
+      data: dataInfo(ix),
+    })),
     initBoostCalls: initIxs.map((ix, n) => ({
       n,
       actualCount: ix.accounts.length,
