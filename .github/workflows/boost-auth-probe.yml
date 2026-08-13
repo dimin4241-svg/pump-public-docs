@@ -1,4 +1,4 @@
-name: Pump migrate_v2 no-init retry classification
+name: Pump migrate_v2 27 vs 29 read-only differential
 
 on:
   push:
@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  classify:
+  differential:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -22,11 +22,17 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
-      - name: Install web3 dependency
+      - name: Install simulation dependencies
         run: |
           npm init -y >/dev/null 2>&1
-          npm install --no-save @solana/web3.js@1.98.4
-      - name: Check BOOST-vault history for successful no-init calls
+          npm install --no-save \
+            @solana/web3.js@1.98.4 \
+            bn.js@5.2.2 \
+            bs58@6.0.0
+      - name: Find an unmigrated state and compare 29-account vs 27-account migrate_v2
         env:
           SOLANA_RPC_URL: https://api.mainnet-beta.solana.com
-        run: node security/check-noinit-migrate-retries.cjs
+          WITHDRAW_AUTHORITY: 39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg
+          SIG_LIMIT: "160"
+          MAX_CANDIDATES: "20"
+        run: node security/live-unmigrated-27-vs-29.cjs
