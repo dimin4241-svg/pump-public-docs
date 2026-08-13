@@ -1,4 +1,4 @@
-name: PumpSwap BOOST atomicity history probe
+name: PumpSwap migrate_v2 BOOST account map
 
 on:
   push:
@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  atomicity:
+  map:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -26,9 +26,8 @@ jobs:
         run: |
           npm init -y >/dev/null 2>&1
           npm install --no-save @solana/web3.js@1.98.4
-      - name: Inspect boost-vault and pool history read-only
+      - name: Inspect known production migration read-only
         env:
           SOLANA_RPC_URL: https://api.mainnet-beta.solana.com
-          BOOST_POOL: J5qbay91WVMCpnBmDHMqQ789LVR3ENTuEkttp4669tZJ
-          BOOST_VAULT: 4bFNJ6sVpqYaF8jM8n62dNdNzH6G2bRTVcf6xag6UAiJ
-        run: node security/boost-atomicity-history.cjs
+          MIGRATE_SIG: dX8PkFMB874eCG9qV8gZJmEtZYmNDW8zggUju7UXBKG8u9yoBDMNZBH7Rfbqh2ZDGsCTUvETjvwZizJLpRZF97c
+        run: node security/inspect-migrate-boost-accounts.cjs
