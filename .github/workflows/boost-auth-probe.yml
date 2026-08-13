@@ -1,4 +1,4 @@
-name: PumpSwap BOOST harness inspect
+name: PumpSwap BOOST atomicity history probe
 
 on:
   push:
@@ -14,21 +14,21 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  inspect:
+  atomicity:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - name: Clone existing public reproduction Gist
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install web3 dependency
         run: |
-          git clone -q https://gist.github.com/dimin4241-svg/fa148417da8131fd3f4ac3a76bfbba7d.git /tmp/vqr-gist
-          echo '=== FILES ==='
-          find /tmp/vqr-gist -maxdepth 1 -type f -printf '%f\n' | sort
-          echo '=== HARNESS SYMBOLS ==='
-          grep -RniE 'ProgramTest|TestValidator|start_validator|pump_amm|program dump|fixture|snapshot|set_account|add_account|clone' /tmp/vqr-gist --include='*.rs' --include='*.patch' --include='*.md' | head -n 240 || true
-          echo '=== vqr_mainnet_exact.rs HEAD ==='
-          sed -n '1,260p' /tmp/vqr-gist/vqr_mainnet_exact.rs || true
-          echo '=== build_pinned_snapshot_fixture.rs ==='
-          sed -n '1,320p' /tmp/vqr-gist/build_pinned_snapshot_fixture.rs || true
-          echo '=== local_mainnet_harness.patch ==='
-          sed -n '1,360p' /tmp/vqr-gist/local_mainnet_harness.patch || true
+          npm init -y >/dev/null 2>&1
+          npm install --no-save @solana/web3.js@1.98.4
+      - name: Inspect boost-vault and pool history read-only
+        env:
+          SOLANA_RPC_URL: https://api.mainnet-beta.solana.com
+          BOOST_POOL: J5qbay91WVMCpnBmDHMqQ789LVR3ENTuEkttp4669tZJ
+          BOOST_VAULT: 4bFNJ6sVpqYaF8jM8n62dNdNzH6G2bRTVcf6xag6UAiJ
+        run: node security/boost-atomicity-history.cjs
