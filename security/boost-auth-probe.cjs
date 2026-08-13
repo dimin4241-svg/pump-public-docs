@@ -1,6 +1,8 @@
 const fs = require("node:fs");
 const { AnchorProvider, Program, Wallet } = require("@coral-xyz/anchor");
 const BN = require("bn.js");
+const bs58mod = require("bs58");
+const bs58 = bs58mod.default ?? bs58mod;
 const {
   ASSOCIATED_TOKEN_PROGRAM_ID,
   getAssociatedTokenAddressSync,
@@ -16,16 +18,29 @@ const {
 
 const RPC = process.env.SOLANA_RPC_URL ?? "https://api.mainnet-beta.solana.com";
 const PROGRAM_ID = new PublicKey("pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA");
-const POOL_KEY = new PublicKey(
-  process.env.BOOST_POOL ?? "J5qbay91WVMCpnBmDHMqQ789LVR3ENTuEkttp4669tZJ",
-);
+const PREFERRED_POOL = process.env.BOOST_POOL ? new PublicKey(process.env.BOOST_POOL) : null;
 const U64_MAX = new BN("18446744073709551615");
+const POOL_DISCRIMINATOR = Buffer.from([241, 154, 109, 4, 17, 177, 109, 188]);
+const VQR_OFFSET = 245;
 
 function pda(seed, ...extra) {
   return PublicKey.findProgramAddressSync(
     [Buffer.from(seed), ...extra.map((x) => x.toBuffer())],
     PROGRAM_ID,
   )[0];
+}
+
+function decodeI128LE(buf) {
+  if (!buf || buf.length < 16) return 0n;
+  let n = 0n;
+  for (let i = 15; i >= 0; i--) n = (n << 8n) | BigInt(buf[i]);
+  if ((n & (1n << 127n)) !== 0n) n -= 1n << 128n;
+  return n;
+}
+
+function readTokenAmount(info) {
+  if (!info || !info.data || info.data.length < 72) return 0n;
+  return info.data.readBigUInt64LE(64);
 }
 
 function normalize(value) {
@@ -50,6 +65,7 @@ function classify(sim) {
     "ConstraintRaw",
     "NotAuthorized",
     "Unauthorized",
+    "AccountNotInitialized",
     "BoostDisabled",
     "PoolCannotBoost",
     "ExceededSlippage",
@@ -62,7 +78,8 @@ function classify(sim) {
 }
 
 async function main() {
-  // Read-only security probe: no sendTransaction/sendRawTransaction exists here.
+  // Read-only security probe. There is intentionally no sendTransaction or
+  // sendRawTransaction call anywhere in this file.
   if (!RPC.includes("mainnet") && process.env.ALLOW_CUSTOM_RPC !== "1") {
     throw new Error("Safety stop: expected mainnet read/simulation RPC");
   }
@@ -77,31 +94,91 @@ async function main() {
 
   const globalConfigKey = pda("global_config");
   const eventAuthority = pda("__event_authority");
-  const pool = await program.account.pool.fetch(POOL_KEY);
   const globalConfig = await program.account.globalConfig.fetch(globalConfigKey);
-
-  const baseMintInfo = await connection.getAccountInfo(pool.baseMint, "confirmed");
-  const quoteMintInfo = await connection.getAccountInfo(pool.quoteMint, "confirmed");
-  if (!baseMintInfo || !quoteMintInfo) throw new Error("Mint account missing");
-  const baseTokenProgram = baseMintInfo.owner;
-  const quoteTokenProgram = quoteMintInfo.owner;
-
-  const boostVaultAuthority = pda("boost_vault", POOL_KEY);
-  const boostVault = getAssociatedTokenAddressSync(
-    pool.quoteMint,
-    boostVaultAuthority,
-    true,
-    quoteTokenProgram,
-    ASSOCIATED_TOKEN_PROGRAM_ID,
-  );
-  const boostVaultBalance = await connection.getTokenAccountBalance(boostVault, "confirmed").catch(() => null);
-
   const configuredBoostAuthority = globalConfig.boostAuthority;
   if (!(configuredBoostAuthority instanceof PublicKey)) {
     throw new Error("GlobalConfig.boostAuthority was not decoded as a PublicKey");
   }
 
-  const candidates = [
+  async function materializePool(poolKey) {
+    const pool = await program.account.pool.fetch(poolKey);
+    const quoteMintInfo = await connection.getAccountInfo(pool.quoteMint, "confirmed");
+    const baseMintInfo = await connection.getAccountInfo(pool.baseMint, "confirmed");
+    if (!quoteMintInfo || !baseMintInfo) return null;
+    const boostVaultAuthority = pda("boost_vault", poolKey);
+    const boostVault = getAssociatedTokenAddressSync(
+      pool.quoteMint,
+      boostVaultAuthority,
+      true,
+      quoteMintInfo.owner,
+      ASSOCIATED_TOKEN_PROGRAM_ID,
+    );
+    const vaultInfo = await connection.getAccountInfo(boostVault, "confirmed");
+    const vaultAmount = readTokenAmount(vaultInfo);
+    return {
+      poolKey,
+      pool,
+      baseTokenProgram: baseMintInfo.owner,
+      quoteTokenProgram: quoteMintInfo.owner,
+      boostVaultAuthority,
+      boostVault,
+      vaultInfo,
+      vaultAmount,
+    };
+  }
+
+  let target = null;
+  if (PREFERRED_POOL) {
+    const preferred = await materializePool(PREFERRED_POOL).catch(() => null);
+    if (preferred && preferred.vaultInfo && preferred.vaultAmount > 0n) target = preferred;
+  }
+
+  const discovery = [];
+  if (!target) {
+    const sliced = await connection.getProgramAccounts(PROGRAM_ID, {
+      commitment: "confirmed",
+      filters: [{ memcmp: { offset: 0, bytes: bs58.encode(POOL_DISCRIMINATOR) } }],
+      dataSlice: { offset: VQR_OFFSET, length: 16 },
+    });
+    const nonZeroVqr = sliced
+      .map(({ pubkey, account }) => ({ pubkey, vqr: decodeI128LE(account.data) }))
+      .filter((x) => x.vqr !== 0n)
+      .slice(0, 120);
+
+    for (const item of nonZeroVqr) {
+      const candidate = await materializePool(item.pubkey).catch(() => null);
+      if (!candidate) continue;
+      discovery.push({
+        pool: item.pubkey.toBase58(),
+        vqr: item.vqr.toString(),
+        boostVault: candidate.boostVault.toBase58(),
+        boostVaultExists: Boolean(candidate.vaultInfo),
+        boostVaultAmount: candidate.vaultAmount.toString(),
+      });
+      if (candidate.vaultInfo && candidate.vaultAmount > 0n) {
+        target = candidate;
+        break;
+      }
+    }
+  }
+
+  if (!target) {
+    console.log("BOOST_DISCOVERY_JSON_START");
+    console.log(JSON.stringify({ discovery }, null, 2));
+    console.log("BOOST_DISCOVERY_JSON_END");
+    throw new Error("No currently initialized non-empty BOOST vault found in scanned non-zero-VQR pools");
+  }
+
+  const pool = target.pool;
+  const poolKey = target.poolKey;
+  const boostVaultAuthority = target.boostVaultAuthority;
+  const boostVault = target.boostVault;
+  const baseTokenProgram = target.baseTokenProgram;
+  const quoteTokenProgram = target.quoteTokenProgram;
+  const vaultAmount = target.vaultAmount;
+  const quoteAmount = vaultAmount > 1_000_000n ? 1_000_000n : vaultAmount;
+
+  const feePayerCandidates = [
     globalConfig.admin,
     ...(globalConfig.protocolFeeRecipients ?? []),
     pool.creator,
@@ -109,7 +186,7 @@ async function main() {
   ].filter((x) => x instanceof PublicKey);
 
   let simulationFeePayer = null;
-  for (const candidate of candidates) {
+  for (const candidate of feePayerCandidates) {
     const info = await connection.getAccountInfo(candidate, "confirmed");
     if (info && info.owner.equals(SystemProgram.programId) && info.lamports > 1_000_000) {
       simulationFeePayer = candidate;
@@ -120,9 +197,9 @@ async function main() {
 
   async function build(authority, minBaseAmountBurned) {
     return program.methods
-      .boostBuyAndBurn(new BN(1), minBaseAmountBurned)
+      .boostBuyAndBurn(new BN(quoteAmount.toString()), minBaseAmountBurned)
       .accountsPartial({
-        pool: POOL_KEY,
+        pool: poolKey,
         authority,
         globalConfig: globalConfigKey,
         baseMint: pool.baseMint,
@@ -175,7 +252,8 @@ async function main() {
   const out = {
     rpc: RPC,
     programId: PROGRAM_ID.toBase58(),
-    pool: POOL_KEY.toBase58(),
+    pool: poolKey.toBase58(),
+    preferredPool: PREFERRED_POOL?.toBase58() ?? null,
     probeAuthority: randomAuthority.toBase58(),
     configuredBoostAuthority: configuredBoostAuthority.toBase58(),
     simulationFeePayer: simulationFeePayer.toBase58(),
@@ -186,7 +264,9 @@ async function main() {
       virtualQuoteReserves: pool.virtualQuoteReserves?.toString?.() ?? null,
     },
     boostVault: boostVault.toBase58(),
-    boostVaultBalance: boostVaultBalance?.value?.amount ?? null,
+    boostVaultBalance: vaultAmount.toString(),
+    quoteAmount: quoteAmount.toString(),
+    discovery,
     results,
   };
 
