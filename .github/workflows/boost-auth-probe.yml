@@ -1,4 +1,4 @@
-name: Pump migrate_v2 27 vs 29 read-only differential
+name: Inspect local BOOST harness commands
 
 on:
   push:
@@ -14,25 +14,17 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  differential:
+  inspect:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-      - name: Install simulation dependencies
+      - name: Clone existing reproduction gist and print exact setup
         run: |
-          npm init -y >/dev/null 2>&1
-          npm install --no-save \
-            @solana/web3.js@1.98.4 \
-            bn.js@5.2.2 \
-            bs58@6.0.0
-      - name: Find an unmigrated state and compare 29-account vs 27-account migrate_v2
-        env:
-          SOLANA_RPC_URL: https://api.mainnet-beta.solana.com
-          WITHDRAW_AUTHORITY: 39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg
-          SIG_LIMIT: "160"
-          MAX_CANDIDATES: "20"
-        run: node security/live-unmigrated-27-vs-29.cjs
+          git clone -q https://gist.github.com/dimin4241-svg/fa148417da8131fd3f4ac3a76bfbba7d.git /tmp/vqr-gist
+          echo '=== REPRODUCTION SETUP ==='
+          sed -n '1,120p' /tmp/vqr-gist/REPRODUCTION.md
+          echo '=== README SETUP ==='
+          sed -n '1,150p' /tmp/vqr-gist/README.md
+          echo '=== REPO / COMMIT / TOOLCHAIN REFERENCES ==='
+          grep -RniE 'git clone|git checkout|pump-rust-client|rustup|solana-install|agave|cargo test|local-validator|validator' /tmp/vqr-gist --include='*.md' --include='*.patch' | head -n 260 || true
