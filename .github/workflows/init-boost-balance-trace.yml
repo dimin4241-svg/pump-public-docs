@@ -1,0 +1,25 @@
+name: PumpSwap Init Boost Balance Trace
+
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths:
+      - audit/init_boost_balance_trace.mjs
+      - .github/workflows/init-boost-balance-trace.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  trace:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm install --no-save @solana/web3.js@1.98.4
+      - name: Trace signer and vault balance deltas across repeated init_boost
+        run: node audit/init_boost_balance_trace.mjs
