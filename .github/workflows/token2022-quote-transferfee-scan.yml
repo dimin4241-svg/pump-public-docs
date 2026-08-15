@@ -1,0 +1,129 @@
+name: token2022-quote-transferfee-scan
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths:
+      - '.github/workflows/token2022-quote-transferfee-scan.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: audit/boost-runtime-probe-20260815
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm install --no-save @solana/web3.js @solana/spl-token bs58 @pump-fun/pump-swap-sdk@1.19.0
+      - name: Scan every PumpSwap quote mint owner and extensions
+        shell: bash
+        run: |
+          cat > quote_scan.mjs <<'NODE'
+          import fs from 'node:fs';
+          import bs58pkg from 'bs58';
+          import { PublicKey } from '@solana/web3.js';
+          import {
+            TOKEN_2022_PROGRAM_ID,
+            unpackMint,
+            getTransferFeeConfig,
+            getExtensionTypes,
+            ExtensionType,
+          } from '@solana/spl-token';
+
+          const bs58 = bs58pkg.default ?? bs58pkg;
+          const AMM='pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA';
+          const T22=TOKEN_2022_PROGRAM_ID.toBase58();
+          const RPCS=[
+            'https://api.mainnet-beta.solana.com',
+            'https://solana-rpc.publicnode.com',
+            'https://solana.public-rpc.com',
+            'https://rpc.solanatracker.io/public',
+          ];
+          const idl=JSON.parse(fs.readFileSync('node_modules/@pump-fun/pump-swap-sdk/src/idl/pump_amm.json','utf8'));
+          const disc=Buffer.from(idl.accounts.find(x=>x.name.toLowerCase()==='pool').discriminator);
+          const disc58=bs58.encode(disc);
+          let rid=1;
+          const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          const json=x=>JSON.stringify(x,(_k,v)=>typeof v==='bigint'?v.toString():v instanceof PublicKey?v.toBase58():v,2);
+
+          async function callOne(url,method,params,maxAttempts=6){
+            let last;
+            for(let a=0;a<maxAttempts;a++){
+              try{
+                const r=await fetch(url,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-readonly/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:rid++,method,params})});
+                if(r.status===429||r.status>=500){last=new Error(`HTTP ${r.status}`);await sleep(700+600*a);continue;}
+                const j=await r.json();
+                if(j.error){last=new Error(`${JSON.stringify(j.error)}`);break;}
+                return j.result;
+              }catch(e){last=e;await sleep(700+600*a);}
+            }
+            throw last??new Error(`${method} failed`);
+          }
+          async function call(method,params){
+            let last;
+            for(const url of RPCS){try{return await callOne(url,method,params);}catch(e){last=e;console.log('RPC_FAIL',url,method,String(e).slice(0,220));}}
+            throw last;
+          }
+
+          console.log('PHASE pool quote inventory');
+          // Pool layout: 8 discriminator + 1 bump + 2 index + 32 creator + 32 base_mint = quote_mint at offset 75.
+          const pools=await call('getProgramAccounts',[AMM,{
+            commitment:'confirmed',encoding:'base64',
+            filters:[{dataSize:300},{memcmp:{offset:0,bytes:disc58}}],
+            dataSlice:{offset:75,length:32},
+          }]);
+          const quoteToPools=new Map();
+          for(const row of pools??[]){
+            const d=Buffer.from(row.account.data[0],'base64'); if(d.length!==32)continue;
+            const m=bs58.encode(d); const arr=quoteToPools.get(m)??[]; if(arr.length<20)arr.push(row.pubkey); quoteToPools.set(m,arr);
+          }
+          const mints=[...quoteToPools.keys()];
+          console.log('POOL_COUNT',pools?.length??0,'UNIQUE_QUOTE_MINTS',mints.length);
+          console.log('QUOTE_POOL_COUNTS',json([...quoteToPools.entries()].map(([mint,ps])=>({mint,poolSample:ps,count:null}))));
+
+          console.log('PHASE owner scan');
+          const t22=[]; const missing=[]; const ownerCounts=new Map();
+          for(let i=0;i<mints.length;i+=100){
+            const chunk=mints.slice(i,i+100);
+            const res=await call('getMultipleAccounts',[chunk,{encoding:'base64',commitment:'confirmed',dataSlice:{offset:0,length:0}}]);
+            for(let j=0;j<chunk.length;j++){
+              const ai=res.value[j]; if(!ai){missing.push(chunk[j]);continue;}
+              ownerCounts.set(ai.owner,(ownerCounts.get(ai.owner)??0)+1);
+              if(ai.owner===T22)t22.push(chunk[j]);
+            }
+          }
+          console.log('OWNER_COUNTS',json([...ownerCounts.entries()].sort((a,b)=>b[1]-a[1])));
+          console.log('MISSING_QUOTE_MINTS',missing.length,json(missing));
+          console.log('TOKEN2022_QUOTE_MINT_COUNT',t22.length);
+          console.log('TOKEN2022_QUOTE_MINTS',json(t22));
+
+          console.log('PHASE extension decode');
+          const details=[];
+          for(let i=0;i<t22.length;i+=80){
+            const chunk=t22.slice(i,i+80);
+            const res=await call('getMultipleAccounts',[chunk,{encoding:'base64',commitment:'confirmed'}]);
+            for(let j=0;j<chunk.length;j++){
+              const ai=res.value[j]; if(!ai)continue;
+              const local={data:Buffer.from(ai.data[0],'base64'),executable:ai.executable,lamports:ai.lamports,owner:new PublicKey(ai.owner),rentEpoch:ai.rentEpoch??0};
+              let extensions=[],cfg=null,error=null;
+              try{
+                const mint=unpackMint(new PublicKey(chunk[j]),local,TOKEN_2022_PROGRAM_ID);
+                extensions=getExtensionTypes(mint.tlvData).map(n=>ExtensionType[n]??String(n));
+                cfg=getTransferFeeConfig(mint);
+              }catch(e){error=String(e);}
+              details.push({mint:chunk[j],pools:quoteToPools.get(chunk[j]),extensions,transferFeeConfig:cfg,error});
+            }
+          }
+          const tf=details.filter(x=>x.transferFeeConfig!==null);
+          console.log('TOKEN2022_QUOTE_DETAILS',json(details));
+          console.log('TRANSFER_FEE_QUOTE_PUMPSWAP_COUNT',tf.length);
+          console.log('TRANSFER_FEE_QUOTE_PUMPSWAP_ROWS',json(tf));
+          NODE
+          node ./quote_scan.mjs
