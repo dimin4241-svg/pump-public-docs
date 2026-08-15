@@ -25,31 +25,29 @@ jobs:
           s=open('quote.log','r',encoding='utf-8-sig',errors='replace').read()
           s=re.sub(r'\x1b\[[0-9;]*m','',s)
           s='\n'.join(re.sub(r'^\d{4}-\d\d-\d\dT[^ ]+Z\s+','',x) for x in s.splitlines())
-          pats=[
+          for p in [
             r'POOL_COUNT\s+(\d+)\s+UNIQUE_QUOTE_MINTS\s+(\d+)',
             r'TOKEN2022_QUOTE_MINT_COUNT\s+(\d+)',
             r'TRANSFER_FEE_QUOTE_PUMPSWAP_COUNT\s+(\d+)',
             r'MISSING_QUOTE_MINTS\s+(\d+)',
-          ]
-          for p in pats:
-            m=re.search(p,s)
+          ]:
+            ms=list(re.finditer(p,s)); m=ms[-1] if ms else None
             print('MATCH',p,'=>',m.groups() if m else None)
-          a=s.find('TOKEN2022_QUOTE_DETAILS [')
+          marker='TOKEN2022_QUOTE_DETAILS '
+          a=s.rfind(marker+'[')
           b=s.find('\nTRANSFER_FEE_QUOTE_PUMPSWAP_COUNT',a)
           if a>=0 and b>a:
-            raw=s[a+len('TOKEN2022_QUOTE_DETAILS '):b].strip()
-            try:
-              rows=json.loads(raw)
-              counts={}
-              for r in rows:
-                for e in r.get('extensions') or []: counts[e]=counts.get(e,0)+1
-              print('QUOTE_EXTENSION_COUNTS',json.dumps(counts,sort_keys=True))
-              danger={'TransferFeeConfig','TransferHook','PermanentDelegate','PausableConfig','DefaultAccountState','NonTransferable','MintCloseAuthority','InterestBearingConfig','ScaledUiAmountConfig'}
-              dr=[r for r in rows if set(r.get('extensions') or []) & danger]
-              print('QUOTE_DANGEROUS_ROWS_COUNT',len(dr))
-              print('QUOTE_DANGEROUS_ROWS',json.dumps(dr,separators=(',',':')))
-            except Exception as e:
-              print('DETAIL_PARSE_ERROR',repr(e))
+            raw=s[a+len(marker):b].strip()
+            rows=json.loads(raw)
+            counts={}
+            for r in rows:
+              for e in r.get('extensions') or []: counts[e]=counts.get(e,0)+1
+            print('QUOTE_DETAIL_COUNT',len(rows))
+            print('QUOTE_EXTENSION_COUNTS',json.dumps(counts,sort_keys=True))
+            danger={'TransferFeeConfig','TransferHook','PermanentDelegate','PausableConfig','DefaultAccountState','NonTransferable','MintCloseAuthority','InterestBearingConfig','ScaledUiAmountConfig'}
+            dr=[r for r in rows if set(r.get('extensions') or []) & danger]
+            print('QUOTE_DANGEROUS_ROWS_COUNT',len(dr))
+            print('QUOTE_DANGEROUS_ROWS',json.dumps(dr,separators=(',',':')))
           else:
             print('DETAIL_MARKERS_NOT_FOUND',a,b)
           PY
