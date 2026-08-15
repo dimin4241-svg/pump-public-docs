@@ -22,7 +22,7 @@ jobs:
       - name: Download prior exhaustive base scan log
         shell: bash
         run: |
-          gh api -H 'Accept: application/vnd.github+json' repos/dimin4241-svg/pump-public-docs/actions/jobs/95029071790/logs > prior.log
+          gh api --allow-escape-sequences -H 'Accept: application/vnd.github+json' repos/dimin4241-svg/pump-public-docs/actions/jobs/95029071790/logs > prior.log
           wc -c prior.log
       - name: Parse dangerous rows and refresh live config
         shell: bash
@@ -35,11 +35,11 @@ jobs:
             getPermanentDelegate,getTransferHook,getPausableConfig,getMintCloseAuthority,
             getDefaultAccountState,getNonTransferable,getInterestBearingMintConfigState,getScaledUiAmountConfig,
           } from '@solana/spl-token';
-          let s=fs.readFileSync('prior.log','utf8').replace(/^\ufeff/,'');
+          let s=fs.readFileSync('prior.log','utf8').replace(/^\ufeff/,'').replace(/\x1b\[[0-9;]*m/g,'');
           s=s.split('\n').map(l=>l.replace(/^\d{4}-\d\d-\d\dT[^ ]+Z\s+/, '')).join('\n');
           const a=s.indexOf('TOKEN2022_DETAILS [');
           const b=s.indexOf('\nTRANSFER_FEE_PUMPSWAP_COUNT',a);
-          if(a<0||b<0)throw new Error('Could not locate TOKEN2022_DETAILS JSON in prior log');
+          if(a<0||b<0)throw new Error(`Could not locate TOKEN2022_DETAILS JSON in prior log: a=${a} b=${b}`);
           const raw=s.slice(a+'TOKEN2022_DETAILS '.length,b).trim();
           const details=JSON.parse(raw);
           console.log('PRIOR_T22_DETAILS_COUNT',details.length);
@@ -54,13 +54,13 @@ jobs:
           const sleep=ms=>new Promise(r=>setTimeout(r,ms));
           async function one(u,m,p,n=5){let e;for(let k=0;k<n;k++){try{const r=await fetch(u,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method:m,params:p})});if(r.status===429||r.status>=500){e=new Error('HTTP '+r.status);await sleep(500+500*k);continue}const x=await r.json();if(x.error){e=new Error(JSON.stringify(x.error));break}return x.result}catch(x){e=x;await sleep(500+500*k)}}throw e}
           async function rpc(m,p){let e;for(const u of RPCS){try{return await one(u,m,p)}catch(x){e=x}}throw e}
+          const enc=z=>z==null?null:JSON.parse(JSON.stringify(z,(_key,v)=>typeof v==='bigint'?v.toString():v?.toBase58?.()??v));
           const out=[];
           for(let i=0;i<candidates.length;i+=80){
             const chunk=candidates.slice(i,i+80),keys=chunk.map(x=>x.mint),r=await rpc('getMultipleAccounts',[keys,{encoding:'base64',commitment:'confirmed'}]);
             for(let k=0;k<chunk.length;k++){
               const ai=r.value[k];if(!ai)continue;const info={data:Buffer.from(ai.data[0],'base64'),executable:ai.executable,lamports:ai.lamports,owner:new PublicKey(ai.owner),rentEpoch:ai.rentEpoch??0};
               const mint=unpackMint(new PublicKey(keys[k]),info,TOKEN_2022_PROGRAM_ID);
-              const enc=z=>JSON.parse(JSON.stringify(z,(_key,v)=>typeof v==='bigint'?v.toString():v?.toBase58?.()??v));
               out.push({
                 mint:keys[k],pools:chunk[k].pools,
                 extensions:getExtensionTypes(mint.tlvData).map(n=>ExtensionType[n]??String(n)),
@@ -76,7 +76,7 @@ jobs:
             }
           }
           console.log('LIVE_DANGEROUS_ROWS',JSON.stringify(out,null,2));
-          const activeHooks=out.filter(x=>x.transferHook&&x.transferHook.programId&&x.transferHook.programId!=='11111111111111111111111111111111');
+          const activeHooks=out.filter(x=>x.transferHook?.programId&&x.transferHook.programId!=='11111111111111111111111111111111');
           const permanent=out.filter(x=>x.permanentDelegate);
           const pausable=out.filter(x=>x.pausable);
           console.log('LIVE_PERMANENT_DELEGATE_COUNT',permanent.length);
