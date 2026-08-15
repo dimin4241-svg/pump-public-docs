@@ -1,0 +1,18 @@
+name: Inspect Live PumpSwap PoolV2
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths:
+      - audit/inspect_live_poolv2.mjs
+      - .github/workflows/inspect-live-poolv2.yml
+  workflow_dispatch:
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: {node-version: '24'}
+      - run: npm install --no-save @pump-fun/pump-swap-sdk@1.19.0 bn.js@5.2.2
+      - run: node audit/inspect_live_poolv2.mjs
