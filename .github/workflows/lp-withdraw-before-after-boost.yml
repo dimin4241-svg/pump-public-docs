@@ -1,0 +1,25 @@
+name: PumpSwap LP Withdraw Before After BOOST
+
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths:
+      - audit/lp_withdraw_before_after_boost.mjs
+      - .github/workflows/lp-withdraw-before-after-boost.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  simulate-differential:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm install --no-save @solana/web3.js@1.98.4 @solana/spl-token@0.4.14
+      - name: Simulate LP withdrawal before and after creator-triggered init_boost
+        run: node audit/lp_withdraw_before_after_boost.mjs
