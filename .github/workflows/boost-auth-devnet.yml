@@ -34,4 +34,6 @@ jobs:
         working-directory: research/boost-auth
         env:
           DEVNET_RPC: https://api.devnet.solana.com
-        run: node devnet-sim.mjs
+        run: |
+          sed -i 's/EtWTRABZaYq6iMfeYKouRu166VU2xqa1/EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG/' devnet-sim.mjs
+          node devnet-sim.mjs
