@@ -1,0 +1,25 @@
+name: PumpSwap Direct Pool Burn Then BOOST
+
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths:
+      - audit/direct_pool_burn_then_boost.mjs
+      - .github/workflows/direct-pool-burn-then-boost.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm install --no-save @solana/web3.js@1.98.4 @solana/spl-token@0.4.14
+      - name: Simulate direct LP burn before init_boost
+        run: node audit/direct_pool_burn_then_boost.mjs
