@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import { BorshCoder } from "@coral-xyz/anchor";
 import { Connection, PublicKey, Transaction, TransactionInstruction } from "@solana/web3.js";
+import bs58 from "bs58";
 
 const RPC=process.env.DEVNET_RPC||"https://api.devnet.solana.com";
 const DEVNET_GENESIS="EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG";
@@ -25,10 +26,6 @@ const simData=(e)=>!e?.data?null:Buffer.from(Array.isArray(e.data)?e.data[0]:e.d
 function ata(owner,mint,tokenProgram=TOKEN_PROGRAM){return PublicKey.findProgramAddressSync([owner.toBuffer(),tokenProgram.toBuffer(),mint.toBuffer()],ASSOCIATED_TOKEN_PROGRAM)[0]}
 function keysOf(tx){const m=tx.transaction.message;if(m.staticAccountKeys)return[...m.staticAccountKeys.map(String),...(tx.meta?.loadedAddresses?.writable??[]).map(String),...(tx.meta?.loadedAddresses?.readonly??[]).map(String)];return(m.accountKeys??[]).map(x=>String(x.pubkey??x))}
 function ixsOf(tx){return tx.transaction.message.compiledInstructions??tx.transaction.message.instructions??[]}
-function dataOf(ix){if(ix.data instanceof Uint8Array||Buffer.isBuffer(ix.data))return Buffer.from(ix.data);if(typeof ix.data==="string"){try{return Buffer.from((await import("bs58")).default.decode(ix.data))}catch{return Buffer.from(ix.data,"base64")}}return Buffer.alloc(0)}
-
-// Synchronous bs58 helper without dynamic-await in parser.
-import bs58 from "bs58";
 function ixData(ix){if(ix.data instanceof Uint8Array||Buffer.isBuffer(ix.data))return Buffer.from(ix.data);if(typeof ix.data==="string"){try{return Buffer.from(bs58.decode(ix.data))}catch{return Buffer.from(ix.data,"base64")}}return Buffer.alloc(0)}
 function ixAccounts(ix){return Array.from(ix.accountKeyIndexes??ix.accounts??[])}
 
@@ -49,7 +46,6 @@ const [globalInfo,bcInfo,uvaInfo,userQuoteInfo,userBaseInfo]=await Promise.all([
 if(!globalInfo||!bcInfo||!uvaInfo||!userQuoteInfo)throw new Error("required current state missing");
 const global=coder.accounts.decode("Global",globalInfo.data);const bc=coder.accounts.decode("BondingCurve",bcInfo.data);const uvaBefore=coder.accounts.decode("UserVolumeAccumulator",uvaInfo.data);
 if(Boolean(bc.complete))throw new Error("curve completed since discovery");if(new PublicKey(field(bc,"quoteMint","quote_mint")).toBase58()!==EXPECTED_USDC)throw new Error("curve no longer USDC");
-// Refresh current protocol recipients; keep other historically canonical accounts.
 const normal=[new PublicKey(global.fee_recipient),...(global.fee_recipients??[]).map(x=>new PublicKey(x))];const buybacks=(global.buyback_fee_recipients??[]).map(x=>new PublicKey(x));
 accounts[6]=normal.find(x=>!x.equals(PublicKey.default))??accounts[6];accounts[7]=ata(accounts[6],quoteMint);accounts[8]=buybacks.find(x=>!x.equals(PublicKey.default))??accounts[8];accounts[9]=ata(accounts[8],quoteMint);
 const amountBase=1_000_000n;const data=Buffer.concat([disc,u64(amountBase),u64(18_446_744_073_709_551_615n)]);
