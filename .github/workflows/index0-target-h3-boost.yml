@@ -1,0 +1,25 @@
+name: PumpSwap Target Index0 H3 BOOST Probe
+
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths:
+      - audit/index0_target_h3_boost.mjs
+      - .github/workflows/index0-target-h3-boost.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  target:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm install --no-save @solana/web3.js@1.98.4 @solana/spl-token@0.4.14
+      - name: Simulate true-creator init_boost on live index-0 pool with circulating LP
+        run: node audit/index0_target_h3_boost.mjs
