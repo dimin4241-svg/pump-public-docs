@@ -1,0 +1,138 @@
+name: PumpSwap exhaustive Token-2022 base mint owner scan
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths:
+      - '.github/workflows/token2022-pumpswap-base-owner-scan.yml'
+  workflow_dispatch:
+
+jobs:
+  scan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install exact decode dependencies
+        run: npm install --no-save @solana/web3.js @solana/spl-token bs58 @pump-fun/pump-swap-sdk@1.19.0
+      - name: Exhaustive owner scan and extension decode
+        shell: bash
+        run: |
+          cat > scan_base_owners.mjs <<'NODE'
+          import fs from 'node:fs';
+          import bs58pkg from 'bs58';
+          import { PublicKey } from '@solana/web3.js';
+          import {
+            TOKEN_2022_PROGRAM_ID,
+            unpackMint,
+            getTransferFeeConfig,
+            getExtensionTypes,
+            ExtensionType,
+          } from '@solana/spl-token';
+
+          const bs58 = bs58pkg.default ?? bs58pkg;
+          const AMM='pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA';
+          const T22=TOKEN_2022_PROGRAM_ID.toBase58();
+          const RPCS=[
+            'https://api.mainnet-beta.solana.com',
+            'https://solana-rpc.publicnode.com',
+            'https://solana.public-rpc.com',
+          ];
+          const idl=JSON.parse(fs.readFileSync('node_modules/@pump-fun/pump-swap-sdk/src/idl/pump_amm.json','utf8'));
+          const disc=Buffer.from(idl.accounts.find(x=>x.name.toLowerCase()==='pool').discriminator);
+          const disc58=bs58.encode(disc);
+          let rid=1;
+          const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          const json=x=>JSON.stringify(x,(_k,v)=>typeof v==='bigint'?v.toString():v instanceof PublicKey?v.toBase58():v,2);
+
+          async function callOne(url,method,params,maxAttempts=7){
+            let last;
+            for(let a=0;a<maxAttempts;a++){
+              try{
+                const r=await fetch(url,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-readonly/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:rid++,method,params})});
+                if(r.status===429||r.status>=500){last=new Error(`HTTP ${r.status}`);await sleep(800+700*a);continue;}
+                const j=await r.json();
+                if(j.error){last=new Error(`${JSON.stringify(j.error)}`);break;}
+                return j.result;
+              }catch(e){last=e;await sleep(800+700*a);}
+            }
+            throw last??new Error(`${method} failed`);
+          }
+          async function call(method,params){
+            let last;
+            for(const url of RPCS){
+              try{return await callOne(url,method,params);}catch(e){last=e;}
+            }
+            throw last;
+          }
+
+          console.log('PHASE pool inventory');
+          const pools=await call('getProgramAccounts',[AMM,{
+            commitment:'confirmed',encoding:'base64',
+            filters:[{dataSize:300},{memcmp:{offset:0,bytes:disc58}}],
+            dataSlice:{offset:43,length:32},
+          }]);
+          const baseToPools=new Map();
+          for(const row of pools??[]){
+            const d=Buffer.from(row.account.data[0],'base64'); if(d.length!==32)continue;
+            const m=bs58.encode(d); const arr=baseToPools.get(m)??[]; if(arr.length<12)arr.push(row.pubkey); baseToPools.set(m,arr);
+          }
+          const mints=[...baseToPools.keys()];
+          console.log('POOL_COUNT',pools?.length??0,'UNIQUE_BASE_MINTS',mints.length);
+
+          console.log('PHASE owner scan');
+          const t22=[]; const missing=[]; const ownerCounts=new Map();
+          const groups=[]; for(let i=0;i<mints.length;i+=100)groups.push(mints.slice(i,i+100));
+          let done=0;
+          for(let wave=0;wave<groups.length;wave+=4){
+            const slice=groups.slice(wave,wave+4);
+            const results=await Promise.all(slice.map(async(chunk)=>{
+              let last;
+              for(const url of RPCS){
+                try{return await callOne(url,'getMultipleAccounts',[chunk,{encoding:'base64',commitment:'confirmed',dataSlice:{offset:0,length:0}}]);}
+                catch(e){last=e;}
+              }
+              throw last;
+            }));
+            for(let g=0;g<slice.length;g++){
+              const chunk=slice[g], vals=results[g].value;
+              for(let j=0;j<chunk.length;j++){
+                const ai=vals[j]; if(!ai){missing.push(chunk[j]);continue;}
+                ownerCounts.set(ai.owner,(ownerCounts.get(ai.owner)??0)+1);
+                if(ai.owner===T22)t22.push(chunk[j]);
+              }
+              done+=chunk.length;
+            }
+            if(wave%40===0||done===mints.length)console.log('OWNER_PROGRESS',done,'/',mints.length,'TOKEN2022',t22.length);
+            await sleep(500);
+          }
+          console.log('OWNER_COUNTS',json([...ownerCounts.entries()].sort((a,b)=>b[1]-a[1]).slice(0,20)));
+          console.log('MISSING_BASE_MINTS',missing.length);
+          console.log('TOKEN2022_BASE_MINT_COUNT',t22.length);
+          console.log('TOKEN2022_BASE_MINTS',json(t22));
+
+          console.log('PHASE extension decode');
+          const details=[];
+          for(let i=0;i<t22.length;i+=80){
+            const chunk=t22.slice(i,i+80);
+            const res=await call('getMultipleAccounts',[chunk,{encoding:'base64',commitment:'confirmed'}]);
+            for(let j=0;j<chunk.length;j++){
+              const ai=res.value[j]; if(!ai)continue;
+              const local={data:Buffer.from(ai.data[0],'base64'),executable:ai.executable,lamports:ai.lamports,owner:new PublicKey(ai.owner),rentEpoch:ai.rentEpoch??0};
+              let extensions=[],cfg=null,error=null;
+              try{
+                const mint=unpackMint(new PublicKey(chunk[j]),local,TOKEN_2022_PROGRAM_ID);
+                extensions=getExtensionTypes(mint.tlvData).map(n=>ExtensionType[n]??String(n));
+                cfg=getTransferFeeConfig(mint);
+              }catch(e){error=String(e);}
+              details.push({mint:chunk[j],pools:baseToPools.get(chunk[j]),extensions,transferFeeConfig:cfg,error});
+            }
+          }
+          const tf=details.filter(x=>x.transferFeeConfig!==null);
+          console.log('TOKEN2022_DETAILS',json(details));
+          console.log('TRANSFER_FEE_PUMPSWAP_COUNT',tf.length);
+          console.log('TRANSFER_FEE_PUMPSWAP_ROWS',json(tf));
+          NODE
+          node ./scan_base_owners.mjs
