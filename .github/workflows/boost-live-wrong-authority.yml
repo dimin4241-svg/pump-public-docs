@@ -1,0 +1,19 @@
+name: PumpSwap Live Wrong BOOST Authority
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths:
+      - audit/boost_live_wrong_authority_probe.mjs
+      - .github/workflows/boost-live-wrong-authority.yml
+  workflow_dispatch:
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: {node-version: '24'}
+      - run: npm install --no-save @solana/web3.js@1.98.4 @solana/spl-token@0.4.14
+      - name: Compare correct and arbitrary BOOST authorities after init_boost
+        run: node audit/boost_live_wrong_authority_probe.mjs
