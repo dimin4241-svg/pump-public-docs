@@ -1,0 +1,21 @@
+name: inspect-boost-liquidity-math
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/inspect-boost-liquidity-math.yml']
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: audit/boost-runtime-probe-20260815}
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-swap-sdk@1.19.0
+      - shell: bash
+        run: |
+          grep -Rni -B12 -A28 -E 'virtualQuoteReserves|virtual_quote_reserves' node_modules/@pump-fun/pump-swap-sdk/src/math node_modules/@pump-fun/pump-swap-sdk/src/sdk 2>/dev/null | head -n 700 || true
+          grep -Rni -B10 -A35 -E 'function withdraw|const withdraw|function deposit|const deposit|depositLpToken' node_modules/@pump-fun/pump-swap-sdk/src 2>/dev/null | head -n 500 || true
