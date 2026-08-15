@@ -1,0 +1,34 @@
+name: inspect-cashback-economic-surface
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/inspect-cashback-economic-surface.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: audit/boost-runtime-probe-20260815}
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-swap-sdk@1.19.0 @solana/web3.js @solana/spl-token
+      - shell: bash
+        run: |
+          echo '=== cashback source hits ==='
+          grep -Rni -E 'cashback|Cashback|userVolumeAccumulator|volume_accumulator|trackVolume' node_modules/@pump-fun/pump-swap-sdk/src | head -n 500 || true
+          echo '=== relevant math/events ==='
+          grep -Rni -E 'cashback|volume' node_modules/@pump-fun/pump-swap-sdk/src/math node_modules/@pump-fun/pump-swap-sdk/src/sdk 2>/dev/null | head -n 400 || true
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const idl=JSON.parse(fs.readFileSync('node_modules/@pump-fun/pump-swap-sdk/src/idl/pump_amm.json','utf8'));
+          for(const n of ['buy','sell','claim_cashback','claim_cashback_v2','sync_user_volume_accumulator','init_user_volume_accumulator']){
+            const x=idl.instructions.find(i=>i.name.toLowerCase()===n);if(x)console.log('IDL_INSTR',n,JSON.stringify(x,null,2));
+          }
+          for(const x of idl.events??[]){if(/buy|sell|cashback|volume/i.test(x.name))console.log('IDL_EVENT',x.name,JSON.stringify(x,null,2))}
+          for(const x of idl.types??[]){if(/cashback|volume|accumulator/i.test(x.name))console.log('IDL_TYPE',x.name,JSON.stringify(x,null,2))}
+          console.log('CASHBACK_ERRORS',JSON.stringify((idl.errors??[]).filter(e=>/cashback|volume|accumulator/i.test((e.name??'')+' '+(e.msg??''))),null,2));
+          NODE
