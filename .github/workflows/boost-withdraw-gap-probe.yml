@@ -1,0 +1,48 @@
+name: boost-withdraw-gap-probe
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/boost-withdraw-gap-probe.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: audit/boost-runtime-probe-20260815}
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-swap-sdk@1.19.0 @solana/web3.js @solana/spl-token bn.js
+      - name: Simulate LP withdrawals and recompute BOOST gap
+        shell: bash
+        run: |
+          cat > boost_withdraw_gap.mjs <<'NODE'
+          import BN from 'bn.js';
+          import {Connection,PublicKey,Transaction,SystemProgram} from '@solana/web3.js';
+          import {AccountLayout,getAssociatedTokenAddressSync,TOKEN_2022_PROGRAM_ID,TOKEN_PROGRAM_ID} from '@solana/spl-token';
+          import {OnlinePumpAmmSdk,PUMP_AMM_SDK,PUMP_AMM_PROGRAM_ID} from '@pump-fun/pump-swap-sdk';
+          const pool=new PublicKey('FpvoV2tqRxDW156CvATS6xFNuGewiHRX5JZneau1uFgF');
+          const RPCS=['https://api.mainnet-beta.solana.com','https://rpc.solanatracker.io/public','https://solana-rpc.publicnode.com','https://solana.public-rpc.com'];
+          const sleep=ms=>new Promise(r=>setTimeout(r,ms));let id=1;
+          async function raw(u,m,p,n=4){let e;for(let a=0;a<n;a++){try{const r=await fetch(u,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-simulation-only/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method:m,params:p})});if(r.status===429||r.status>=500){e=new Error('HTTP '+r.status);await sleep(400+600*a);continue}const x=await r.json();if(x.error){e=new Error(JSON.stringify(x.error));if(/No response|429|Too many/i.test(String(e))){await sleep(400+600*a);continue}throw e}return x.result}catch(x){e=x;await sleep(400+600*a)}}throw e}
+          async function call(m,p){let e;for(const u of RPCS){try{return await raw(u,m,p)}catch(x){e=x;console.log('RPC_FAIL',m,u,String(x).slice(0,180))}}throw e}
+          async function sim(tx,addresses,label){const bytes=tx.serialize({requireAllSignatures:false,verifySignatures:false});console.log(label,'RAW_BYTES',bytes.length,'SIGS',tx.signatures.map(x=>x.publicKey.toBase58()));let e;for(const u of RPCS){try{const x=await raw(u,'simulateTransaction',[bytes.toString('base64'),{encoding:'base64',sigVerify:false,replaceRecentBlockhash:true,commitment:'confirmed',accounts:{encoding:'base64',addresses}}],3);console.log(label,'SIM_RPC',u);return x.value}catch(x){e=x;console.log(label,'SIM_FAIL',u,String(x).slice(0,220))}}throw e}
+          let conn=null;for(const u of RPCS){try{const c=new Connection(u,'confirmed');await c.getLatestBlockhash('confirmed');conn=c;break}catch{}}if(!conn)throw new Error('no rpc');
+          const poolInfo=await conn.getAccountInfo(pool,'confirmed');if(!poolInfo)throw new Error('pool missing');const b=poolInfo.data;
+          const pk=(a,z)=>new PublicKey(b.subarray(a,z));function i128le(buf,o){let u=0n;for(let i=15;i>=0;i--)u=(u<<8n)+BigInt(buf[o+i]);return u&(1n<<127n)?u-(1n<<128n):u}
+          const baseMint=pk(43,75),quoteMint=pk(75,107),lpMint=pk(107,139),poolBase=pk(139,171),poolQuote=pk(171,203),V0=i128le(b,245);
+          const [baseVault0,quoteVault0,mintInfo,lpMintInfo]=await conn.getMultipleAccountsInfo([poolBase,poolQuote,baseMint,lpMint],'confirmed');
+          const amount=a=>a?AccountLayout.decode(a.data).amount:0n;const B0=amount(baseVault0),Q0=amount(quoteVault0),supply=BigInt((await conn.getTokenSupply(baseMint,'confirmed')).value.amount),external0=supply-B0,threshold0=Q0*B0/V0+1n,gap0=threshold0-external0;
+          console.log('PRE',JSON.stringify({pool:pool.toBase58(),baseMint:baseMint.toBase58(),quoteMint:quoteMint.toBase58(),lpMint:lpMint.toBase58(),poolBase:poolBase.toBase58(),poolQuote:poolQuote.toBase58(),len:b.length,B:B0.toString(),Q:Q0.toString(),V:V0.toString(),supply:supply.toString(),external:external0.toString(),threshold:threshold0.toString(),gap:gap0.toString(),lpMintOwner:lpMintInfo?.owner.toBase58()},null,2));
+          const largest=(await conn.getTokenLargestAccounts(lpMint,'confirmed')).value;let holder=null;
+          for(const x of largest){const ta=new PublicKey(x.address),ti=await conn.getAccountInfo(ta,'confirmed');if(!ti||ti.data.length<72)continue;const d=AccountLayout.decode(ti.data),owner=new PublicKey(d.owner),oi=await conn.getAccountInfo(owner,'confirmed');const candidate={tokenAccount:ta,owner,amount:BigInt(d.amount),ownerInfo:oi,onCurve:PublicKey.isOnCurve(owner.toBytes())};console.log('LP_HOLDER',JSON.stringify({tokenAccount:ta.toBase58(),owner:owner.toBase58(),amount:candidate.amount.toString(),onCurve:candidate.onCurve,ownerProgram:oi?.owner.toBase58(),lamports:oi?.lamports}));if(candidate.onCurve&&oi?.owner.equals(SystemProgram.programId)&&oi.lamports>2_000_000&&candidate.amount>0n){holder=candidate;break}}
+          if(!holder)throw new Error('no usable LP holder');console.log('SELECTED_HOLDER',holder.owner.toBase58(),holder.tokenAccount.toBase58(),holder.amount.toString());
+          const online=new OnlinePumpAmmSdk(conn);const state=await online.liquiditySolanaState(pool,holder.owner);
+          const totalLp=BigInt(state.pool.lpSupply.toString());console.log('LIQ_STATE',JSON.stringify({totalLp:totalLp.toString(),userLp:holder.amount.toString(),userBase:state.userBaseTokenAccount.toBase58(),userQuote:state.userQuoteTokenAccount.toBase58(),userPool:state.userPoolTokenAccount.toBase58()},null,2));
+          const fractions=[[1n,100n],[1n,10n],[1n,2n],[9n,10n],[1n,1n]];
+          for(const [num,den] of fractions){let lp=holder.amount*num/den;if(lp<1n)lp=1n;if(lp>holder.amount)lp=holder.amount;const inputs=PUMP_AMM_SDK.withdrawInputs(state,new BN(lp.toString()),1.0);console.log('WITHDRAW_INPUTS',num.toString()+'/'+den.toString(),JSON.stringify(Object.fromEntries(Object.entries(inputs).map(([k,v])=>[k,v?.toString?.()??v]))));let ixs=await PUMP_AMM_SDK.withdrawInstructions(state,new BN(lp.toString()),new BN('0'),new BN('0'));const widx=ixs.findIndex(ix=>ix.programId.equals(PUMP_AMM_PROGRAM_ID));if(widx<0)throw new Error('withdraw ix not found');ixs=ixs.slice(0,widx+1);const bh=await conn.getLatestBlockhash('confirmed');const tx=new Transaction({feePayer:holder.owner,recentBlockhash:bh.blockhash}).add(...ixs);const addresses=[pool,poolBase,poolQuote,state.userBaseTokenAccount,state.userQuoteTokenAccount,state.userPoolTokenAccount].map(x=>x.toBase58());const v=await sim(tx,addresses,'WITHDRAW_'+num+'_'+den);const rows=v.accounts??[],pb=rows[0]?Buffer.from(rows[0].data[0],'base64'):null;const B=rows[1]?AccountLayout.decode(Buffer.from(rows[1].data[0],'base64')).amount:null,Q=rows[2]?AccountLayout.decode(Buffer.from(rows[2].data[0],'base64')).amount:null,V=pb&&pb.length>=261?i128le(pb,245):null;let calc=null;if(B!==null&&Q!==null&&V!==null&&V>0n){const external=supply-B,threshold=Q*B/V+1n,gap=threshold-external;calc={B:B.toString(),Q:Q.toString(),V:V.toString(),external:external.toString(),threshold:threshold.toString(),gap:gap.toString(),reachable:external>=threshold,gapDelta:(gap-gap0).toString()}}const text=(v.logs??[]).join('\n');console.log('WITHDRAW_RESULT',JSON.stringify({fraction:num.toString()+'/'+den.toString(),lp:lp.toString(),err:v.err,withdrawReached:text.includes('Instruction: Withdraw'),calc,userBasePost:rows[3]?AccountLayout.decode(Buffer.from(rows[3].data[0],'base64')).amount.toString():null,userQuotePost:rows[4]?AccountLayout.decode(Buffer.from(rows[4].data[0],'base64')).amount.toString():null,userLpPost:rows[5]?AccountLayout.decode(Buffer.from(rows[5].data[0],'base64')).amount.toString():null},null,2));if(v.err)for(const l of v.logs??[])console.log('ERRLOG',l)}
+          NODE
+          node boost_withdraw_gap.mjs
