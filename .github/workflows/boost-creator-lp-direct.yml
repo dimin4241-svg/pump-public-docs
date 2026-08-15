@@ -1,0 +1,25 @@
+name: boost-creator-lp-direct
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/boost-creator-lp-direct.yml']
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: audit/boost-runtime-probe-20260815}
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @solana/web3.js @solana/spl-token
+      - shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import{PublicKey}from'@solana/web3.js';import{TOKEN_2022_PROGRAM_ID,getAssociatedTokenAddressSync,ASSOCIATED_TOKEN_PROGRAM_ID}from'@solana/spl-token';
+          const creator=new PublicKey('AHT991hB8aYQcVUkUx7MYcLh7bYVMjsNadiG5rMdu3Gs'),lp=new PublicKey('28EQ4ZxYemsyWyffL1R2fpQi3q86aUjDnVxFViwuf7H1'),supply=4193388282604n,ata=getAssociatedTokenAddressSync(lp,creator,true,TOKEN_2022_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID);console.log('CREATOR',creator.toBase58(),'LP_ATA',ata.toBase58());
+          const RPCS=['https://rpc.solanatracker.io/public','https://api.mainnet-beta.solana.com','https://solana-rpc.publicnode.com'];let id=1;async function req(u,m,p){const r=await fetch(u,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method:m,params:p})});const x=await r.json();if(x.error)throw Error(JSON.stringify(x.error));return x.result}async function call(m,p){let e;for(const u of RPCS){try{const x=await req(u,m,p);console.log('RPC',u);return x}catch(x){e=x;console.log('FAIL',u,String(x).slice(0,160))}}throw e}
+          const [ar,cr]=(await call('getMultipleAccounts',[[ata.toBase58(),creator.toBase58()],{encoding:'base64',commitment:'confirmed'}])).value;let amount=0n;if(ar){const d=Buffer.from(ar.data[0],'base64');amount=d.readBigUInt64LE(64)}console.log('RESULT',JSON.stringify({ataExists:!!ar,amount:amount.toString(),sharePpm:(amount*1000000n/supply).toString(),sharePct:Number(amount*1000000n/supply)/10000,creatorLamports:cr?.lamports,creatorProgram:cr?.owner},null,2));
+          NODE
