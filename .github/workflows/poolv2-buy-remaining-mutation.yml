@@ -1,0 +1,19 @@
+name: PumpSwap PoolV2 Buy Remaining Mutation
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths:
+      - 'audit/poolv2_buy_remaining_mutation_probe.mjs'
+      - '.github/workflows/poolv2-buy-remaining-mutation.yml'
+  workflow_dispatch:
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm install --no-save @pump-fun/pump-swap-sdk@1.19.0 bn.js@5.2.2 @solana/spl-token
+      - run: node audit/poolv2_buy_remaining_mutation_probe.mjs
