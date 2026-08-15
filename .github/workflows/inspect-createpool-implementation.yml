@@ -1,0 +1,27 @@
+name: inspect-createpool-implementation
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/inspect-createpool-implementation.yml']
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: audit/boost-runtime-probe-20260815}
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-swap-sdk@1.19.0
+      - shell: bash
+        run: |
+          echo '=== online create state ==='
+          sed -n '70,135p' node_modules/@pump-fun/pump-swap-sdk/src/sdk/onlinePumpAmm.ts
+          echo '=== offline create instructions ==='
+          sed -n '135,225p' node_modules/@pump-fun/pump-swap-sdk/src/sdk/offlinePumpAmm.ts
+          echo '=== types ==='
+          sed -n '195,245p' node_modules/@pump-fun/pump-swap-sdk/src/types/sdk.ts
+          echo '=== constructors ==='
+          sed -n '1,80p' node_modules/@pump-fun/pump-swap-sdk/src/sdk/onlinePumpAmm.ts
+          sed -n '90,150p' node_modules/@pump-fun/pump-swap-sdk/src/sdk/offlinePumpAmm.ts
