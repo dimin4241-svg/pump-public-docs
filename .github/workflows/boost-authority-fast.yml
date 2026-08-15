@@ -1,0 +1,35 @@
+name: PumpSwap Boost Authority Fast Scan
+
+on:
+  push:
+    branches:
+      - audit/boost-runtime-probe-20260815
+    paths:
+      - audit/boost_authority_scan.py
+      - .github/workflows/boost-authority-fast.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  authority-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      TX_BATCH: "20"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Read current GlobalConfig and scan boost authority history
+        run: python audit/boost_authority_scan.py
+      - name: Preserve structured result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: boost-authority-scan-result
+          path: boost_authority_scan_result.json
+          if-no-files-found: warn
+          retention-days: 7
