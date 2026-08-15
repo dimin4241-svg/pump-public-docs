@@ -1,0 +1,33 @@
+name: boost-withdraw-gap-probe-v2
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/boost-withdraw-gap-probe-v2.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: audit/boost-runtime-probe-20260815}
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-swap-sdk@1.19.0 @solana/web3.js @solana/spl-token bn.js
+      - shell: bash
+        run: |
+          cat > bwg2.mjs <<'NODE'
+          import BN from'bn.js';import{Connection,PublicKey,Transaction,SystemProgram}from'@solana/web3.js';import{AccountLayout}from'@solana/spl-token';import{OnlinePumpAmmSdk,PUMP_AMM_SDK,PUMP_AMM_PROGRAM_ID}from'@pump-fun/pump-swap-sdk';
+          const pool=new PublicKey('FpvoV2tqRxDW156CvATS6xFNuGewiHRX5JZneau1uFgF'),RPCS=['https://rpc.solanatracker.io/public','https://api.mainnet-beta.solana.com','https://solana-rpc.publicnode.com','https://solana.public-rpc.com'];let id=1;const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          async function one(u,m,p,n=4){let e;for(let a=0;a<n;a++){try{let r=await fetch(u,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method:m,params:p})});if(r.status===429||r.status>=500){e=new Error('HTTP '+r.status);await sleep(400+600*a);continue}let x=await r.json();if(x.error){e=new Error(JSON.stringify(x.error));if(/429|No response|Too many/i.test(String(e))){await sleep(400+600*a);continue}throw e}return x.result}catch(x){e=x;await sleep(400+600*a)}}throw e}
+          async function call(m,p){let e;for(const u of RPCS){try{let x=await one(u,m,p);console.log('RPC_OK',m,u);return x}catch(x){e=x;console.log('RPC_FAIL',m,u,String(x).slice(0,150))}}throw e}
+          async function ai(k){return(await call('getAccountInfo',[k.toBase58(),{encoding:'base64',commitment:'confirmed'}])).value}const local=r=>r?{data:Buffer.from(r.data[0],'base64'),owner:new PublicKey(r.owner),lamports:r.lamports,executable:r.executable,rentEpoch:r.rentEpoch??0}:null,amt=r=>r?Buffer.from(r.data[0],'base64').readBigUInt64LE(64):0n;function i128(b,o){let u=0n;for(let i=15;i>=0;i--)u=(u<<8n)+BigInt(b[o+i]);return u&(1n<<127n)?u-(1n<<128n):u}
+          const pr=await ai(pool),b=Buffer.from(pr.data[0],'base64'),pk=(a,z)=>new PublicKey(b.subarray(a,z)),baseMint=pk(43,75),quoteMint=pk(75,107),lpMint=pk(107,139),poolBase=pk(139,171),poolQuote=pk(171,203),V0=i128(b,245);const ar=(await call('getMultipleAccounts',[[poolBase,poolQuote],{encoding:'base64',commitment:'confirmed'}])).value,B0=amt(ar[0]),Q0=amt(ar[1]),supply=BigInt((await call('getTokenSupply',[baseMint.toBase58(),{commitment:'confirmed'}])).value.amount),gap0=Q0*B0/V0+1n-(supply-B0);console.log('PRE',JSON.stringify({baseMint:baseMint.toBase58(),quoteMint:quoteMint.toBase58(),lpMint:lpMint.toBase58(),B:B0.toString(),Q:Q0.toString(),V:V0.toString(),supply:supply.toString(),gap:gap0.toString()}));
+          const la=(await call('getTokenLargestAccounts',[lpMint.toBase58(),{commitment:'confirmed'}])).value;let holder=null;for(const x of la){const ta=new PublicKey(x.address),tr=await ai(ta);if(!tr)continue;const d=Buffer.from(tr.data[0],'base64'),owner=new PublicKey(d.subarray(32,64)),bal=d.readBigUInt64LE(64),or=await ai(owner);const ok=PublicKey.isOnCurve(owner.toBytes())&&or?.owner===SystemProgram.programId.toBase58()&&or.lamports>2e6&&bal>0n;console.log('LP_CAND',JSON.stringify({ta:ta.toBase58(),owner:owner.toBase58(),bal:bal.toString(),lamports:or?.lamports,program:or?.owner,ok}));if(ok){holder={ta,owner,bal};break}}if(!holder)throw Error('no usable holder');
+          let state=null,conn=null;for(const u of RPCS){try{const c=new Connection(u,'confirmed'),online=new OnlinePumpAmmSdk(c);state=await online.liquiditySolanaState(pool,holder.owner);conn=c;console.log('STATE_RPC',u);break}catch(e){console.log('STATE_FAIL',u,String(e).slice(0,200))}}if(!state)throw Error('no liquidity state');console.log('STATE',JSON.stringify({holder:holder.owner.toBase58(),lp:holder.bal.toString(),poolLp:state.pool.lpSupply.toString(),userLp:state.userPoolTokenAccount.toBase58()}));
+          async function sim(tx,addrs,label){const raw=tx.serialize({requireAllSignatures:false,verifySignatures:false});for(const u of RPCS){try{const x=await one(u,'simulateTransaction',[raw.toString('base64'),{encoding:'base64',sigVerify:false,replaceRecentBlockhash:true,commitment:'confirmed',accounts:{encoding:'base64',addresses:addrs}}],3);console.log(label,'SIM_RPC',u);return x.value}catch(e){console.log(label,'SIM_FAIL',u,String(e).slice(0,180))}}throw Error('all sim fail')}
+          for(const [n,d]of[[1n,100n],[1n,10n],[1n,2n],[9n,10n],[1n,1n]]){let lp=holder.bal*n/d;if(lp<1n)lp=1n;let ixs=await PUMP_AMM_SDK.withdrawInstructions(state,new BN(lp.toString()),new BN('0'),new BN('0')),wi=ixs.findIndex(x=>x.programId.equals(PUMP_AMM_PROGRAM_ID));ixs=ixs.slice(0,wi+1);const bh=(await call('getLatestBlockhash',[{commitment:'confirmed'}])).value,tx=new Transaction({feePayer:holder.owner,recentBlockhash:bh.blockhash}).add(...ixs),addrs=[pool,poolBase,poolQuote,state.userBaseTokenAccount,state.userQuoteTokenAccount,state.userPoolTokenAccount].map(x=>x.toBase58()),v=await sim(tx,addrs,'W_'+n+'_'+d),rows=v.accounts??[],pb=rows[0]?Buffer.from(rows[0].data[0],'base64'):null,B=rows[1]?Buffer.from(rows[1].data[0],'base64').readBigUInt64LE(64):null,Q=rows[2]?Buffer.from(rows[2].data[0],'base64').readBigUInt64LE(64):null,V=pb?i128(pb,245):null;let c=null;if(B!==null&&Q!==null&&V>0n){const ext=supply-B,thr=Q*B/V+1n,gap=thr-ext;c={B:B.toString(),Q:Q.toString(),V:V.toString(),external:ext.toString(),threshold:thr.toString(),gap:gap.toString(),gapDelta:(gap-gap0).toString(),reachable:ext>=thr}}console.log('RESULT',JSON.stringify({fraction:n+'/'+d,lp:lp.toString(),err:v.err,calc:c,logs:(v.logs??[]).filter(x=>/Instruction: Withdraw|AnchorError|failed:/.test(x))}))}
+          NODE
+          node bwg2.mjs
