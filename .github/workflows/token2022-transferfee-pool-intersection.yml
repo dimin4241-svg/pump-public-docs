@@ -1,0 +1,120 @@
+name: PumpSwap Token-2022 transfer-fee pool intersection
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths:
+      - '.github/workflows/token2022-transferfee-pool-intersection.yml'
+  workflow_dispatch:
+
+jobs:
+  scan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install exact decode dependencies
+        run: npm install --no-save @solana/web3.js @solana/spl-token bs58 @pump-fun/pump-swap-sdk@1.19.0
+      - name: Intersect live pools and Token-2022 extension mints
+        shell: bash
+        run: |
+          cat > scan_intersection.mjs <<'NODE'
+          import fs from 'node:fs';
+          import bs58pkg from 'bs58';
+          import { PublicKey } from '@solana/web3.js';
+          import {
+            TOKEN_2022_PROGRAM_ID,
+            unpackMint,
+            getTransferFeeConfig,
+            getExtensionTypes,
+            ExtensionType,
+          } from '@solana/spl-token';
+
+          const bs58 = bs58pkg.default ?? bs58pkg;
+          const RPCS = ['https://api.mainnet-beta.solana.com','https://rpc.ankr.com/solana'];
+          const AMM = 'pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA';
+          const idl = JSON.parse(fs.readFileSync('node_modules/@pump-fun/pump-swap-sdk/src/idl/pump_amm.json','utf8'));
+          const poolDisc = Buffer.from(idl.accounts.find(x=>x.name==='pool').discriminator);
+          const poolDisc58 = bs58.encode(poolDisc);
+          const mintAccountType58 = bs58.encode(Buffer.from([1])); // Token-2022 AccountType::Mint
+          let id = 1;
+
+          async function rpcOn(url, method, params) {
+            let last;
+            for (let attempt=0; attempt<7; attempt++) {
+              try {
+                const r = await fetch(url,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-readonly/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method,params})});
+                if (r.status===429 || r.status>=500) { last = new Error(`HTTP ${r.status}`); await new Promise(x=>setTimeout(x,1000*(attempt+1))); continue; }
+                const j = await r.json();
+                if (j.error) { last = new Error(JSON.stringify(j.error)); break; }
+                return j.result;
+              } catch(e) { last=e; await new Promise(x=>setTimeout(x,1000*(attempt+1))); }
+            }
+            throw last ?? new Error(`${method} failed`);
+          }
+          async function rpc(method, params) {
+            let last;
+            for (const url of RPCS) {
+              try { console.log('RPC_TRY',url,method); const out=await rpcOn(url,method,params); console.log('RPC_OK',url,method); return out; }
+              catch(e) { last=e; console.log('RPC_FAIL',url,method,String(e)); }
+            }
+            throw last;
+          }
+          const json = x => JSON.stringify(x,(_k,v)=>typeof v==='bigint'?v.toString():v instanceof PublicKey?v.toBase58():v,2);
+
+          console.log('POOL_DISC',poolDisc.toString('hex'),poolDisc58);
+          console.log('TOKEN2022_MINT_ACCOUNT_TYPE_FILTER',mintAccountType58);
+
+          // Fetch only the 32-byte base_mint slice from every current 300-byte PumpSwap Pool.
+          const pools = await rpc('getProgramAccounts',[AMM,{
+            commitment:'confirmed',encoding:'base64',
+            filters:[{dataSize:300},{memcmp:{offset:0,bytes:poolDisc58}}],
+            dataSlice:{offset:43,length:32},
+          }]);
+          const baseToPools = new Map();
+          for (const row of pools ?? []) {
+            const d = Buffer.from(row.account.data[0],'base64');
+            if (d.length!==32) continue;
+            const mint = bs58.encode(d);
+            const arr=baseToPools.get(mint)??[]; if(arr.length<8) arr.push(row.pubkey); baseToPools.set(mint,arr);
+          }
+          console.log('POOL_COUNT',pools?.length??0,'UNIQUE_BASE_MINTS',baseToPools.size);
+
+          // Token-2022 extension-bearing mints are padded past the base layouts and carry
+          // AccountType::Mint at byte 165. dataSlice=0 keeps this address inventory small.
+          const t22Mints = await rpc('getProgramAccounts',[TOKEN_2022_PROGRAM_ID.toBase58(),{
+            commitment:'confirmed',encoding:'base64',
+            filters:[{memcmp:{offset:165,bytes:mintAccountType58}}],
+            dataSlice:{offset:0,length:0},
+          }]);
+          console.log('TOKEN2022_EXTENSION_MINT_COUNT',t22Mints?.length??0);
+          const candidates = [];
+          for (const row of t22Mints ?? []) if (baseToPools.has(row.pubkey)) candidates.push(row.pubkey);
+          console.log('PUMPSWAP_TOKEN2022_EXTENSION_BASE_MINT_COUNT',candidates.length);
+          console.log('PUMPSWAP_TOKEN2022_EXTENSION_BASE_MINTS',json(candidates.slice(0,500)));
+
+          const details=[];
+          for(let i=0;i<candidates.length;i+=80){
+            const chunk=candidates.slice(i,i+80);
+            const res=await rpc('getMultipleAccounts',[chunk,{encoding:'base64',commitment:'confirmed'}]);
+            for(let j=0;j<chunk.length;j++){
+              const ai=res.value[j]; if(!ai) continue;
+              const local={data:Buffer.from(ai.data[0],'base64'),executable:ai.executable,lamports:ai.lamports,owner:new PublicKey(ai.owner),rentEpoch:ai.rentEpoch??0};
+              let decoded=null, cfg=null, extTypes=[], error=null;
+              try{
+                decoded=unpackMint(new PublicKey(chunk[j]),local,TOKEN_2022_PROGRAM_ID);
+                extTypes=getExtensionTypes(decoded.tlvData).map(n=>ExtensionType[n]??String(n));
+                cfg=getTransferFeeConfig(decoded);
+              }catch(e){error=String(e);}
+              details.push({mint:chunk[j],pools:baseToPools.get(chunk[j]),extensions:extTypes,transferFeeConfig:cfg,error});
+            }
+            await new Promise(x=>setTimeout(x,250));
+          }
+          const transferFee=details.filter(x=>x.transferFeeConfig!==null);
+          console.log('TOKEN2022_DETAILS',json(details));
+          console.log('TRANSFER_FEE_PUMPSWAP_COUNT',transferFee.length);
+          console.log('TRANSFER_FEE_PUMPSWAP_ROWS',json(transferFee));
+          NODE
+          node ./scan_intersection.mjs
