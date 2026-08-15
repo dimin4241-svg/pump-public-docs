@@ -1,0 +1,33 @@
+name: PumpSwap Init Boost Runtime Probe Fast
+
+on:
+  push:
+    branches:
+      - audit/boost-runtime-probe-20260815
+    paths:
+      - audit/init_boost_runtime_probe_fast.py
+      - .github/workflows/init-boost-runtime-probe-fast.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  init-probe-fast:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Batch-find prior init_boost and replay only in simulation
+        run: python audit/init_boost_runtime_probe_fast.py
+      - name: Preserve structured result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: init-boost-runtime-probe-fast-result
+          path: init_boost_runtime_probe_fast_result.json
+          if-no-files-found: warn
+          retention-days: 7
