@@ -1,0 +1,41 @@
+name: PumpSwap Boost Runtime Probe
+
+on:
+  push:
+    branches:
+      - audit/boost-runtime-probe-20260815
+    paths:
+      - audit/boost_runtime_scan.py
+      - .github/workflows/boost-runtime-probe.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  history-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      MAX_SIGNATURES: "6000"
+      TX_BATCH: "20"
+    steps:
+      - name: Checkout audit branch
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Scan finalized PumpSwap history for boost_buy_and_burn
+        run: python audit/boost_runtime_scan.py
+
+      - name: Preserve structured result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: boost-runtime-scan-result
+          path: boost_runtime_scan_result.json
+          if-no-files-found: warn
+          retention-days: 7
