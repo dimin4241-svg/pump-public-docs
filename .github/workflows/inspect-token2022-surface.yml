@@ -1,0 +1,30 @@
+name: Inspect PumpSwap Token2022 Surface
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths:
+      - '.github/workflows/inspect-token2022-surface.yml'
+  workflow_dispatch:
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install current SDK
+        run: |
+          echo "LATEST=$(npm view @pump-fun/pump-swap-sdk version)"
+          npm install --no-save @pump-fun/pump-swap-sdk@latest
+      - name: Inspect Token-2022 and transfer-extension handling
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '=== package version ==='
+          node -p "require('./node_modules/@pump-fun/pump-swap-sdk/package.json').version"
+          echo '=== transfer fee / hook / token2022 references ==='
+          grep -RniE -C 8 --exclude='*.map' 'transfer.?fee|transfer.?hook|TOKEN_2022|token2022|Token2022|withheld|extension' node_modules/@pump-fun/pump-swap-sdk/src node_modules/@pump-fun/pump-swap-sdk/dist 2>/dev/null | head -n 1200 || true
+          echo '=== create/deposit/withdraw swap transfer references ==='
+          grep -RniE -C 10 --exclude='*.map' 'baseTokenProgram|quoteTokenProgram|createPool|deposit|withdraw|transferChecked|transferInstruction' node_modules/@pump-fun/pump-swap-sdk/src/sdk 2>/dev/null | head -n 1600 || true
