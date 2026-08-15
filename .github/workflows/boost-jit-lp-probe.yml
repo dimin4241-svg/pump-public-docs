@@ -21,5 +21,16 @@ jobs:
         with:
           node-version: '24'
       - run: npm install --no-save @solana/web3.js@1.98.4 @solana/spl-token@0.4.14
+      - name: Patch simulation setup so a system wallet pays only the canonical vault rent
+        shell: python
+        run: |
+          from pathlib import Path
+          p = Path('audit/boost_jit_lp_probe.mjs')
+          s = p.read_text()
+          old = "const initSetup=[];if(!creatorV||creatorV.owner!==SystemProgram.programId.toBase58())throw new Error('canonical pool creator not a system account in this control');if(creatorV.lamports<3_000_000)initSetup.push(SystemProgram.transfer({fromPubkey:user,toPubkey:creator,lamports:5_000_000}));initSetup.push(initIx(p,creator,qProg,va,vault));"
+          new = "console.log('CREATOR_ACCOUNT',JSON.stringify({owner:creatorV?.owner??null,lamports:creatorV?.lamports??null},null,2));const initSetup=[createAssociatedTokenAccountIdempotentInstruction(user,vault,va,WSOL,qProg,ASSOCIATED_TOKEN_PROGRAM_ID),initIx(p,creator,qProg,va,vault)];"
+          if old not in s:
+              raise SystemExit('expected initSetup source not found')
+          p.write_text(s.replace(old,new))
       - name: Simulate LP entry around a BOOST buy-and-burn without broadcasting
         run: node audit/boost_jit_lp_probe.mjs
