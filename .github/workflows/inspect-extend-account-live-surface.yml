@@ -1,0 +1,35 @@
+name: inspect-extend-account-live-surface
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/inspect-extend-account-live-surface.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: audit/boost-runtime-probe-20260815}
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-swap-sdk@1.19.0 @solana/web3.js @solana/spl-token bs58
+      - shell: bash
+        run: |
+          echo '=== extend constants / SDK ==='
+          grep -Rni -E 'POOL_ACCOUNT_NEW_SIZE|POOL_ACCOUNT.*SIZE|extendAccount|setCoinCreator' node_modules/@pump-fun/pump-swap-sdk/src | head -n 300 || true
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';import bs58pkg from 'bs58';import{PUMP_AMM_PROGRAM_ID}from'@pump-fun/pump-swap-sdk';
+          const bs58=bs58pkg.default??bs58pkg;const idl=JSON.parse(fs.readFileSync('node_modules/@pump-fun/pump-swap-sdk/src/idl/pump_amm.json','utf8'));
+          for(const n of ['extend_account','set_coin_creator','create_pool']){const x=idl.instructions.find(i=>i.name.toLowerCase()===n);console.log('IDL_'+n.toUpperCase(),JSON.stringify(x,null,2))}
+          console.log('RELEVANT_ERRORS',JSON.stringify((idl.errors??[]).filter(e=>/extend|creator|pool|account|size/i.test(e.name+' '+e.msg)),null,2));
+          const disc58=bs58.encode(Buffer.from(idl.accounts.find(x=>x.name.toLowerCase()==='pool').discriminator));
+          const RPCS=['https://api.mainnet-beta.solana.com','https://rpc.solanatracker.io/public','https://solana-rpc.publicnode.com','https://solana.public-rpc.com'];let id=1;const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          async function one(u,m,p,n=4){let e;for(let a=0;a<n;a++){try{const r=await fetch(u,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method:m,params:p})});if(r.status===429||r.status>=500){e=new Error('HTTP '+r.status);await sleep(500+600*a);continue}const x=await r.json();if(x.error){e=new Error(JSON.stringify(x.error));break}return x.result}catch(x){e=x;await sleep(500+600*a)}}throw e}
+          async function call(m,p){let e;for(const u of RPCS){try{return await one(u,m,p)}catch(x){e=x;console.log('RPC_FAIL',u,m,String(x).slice(0,180))}}throw e}
+          const rows=await call('getProgramAccounts',[PUMP_AMM_PROGRAM_ID.toBase58(),{commitment:'confirmed',encoding:'base64',filters:[{memcmp:{offset:0,bytes:disc58}}],dataSlice:{offset:0,length:0}}]);
+          const counts={};let noSpace=0;for(const r of rows??[]){const s=r.account.space;if(typeof s==='number')counts[s]=(counts[s]??0)+1;else noSpace++}
+          console.log('POOL_DISCRIMINATOR_ACCOUNTS',rows.length,'SPACE_COUNTS',JSON.stringify(counts),'NO_SPACE',noSpace);
+          NODE
