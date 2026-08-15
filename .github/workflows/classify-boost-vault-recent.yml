@@ -1,0 +1,30 @@
+name: PumpSwap Classify Boost Vault Recent
+
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths:
+      - audit/classify_boost_vault_recent.py
+      - .github/workflows/classify-boost-vault-recent.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  classify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python audit/classify_boost_vault_recent.py
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: classify-boost-vault-recent-result
+          path: classify_boost_vault_recent_result.json
+          if-no-files-found: warn
+          retention-days: 7
