@@ -1,0 +1,39 @@
+name: Inspect PumpSwap BOOST Sell Math
+
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths:
+      - .github/workflows/inspect-boost-sell-math.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm install --no-save @pump-fun/pump-swap-sdk@1.19.0
+      - name: Print current sell implementation, tests, and IDL
+        shell: bash
+        run: |
+          set -euo pipefail
+          PKG=node_modules/@pump-fun/pump-swap-sdk
+          echo '=== sell source ==='
+          cat "$PKG/src/sdk/sell.ts" || true
+          echo '=== offline sell / virtual reserve contexts ==='
+          grep -RniE -C 14 --exclude='*.map' 'sellQuote|sell.*quote|virtualQuote|virtual_quote|real.*quote|BoostSell|quoteAmountOut' "$PKG/src" || true
+          echo '=== sell tests ==='
+          find "$PKG/src" -type f -iname '*sell*' -maxdepth 5 -print -exec sh -c 'echo ==== $1; cat "$1"' _ {} \; || true
+          echo '=== current sell IDL and BOOST errors ==='
+          node - <<'NODE'
+          const idl=require('./idl/pump_amm.json');
+          console.log(JSON.stringify(idl.instructions.find(x=>x.name==='sell'),null,2));
+          console.log(JSON.stringify(idl.errors.filter(e=>/boost|virtual|real reserves/i.test(`${e.name} ${e.msg}`)),null,2));
+          NODE
