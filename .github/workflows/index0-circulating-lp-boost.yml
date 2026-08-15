@@ -1,0 +1,25 @@
+name: PumpSwap Index0 Circulating LP BOOST Probe
+
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths:
+      - audit/index0_circulating_lp_boost_probe.mjs
+      - .github/workflows/index0-circulating-lp-boost.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm install --no-save @solana/web3.js@1.98.4 @solana/spl-token@0.4.14 bs58@6.0.0
+      - name: Find index-0 WSOL pools with circulating LP and simulate true-creator init_boost
+        run: node audit/index0_circulating_lp_boost_probe.mjs
