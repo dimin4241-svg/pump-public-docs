@@ -1,0 +1,26 @@
+name: parse-first-boost-withdraw-pre
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/parse-first-boost-withdraw-pre.yml']
+permissions:
+  contents: read
+  actions: read
+jobs:
+  parse:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: audit/boost-runtime-probe-20260815}
+      - shell: bash
+        run: |
+          gh api --allow-escape-sequences repos/dimin4241-svg/pump-public-docs/actions/jobs/95062598952/logs > x.log
+          python3 - <<'PY'
+          import re
+          s=open('x.log',errors='replace').read();s=re.sub(r'\x1b\[[0-9;]*m','',s)
+          for line in s.splitlines():
+            if any(k in line for k in ['PRE {','lpMint','LP_HOLDER','SELECTED_HOLDER','getTokenLargestAccounts']): print(line)
+          PY
