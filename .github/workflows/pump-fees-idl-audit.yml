@@ -1,0 +1,26 @@
+name: Pump Fees IDL differential audit
+
+on:
+  push:
+    branches:
+      - research/boost-auth-devnet
+    paths:
+      - "research/pump-fees-idl-audit/**"
+      - "idl/pump_fees.json"
+      - ".github/workflows/pump-fees-idl-audit.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Print structural candidates
+        working-directory: research/pump-fees-idl-audit
+        run: node audit.mjs
