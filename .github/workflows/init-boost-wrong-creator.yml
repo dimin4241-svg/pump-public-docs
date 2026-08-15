@@ -1,0 +1,19 @@
+name: PumpSwap Wrong InitBoost Creator
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths:
+      - audit/init_boost_wrong_creator_probe.mjs
+      - .github/workflows/init-boost-wrong-creator.yml
+  workflow_dispatch:
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: {node-version: '24'}
+      - run: npm install --no-save @solana/web3.js@1.98.4 @solana/spl-token@0.4.14
+      - name: Compare true and arbitrary init_boost creators
+        run: node audit/init_boost_wrong_creator_probe.mjs
