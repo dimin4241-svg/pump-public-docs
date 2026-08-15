@@ -1,0 +1,77 @@
+name: all-live-boost-reachability
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/all-live-boost-reachability.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  scan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: audit/boost-runtime-probe-20260815}
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-swap-sdk@1.19.0 @solana/web3.js @solana/spl-token bs58
+      - name: Scan every live BOOST pool against physical-reserve threshold
+        shell: bash
+        run: |
+          cat > all_boost_reachability.mjs <<'NODE'
+          import fs from 'node:fs';
+          import bs58pkg from 'bs58';
+          import {PublicKey} from '@solana/web3.js';
+          import {PUMP_AMM_PROGRAM_ID} from '@pump-fun/pump-swap-sdk';
+          const bs58=bs58pkg.default??bs58pkg;
+          const sizes=[261,301];
+          const RPCS=['https://api.mainnet-beta.solana.com','https://rpc.solanatracker.io/public','https://solana-rpc.publicnode.com','https://solana.public-rpc.com'];
+          let id=1;
+          const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          async function one(u,m,p,n=4){let e;for(let a=0;a<n;a++){try{const r=await fetch(u,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-readonly/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method:m,params:p})});if(r.status===429||r.status>=500){e=new Error('HTTP '+r.status);await sleep(400+600*a);continue}const x=await r.json();if(x.error){e=new Error(JSON.stringify(x.error));if(/No response|429|Too many|temporarily/i.test(String(e))){await sleep(400+600*a);continue}throw e}return x.result}catch(x){e=x;await sleep(400+600*a)}}throw e}
+          async function call(m,p){let e;for(const u of RPCS){try{return await one(u,m,p)}catch(x){e=x;console.log('RPC_FAIL',m,u,String(x).slice(0,180))}}throw e}
+          async function batchAccounts(keys,opts={}){const out=[];for(let i=0;i<keys.length;i+=100){const ch=keys.slice(i,i+100);let got=null,last;for(const u of RPCS){try{got=await one(u,'getMultipleAccounts',[ch,{encoding:'base64',commitment:'confirmed',...opts}],3);break}catch(e){last=e}}if(!got)throw last;out.push(...got.value);if(i%2000===0)console.log('BATCH_PROGRESS',i,'/',keys.length);await sleep(80)}return out}
+          function i128le(b,o){let u=0n;for(let i=15;i>=0;i--)u=(u<<8n)+BigInt(b[o+i]);return u&(1n<<127n)?u-(1n<<128n):u}
+          const idl=JSON.parse(fs.readFileSync('node_modules/@pump-fun/pump-swap-sdk/src/idl/pump_amm.json','utf8'));
+          const disc58=bs58.encode(Buffer.from(idl.accounts.find(x=>x.name.toLowerCase()==='pool').discriminator));
+          // Pass 1: identify every BOOST pool cheaply from the virtual-reserve field only.
+          const boostKeys=[];
+          for(const size of sizes){
+            const rows=await call('getProgramAccounts',[PUMP_AMM_PROGRAM_ID.toBase58(),{commitment:'confirmed',encoding:'base64',filters:[{dataSize:size},{memcmp:{offset:0,bytes:disc58}}],dataSlice:{offset:245,length:16}}]);
+            let n=0;
+            for(const r of rows){const d=Buffer.from(r.account.data[0],'base64');if(d.length!==16)continue;const v=i128le(d,0);if(v!==0n){n++;boostKeys.push({pool:r.pubkey,size,v})}}
+            console.log('BOOST_KEYS_BY_SIZE',JSON.stringify({size,totalRows:rows.length,boosted:n}));
+          }
+          console.log('BOOST_KEY_COUNT',boostKeys.length);
+          // Pass 2: full Pool state for the BOOST subset only.
+          const poolRows=await batchAccounts(boostKeys.map(x=>x.pool));
+          const pools=[];const vaultKeys=[];const mintSet=new Set();
+          const pk=(b,a,z)=>new PublicKey(b.subarray(a,z)).toBase58();
+          for(let i=0;i<boostKeys.length;i++){
+            const a=poolRows[i];if(!a)continue;const b=Buffer.from(a.data[0],'base64');if(b.length<261)continue;
+            const v=i128le(b,245),baseMint=pk(b,43,75),quoteMint=pk(b,75,107),poolBase=pk(b,139,171),poolQuote=pk(b,171,203);
+            const row={pool:boostKeys[i].pool,size:b.length,v,baseMint,quoteMint,poolBase,poolQuote,creator:pk(b,11,43),coinCreator:b.length>=243?pk(b,211,243):null,isMayhem:b.length>=244?b[243]:null,isCashback:b.length>=245?b[244]:null};
+            pools.push(row);vaultKeys.push(poolBase,poolQuote);mintSet.add(baseMint);
+          }
+          console.log('FULL_BOOST_ROWS',pools.length,'UNIQUE_BASE_MINTS',mintSet.size);
+          // Pool physical reserves.
+          const vaultRows=await batchAccounts(vaultKeys);
+          const tokenAmount=a=>{if(!a)return null;const d=Buffer.from(a.data[0],'base64');return d.length>=72?d.readBigUInt64LE(64):null};
+          for(let i=0;i<pools.length;i++){pools[i].B=tokenAmount(vaultRows[2*i]);pools[i].Q=tokenAmount(vaultRows[2*i+1]);}
+          // Mint supply: common 82-byte mint prefix works for SPL Token and Token-2022.
+          const mints=[...mintSet];const mintRows=await batchAccounts(mints);const supplyByMint=new Map();const ownerByMint=new Map();
+          for(let i=0;i<mints.length;i++){const a=mintRows[i];if(!a)continue;const d=Buffer.from(a.data[0],'base64');if(d.length<44)continue;supplyByMint.set(mints[i],d.readBigUInt64LE(36));ownerByMint.set(mints[i],a.owner)}
+          const results=[];let bad=0,negativeV=0,zeroV=0;
+          for(const p of pools){const supply=supplyByMint.get(p.baseMint);if(p.B==null||p.Q==null||supply==null){bad++;continue}if(p.v===0n){zeroV++;continue}if(p.v<0n){negativeV++;results.push({...p,supply,external:supply-p.B,threshold:null,gap:null,reachable:null,ratioPpm:null});continue}const external=supply>=p.B?supply-p.B:0n;const threshold=(p.Q*p.B)/p.v+1n;const gap=threshold-external;const ratioPpm=threshold>0n?external*1_000_000n/threshold:0n;results.push({...p,supply,external,threshold,gap,reachable:external>=threshold,ratioPpm})}
+          const pos=results.filter(x=>x.threshold!==null);
+          const reachable=pos.filter(x=>x.reachable);
+          pos.sort((a,b)=>a.gap<b.gap?-1:a.gap>b.gap?1:0);
+          const byRatio=[...pos].sort((a,b)=>a.ratioPpm>b.ratioPpm?-1:a.ratioPpm<b.ratioPpm?1:0);
+          const enc=x=>({pool:x.pool,size:x.size,baseMint:x.baseMint,quoteMint:x.quoteMint,B:x.B.toString(),Q:x.Q.toString(),V:x.v.toString(),supply:x.supply.toString(),external:x.external.toString(),threshold:x.threshold.toString(),gap:x.gap.toString(),reachable:x.reachable,ratioPct:Number(x.ratioPpm)/10000,isCashback:x.isCashback,isMayhem:x.isMayhem,creator:x.creator,coinCreator:x.coinCreator,baseMintOwner:ownerByMint.get(x.baseMint)});
+          console.log('SUMMARY',JSON.stringify({boostKeys:boostKeys.length,fullRows:pools.length,computed:pos.length,bad,negativeV,zeroV,reachable:reachable.length,minGap:pos.length?pos[0].gap.toString():null,maxRatioPct:byRatio.length?Number(byRatio[0].ratioPpm)/10000:null},null,2));
+          console.log('REACHABLE_ROWS',JSON.stringify(reachable.slice(0,100).map(enc),null,2));
+          console.log('CLOSEST_BY_GAP',JSON.stringify(pos.slice(0,100).map(enc),null,2));
+          console.log('CLOSEST_BY_RATIO',JSON.stringify(byRatio.slice(0,100).map(enc),null,2));
+          NODE
+          node all_boost_reachability.mjs
