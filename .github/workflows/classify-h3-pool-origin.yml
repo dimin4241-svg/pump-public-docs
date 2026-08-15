@@ -1,0 +1,24 @@
+name: PumpSwap Classify H3 Pool Origin
+
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths:
+      - audit/classify_h3_pool_origin.py
+      - .github/workflows/classify-h3-pool-origin.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  classify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Trace oldest pool transaction and classify create vs migrate
+        run: python audit/classify_h3_pool_origin.py
