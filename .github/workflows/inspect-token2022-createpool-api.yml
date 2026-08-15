@@ -1,0 +1,38 @@
+name: inspect-token2022-createpool-api
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/inspect-token2022-createpool-api.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: audit/boost-runtime-probe-20260815
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm install --no-save @pump-fun/pump-swap-sdk@1.19.0 @solana/web3.js @solana/spl-token @coral-xyz/anchor
+      - name: Inspect exports, create-pool methods, IDL
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import * as M from '@pump-fun/pump-swap-sdk';
+          import fs from 'node:fs';
+          console.log('EXPORTS', Object.keys(M).sort());
+          for (const [k,v] of Object.entries(M)) {
+            if (typeof v === 'function') {
+              const ps = Object.getOwnPropertyNames(v.prototype ?? {}).filter(x=>/pool|create/i.test(x));
+              if (ps.length) console.log('CLASS_METHODS', k, ps);
+            }
+          }
+          const idl=JSON.parse(fs.readFileSync('node_modules/@pump-fun/pump-swap-sdk/src/idl/pump_amm.json','utf8'));
+          const ix=idl.instructions.find(x=>x.name.toLowerCase().replaceAll('_','')==='createpool');
+          console.log('CREATE_POOL_IDL', JSON.stringify(ix,null,2));
+          NODE
+          echo '--- d.ts/source createPool hits ---'
+          grep -Rni -E 'createPool(SolanaState|Instructions|Instruction)|create_pool' node_modules/@pump-fun/pump-swap-sdk/src node_modules/@pump-fun/pump-swap-sdk/dist 2>/dev/null | head -n 240 || true
