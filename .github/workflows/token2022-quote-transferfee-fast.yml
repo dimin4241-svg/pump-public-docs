@@ -1,0 +1,38 @@
+name: token2022-quote-transferfee-fast
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/token2022-quote-transferfee-fast.yml']
+permissions:
+  contents: read
+jobs:
+  scan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: audit/boost-runtime-probe-20260815}
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @solana/web3.js @solana/spl-token bs58 @pump-fun/pump-swap-sdk@1.19.0
+      - shell: bash
+        run: |
+          cat > qfast.mjs <<'NODE'
+          import fs from 'node:fs';import bs58pkg from 'bs58';import{PublicKey}from'@solana/web3.js';
+          import{TOKEN_2022_PROGRAM_ID,unpackMint,getTransferFeeConfig,getExtensionTypes,ExtensionType}from'@solana/spl-token';
+          const bs58=bs58pkg.default??bs58pkg, AMM='pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA',T22=TOKEN_2022_PROGRAM_ID.toBase58();
+          const RPCS=['https://api.mainnet-beta.solana.com','https://solana-rpc.publicnode.com','https://solana.public-rpc.com','https://rpc.solanatracker.io/public'];let id=1;
+          const sleep=ms=>new Promise(r=>setTimeout(r,ms));const j=x=>JSON.stringify(x,(_k,v)=>typeof v==='bigint'?v.toString():v,2);
+          async function one(url,m,p,n=6){let e;for(let a=0;a<n;a++){try{let r=await fetch(url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method:m,params:p})});if(r.status===429||r.status>=500){e=new Error('HTTP '+r.status);await sleep(600+500*a);continue}let x=await r.json();if(x.error){e=new Error(JSON.stringify(x.error));break}return x.result}catch(x){e=x;await sleep(600+500*a)}}throw e}
+          async function call(m,p){let e;for(const u of RPCS){try{return await one(u,m,p)}catch(x){e=x}}throw e}
+          const idl=JSON.parse(fs.readFileSync('node_modules/@pump-fun/pump-swap-sdk/src/idl/pump_amm.json','utf8'));const disc58=bs58.encode(Buffer.from(idl.accounts.find(x=>x.name.toLowerCase()==='pool').discriminator));
+          const pools=await call('getProgramAccounts',[AMM,{commitment:'confirmed',encoding:'base64',filters:[{dataSize:300},{memcmp:{offset:0,bytes:disc58}}],dataSlice:{offset:75,length:32}}]);
+          const map=new Map();for(const r of pools??[]){const d=Buffer.from(r.account.data[0],'base64');if(d.length!==32)continue;const m=bs58.encode(d),a=map.get(m)??[];if(a.length<12)a.push(r.pubkey);map.set(m,a)}
+          const mints=[...map.keys()];console.log('POOL_COUNT',pools.length,'UNIQUE_QUOTE_MINTS',mints.length);
+          const groups=[];for(let i=0;i<mints.length;i+=100)groups.push(mints.slice(i,i+100));const t22=[],missing=[],owners=new Map();let done=0;
+          for(let w=0;w<groups.length;w+=4){const s=groups.slice(w,w+4);const rr=await Promise.all(s.map(async c=>{let e;for(const u of RPCS){try{return await one(u,'getMultipleAccounts',[c,{encoding:'base64',commitment:'confirmed',dataSlice:{offset:0,length:0}}])}catch(x){e=x}}throw e}));for(let g=0;g<s.length;g++){for(let k=0;k<s[g].length;k++){const a=rr[g].value[k],m=s[g][k];if(!a){missing.push(m);continue}owners.set(a.owner,(owners.get(a.owner)??0)+1);if(a.owner===T22)t22.push(m)}done+=s[g].length}if(w%40===0||done===mints.length)console.log('PROGRESS',done,'/',mints.length,'T22',t22.length);await sleep(400)}
+          console.log('OWNER_COUNTS',j([...owners.entries()].sort((a,b)=>b[1]-a[1])));console.log('MISSING',missing.length);console.log('TOKEN2022_QUOTE_MINT_COUNT',t22.length);
+          const details=[];for(let i=0;i<t22.length;i+=80){const c=t22.slice(i,i+80),r=await call('getMultipleAccounts',[c,{encoding:'base64',commitment:'confirmed'}]);for(let k=0;k<c.length;k++){const a=r.value[k];if(!a)continue;const info={data:Buffer.from(a.data[0],'base64'),executable:a.executable,lamports:a.lamports,owner:new PublicKey(a.owner),rentEpoch:a.rentEpoch??0};let ext=[],cfg=null,error=null;try{const m=unpackMint(new PublicKey(c[k]),info,TOKEN_2022_PROGRAM_ID);ext=getExtensionTypes(m.tlvData).map(n=>ExtensionType[n]??String(n));cfg=getTransferFeeConfig(m)}catch(e){error=String(e)}details.push({mint:c[k],pools:map.get(c[k]),extensions:ext,transferFeeConfig:cfg,error})}}
+          const tf=details.filter(x=>x.transferFeeConfig!==null);console.log('TOKEN2022_QUOTE_DETAILS',j(details));console.log('TRANSFER_FEE_QUOTE_PUMPSWAP_COUNT',tf.length);console.log('TRANSFER_FEE_QUOTE_PUMPSWAP_ROWS',j(tf));
+          NODE
+          node qfast.mjs
