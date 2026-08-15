@@ -1,0 +1,60 @@
+name: parse-all-schema-feature-final
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/parse-all-schema-feature-final.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  parse:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: audit/boost-runtime-probe-20260815}
+      - name: Parse completed feature scan
+        shell: bash
+        run: |
+          gh api --allow-escape-sequences -H 'Accept: application/vnd.github+json' repos/dimin4241-svg/pump-public-docs/actions/jobs/95060919564/logs > feature.log
+          python3 - <<'PY'
+          import re,json
+          s=open('feature.log','r',encoding='utf-8-sig',errors='replace').read()
+          s=re.sub(r'\x1b\[[0-9;]*m','',s)
+          s='\n'.join(re.sub(r'^\d{4}-\d\d-\d\dT[^ ]+Z\s+','',x) for x in s.splitlines())
+          for key in ['SIZE_FEATURE_COUNTS','ALL_POOL_COUNT','MAYHEM_COUNT','CASHBACK_COUNT','BOOSTED_COUNT']:
+            if key=='SIZE_FEATURE_COUNTS':
+              for m in re.finditer(r'SIZE_FEATURE_COUNTS\s+(\{[^\n]+\})',s): print(key,m.group(1))
+            else:
+              ms=list(re.finditer(rf'{key}\s+(\d+)',s));print(key,ms[-1].group(1) if ms else 'NOT_FOUND')
+          def extract_json(marker,next_markers):
+            a=s.rfind(marker)
+            if a<0:return None
+            a+=len(marker)
+            ends=[s.find('\n'+x,a) for x in next_markers]
+            ends=[x for x in ends if x>=0]
+            b=min(ends) if ends else len(s)
+            raw=s[a:b].strip()
+            try:return json.loads(raw)
+            except Exception as e:
+              print(marker.strip()+'_PARSE_ERROR',repr(e),'RAW_HEAD',raw[:300]);return None
+          top=extract_json('TOP_BOOSTED_ENRICHED ',['Post job cleanup.','Node 20','CASHBACK_SAMPLE','MAYHEM_SAMPLE'])
+          if top is not None:
+            print('TOP_BOOSTED_ENRICHED_COUNT',len(top))
+            for i,r in enumerate(top[:30]):print('BOOST_ROW',i,json.dumps(r,separators=(',',':')))
+          raw=extract_json('TOP_BOOSTED_RAW ',['CASHBACK_SAMPLE'])
+          if raw is not None:
+            print('TOP_BOOSTED_RAW_COUNT',len(raw))
+            for i,r in enumerate(raw[:20]):print('BOOST_RAW',i,json.dumps(r,separators=(',',':')))
+          cash=extract_json('CASHBACK_SAMPLE ',['MAYHEM_SAMPLE'])
+          if cash is not None:
+            print('CASHBACK_SAMPLE_COUNT',len(cash))
+            for i,r in enumerate(cash[:20]):print('CASHBACK_ROW',i,json.dumps(r,separators=(',',':')))
+          may=extract_json('MAYHEM_SAMPLE ',['TOP_BOOSTED_ENRICHED'])
+          if may is not None:
+            print('MAYHEM_SAMPLE_COUNT',len(may))
+            for i,r in enumerate(may[:20]):print('MAYHEM_ROW',i,json.dumps(r,separators=(',',':')))
+          PY
