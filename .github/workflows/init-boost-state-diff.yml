@@ -1,0 +1,25 @@
+name: PumpSwap Init Boost State Differential
+
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths:
+      - audit/init_boost_state_diff.mjs
+      - .github/workflows/init-boost-state-diff.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  state-diff:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm install --no-save @solana/web3.js@1.98.4
+      - name: Compare arbitrary init post-state and repeated init
+        run: node audit/init_boost_state_diff.mjs
