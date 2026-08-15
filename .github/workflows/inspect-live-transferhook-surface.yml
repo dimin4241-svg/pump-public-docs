@@ -1,0 +1,48 @@
+name: inspect-live-transferhook-surface
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/inspect-live-transferhook-surface.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: audit/boost-runtime-probe-20260815}
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-swap-sdk@1.19.0 @solana/web3.js @solana/spl-token
+      - shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import {Connection,PublicKey} from '@solana/web3.js';
+          import * as T from '@solana/spl-token';
+          const mint=new PublicKey('pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn');
+          const RPCS=['https://api.mainnet-beta.solana.com','https://solana-rpc.publicnode.com','https://solana.public-rpc.com','https://rpc.solanatracker.io/public'];
+          let ai=null,used=null;
+          for(const u of RPCS){try{const c=new Connection(u,'confirmed');ai=await c.getAccountInfo(mint);if(ai){used=u;break}}catch(e){console.log('RPC_FAIL',u,String(e).slice(0,180))}}
+          if(!ai)throw new Error('mint unavailable');
+          console.log('RPC',used,'MINT_OWNER',ai.owner.toBase58(),'LEN',ai.data.length);
+          const m=T.unpackMint(mint,ai,T.TOKEN_2022_PROGRAM_ID);
+          console.log('EXTENSION_TYPES',T.getExtensionTypes(m.tlvData).map(n=>T.ExtensionType[n]??String(n)));
+          console.log('TRANSFER_HOOK_EXPORTS',Object.keys(T).filter(x=>/hook|extra.*meta/i.test(x)).sort());
+          for(const fn of ['getTransferHook','getTransferHookAccount','getExtraAccountMetaAddress','getExtraAccountMetaAddressAndBumpSeed','resolveExtraAccountMeta']){
+            console.log('EXPORT_TYPE',fn,typeof T[fn]);
+          }
+          if(typeof T.getTransferHook==='function'){
+            try{const h=T.getTransferHook(m);console.log('TRANSFER_HOOK',JSON.stringify(h,(_k,v)=>v?.toBase58?.()??(typeof v==='bigint'?v.toString():v),2));
+              const pid=h?.programId??h?.programId?.value??h?.authority;
+              if(pid?.toBase58){
+                const c=new Connection(used,'confirmed');const pi=await c.getAccountInfo(pid);console.log('HOOK_PROGRAM',pid.toBase58(),'EXISTS',!!pi,'EXEC',pi?.executable,'OWNER',pi?.owner?.toBase58(),'LEN',pi?.data?.length);
+              }
+            }catch(e){console.log('HOOK_DECODE_ERROR',String(e));}
+          }
+          NODE
+          echo '=== SPL transfer-hook implementation symbols ==='
+          grep -Rni -E 'getTransferHook|addExtraAccountMetas|ExtraAccountMeta|transferHook|TransferHook' node_modules/@solana/spl-token/lib node_modules/@solana/spl-token/src 2>/dev/null | head -n 260 || true
+          echo '=== Pump SDK transfer/hook hits ==='
+          grep -Rni -E 'transferHook|extraAccountMeta|remainingAccounts|transferChecked|transferCheckedWithFee|TOKEN_2022' node_modules/@pump-fun/pump-swap-sdk/src/sdk node_modules/@pump-fun/pump-swap-sdk/src 2>/dev/null | head -n 300 || true
