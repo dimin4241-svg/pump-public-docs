@@ -1,0 +1,30 @@
+name: Inspect exact SPL Token-2022 transfer-fee layout
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths:
+      - '.github/workflows/inspect-spl-transferfee-layout.yml'
+  workflow_dispatch:
+
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm install --no-save @solana/spl-token
+      - name: Print transfer fee constants and source
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import * as spl from '@solana/spl-token';
+          console.log('TOKEN2022',spl.TOKEN_2022_PROGRAM_ID.toBase58());
+          console.log('ExtensionType.TransferFeeConfig',spl.ExtensionType.TransferFeeConfig);
+          console.log('ExtensionType.TransferFeeAmount',spl.ExtensionType.TransferFeeAmount);
+          for (const k of ['MINT_SIZE','ACCOUNT_SIZE','TYPE_SIZE','LENGTH_SIZE','ACCOUNT_TYPE_SIZE']) console.log(k,spl[k]);
+          console.log('exports',Object.keys(spl).filter(k=>/TransferFee|withheld|Withheld|Extension|AccountType/i.test(k)).sort());
+          NODE
+          echo '=== package transfer-fee source ==='
+          grep -RniE -C 5 'TransferFeeConfig|TransferFeeAmount|getTransferFeeAmount|withheldAmount|withheld_amount|TYPE_SIZE|ACCOUNT_TYPE_SIZE' node_modules/@solana/spl-token/lib node_modules/@solana/spl-token/src 2>/dev/null | head -n 1600 || true
