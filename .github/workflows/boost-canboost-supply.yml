@@ -1,0 +1,19 @@
+name: PumpSwap can_boost Supply Probe
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths:
+      - audit/boost_canboost_supply_probe.mjs
+      - .github/workflows/boost-canboost-supply.yml
+  workflow_dispatch:
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: {node-version: '24'}
+      - run: npm install --no-save @coral-xyz/anchor@0.31.1 @solana/web3.js@1.98.4 @solana/spl-token@0.4.14
+      - name: Sweep external base burns and decode can_boost
+        run: node audit/boost_canboost_supply_probe.mjs
