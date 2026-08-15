@@ -1,0 +1,46 @@
+name: PumpSwap fast first-TLV TransferFeeConfig intersection
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths:
+      - '.github/workflows/token2022-first-transferfee-fast.yml'
+  workflow_dispatch:
+
+jobs:
+  scan:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '24' }
+      - run: npm install --no-save @solana/spl-token @solana/web3.js bs58 @pump-fun/pump-swap-sdk@1.19.0
+      - name: Narrow GPA and intersect
+        shell: bash
+        run: |
+          cat > fast_tf.mjs <<'NODE'
+          import fs from 'node:fs';
+          import bs58pkg from 'bs58';
+          import {PublicKey} from '@solana/web3.js';
+          import {TOKEN_2022_PROGRAM_ID,unpackMint,getTransferFeeConfig,getExtensionTypes,ExtensionType} from '@solana/spl-token';
+          const bs58=bs58pkg.default??bs58pkg;
+          const RPC='https://api.mainnet-beta.solana.com', AMM='pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA';
+          const idl=JSON.parse(fs.readFileSync('node_modules/@pump-fun/pump-swap-sdk/src/idl/pump_amm.json','utf8'));
+          const disc=Buffer.from(idl.accounts.find(x=>x.name.toLowerCase()==='pool').discriminator);
+          let id=1; const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          const json=x=>JSON.stringify(x,(_k,v)=>typeof v==='bigint'?v.toString():v instanceof PublicKey?v.toBase58():v,2);
+          async function rpc(method,params){for(let a=0;a<10;a++){const r=await fetch(RPC,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method,params})});if(r.status===429||r.status>=500){await sleep(600+500*a);continue;}const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));return j.result;}throw Error('rpc retries');}
+          const pools=await rpc('getProgramAccounts',[AMM,{encoding:'base64',commitment:'confirmed',filters:[{dataSize:300},{memcmp:{offset:0,bytes:bs58.encode(disc)}}],dataSlice:{offset:43,length:32}}]);
+          const map=new Map(); for(const r of pools){const d=Buffer.from(r.account.data[0],'base64');if(d.length!==32)continue;const m=bs58.encode(d);const a=map.get(m)??[];if(a.length<10)a.push(r.pubkey);map.set(m,a);}
+          console.log('POOL_COUNT',pools.length,'UNIQUE_BASE',map.size);
+          const mintType=bs58.encode(Buffer.from([1]));
+          const tfType=bs58.encode(Buffer.from([1,0]));
+          console.log('FILTERS',{mintType,tfType});
+          const rows=await rpc('getProgramAccounts',[TOKEN_2022_PROGRAM_ID.toBase58(),{encoding:'base64',commitment:'confirmed',filters:[{memcmp:{offset:165,bytes:mintType}},{memcmp:{offset:166,bytes:tfType}}],dataSlice:{offset:0,length:0}}]);
+          console.log('FIRST_TLV_TRANSFER_FEE_MINTS',rows.length);
+          const hits=rows.map(x=>x.pubkey).filter(x=>map.has(x));
+          console.log('PUMPSWAP_HITS',hits.length,json(hits));
+          const details=[];
+          for(let i=0;i<hits.length;i+=80){const c=hits.slice(i,i+80);const res=await rpc('getMultipleAccounts',[c,{encoding:'base64',commitment:'confirmed'}]);for(let j=0;j<c.length;j++){const ai=res.value[j];const local={data:Buffer.from(ai.data[0],'base64'),executable:ai.executable,lamports:ai.lamports,owner:new PublicKey(ai.owner),rentEpoch:ai.rentEpoch??0};const mint=unpackMint(new PublicKey(c[j]),local,TOKEN_2022_PROGRAM_ID);details.push({mint:c[j],pools:map.get(c[j]),extensions:getExtensionTypes(mint.tlvData).map(n=>ExtensionType[n]??n),cfg:getTransferFeeConfig(mint)});}}
+          console.log('DETAILS',json(details));
+          NODE
+          node fast_tf.mjs
