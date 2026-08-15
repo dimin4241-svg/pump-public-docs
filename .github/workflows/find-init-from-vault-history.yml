@@ -1,0 +1,30 @@
+name: PumpSwap Trace Boost Vault Creation
+
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths:
+      - audit/find_init_from_vault_history.py
+      - .github/workflows/find-init-from-vault-history.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  trace:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python audit/find_init_from_vault_history.py
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: find-init-from-vault-history-result
+          path: find_init_from_vault_history_result.json
+          if-no-files-found: warn
+          retention-days: 7
