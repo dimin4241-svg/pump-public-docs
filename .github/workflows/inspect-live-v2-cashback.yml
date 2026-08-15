@@ -1,0 +1,30 @@
+name: Inspect PumpSwap V2 Cashback Paths
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: [.github/workflows/inspect-live-v2-cashback.yml]
+  workflow_dispatch:
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: {node-version: '24'}
+      - run: npm install --no-save @pump-fun/pump-swap-sdk@1.19.0
+      - name: Print PoolV2 cashback and remaining-account call sites
+        shell: bash
+        run: |
+          set -euo pipefail
+          PKG=node_modules/@pump-fun/pump-swap-sdk/src
+          echo '=== poolV2 / remaining accounts ==='
+          grep -RniE -C 20 --exclude='*.map' 'poolV2|pool_v2|remainingAccounts|remaining_accounts|InvalidPoolV2' "$PKG" || true
+          echo '=== cashback / buyback ==='
+          grep -RniE -C 20 --exclude='*.map' 'cashback|buyback|userVolumeAccumulator|volume_accumulator|InvalidCashback' "$PKG" || true
+          echo '=== relevant errors ==='
+          node - <<'NODE'
+          const idl=require('./idl/pump_amm.json');
+          console.log(JSON.stringify(idl.errors.filter(e=>/pool.?v2|cashback|buyback|accumulator/i.test(`${e.name} ${e.msg}`)),null,2));
+          for (const n of ['buy','sell','create_pool_v2','claim_cashback','init_user_volume_accumulator']) {const x=idl.instructions.find(i=>i.name===n); if(x) console.log('IX',n,JSON.stringify(x,null,2));}
+          NODE
