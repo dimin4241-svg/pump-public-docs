@@ -1,0 +1,54 @@
+name: Inspect Official SDK BOOST and Withdraw
+
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths:
+      - .github/workflows/inspect-sdk-boost-and-withdraw.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install exact official SDK
+        run: npm install --no-save @pump-fun/pump-swap-sdk@1.19.0
+      - name: Show package metadata and BOOST-related source contexts
+        shell: bash
+        run: |
+          set -euo pipefail
+          PKG=node_modules/@pump-fun/pump-swap-sdk
+          echo '=== PACKAGE.JSON ==='
+          node -e 'const p=require("./node_modules/@pump-fun/pump-swap-sdk/package.json"); console.log(JSON.stringify({name:p.name,version:p.version,repository:p.repository,exports:p.exports,main:p.main,module:p.module,types:p.types},null,2))'
+          echo '=== FILES ==='
+          find "$PKG" -maxdepth 4 -type f | sort | head -250
+          echo '=== BOOST MATCHES ==='
+          grep -RniE -C 6 --exclude='*.map' 'initBoost|init_boost|boostBuyAndBurn|boost_buy_and_burn|virtualQuoteReserves|virtual_quote_reserves|boostAuthority|boost_authority|boostEnabled|boost_enabled|MigrateV2|migrateV2' "$PKG" || true
+          echo '=== EXPORTED SYMBOLS CONTAINING BOOST ==='
+          node --input-type=module - <<'NODE'
+          import * as sdk from '@pump-fun/pump-swap-sdk';
+          console.log(Object.keys(sdk).filter(k => /boost|migrate/i.test(k)).sort());
+          for (const cls of ['PumpAmmSdk','PumpAmmInternalSdk','PumpAmmAdminSdk']) {
+            const C = sdk[cls];
+            if (!C) continue;
+            console.log(cls, Object.getOwnPropertyNames(C.prototype).filter(k => /boost|migrate/i.test(k)).sort());
+          }
+          NODE
+      - name: Print exact current withdraw and deposit IDL definitions
+        run: |
+          node - <<'NODE'
+          const idl=require('./idl/pump_amm.json');
+          for (const n of ['withdraw','deposit','init_boost','boost_buy_and_burn']) {
+            const ix=idl.instructions.find(x=>x.name===n);
+            console.log(`=== ${n} ===`);
+            console.log(JSON.stringify(ix,null,2));
+          }
+          NODE
