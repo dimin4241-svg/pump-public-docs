@@ -1,6 +1,9 @@
-import base64, json, struct, time, urllib.request
+import base64, json, struct, time, urllib.request, urllib.error
 
-RPC='https://api.mainnet-beta.solana.com'
+RPCS=[
+ 'https://api.mainnet-beta.solana.com',
+ 'https://solana-rpc.publicnode.com',
+]
 BASE_MINT='7LSsEoJGhLeZzGvDofTdNg7M3JttxQqGWNLo6vWMpump'
 # Same canonical pool used by the deterministic init_boost/JIT probes.
 POOL_BASE=642_628_051_491_186
@@ -20,20 +23,24 @@ def b58e(b: bytes):
     return '1'*z + (out or '')
 
 def rpc(method, params):
+    last=None
     body=json.dumps({'jsonrpc':'2.0','id':1,'method':method,'params':params}).encode()
-    for i in range(8):
-        try:
-            req=urllib.request.Request(RPC,data=body,headers={'content-type':'application/json'})
-            with urllib.request.urlopen(req,timeout=30) as r:
-                obj=json.load(r)
-            if 'error' in obj: raise RuntimeError(obj['error'])
-            return obj['result']
-        except Exception as e:
-            if i==7: raise
-            time.sleep(.25*(i+1))
+    for endpoint in RPCS:
+        for i in range(5):
+            try:
+                req=urllib.request.Request(endpoint,data=body,headers={'content-type':'application/json','user-agent':'pump-boost-audit/1.0'})
+                with urllib.request.urlopen(req,timeout=30) as r:
+                    obj=json.load(r)
+                if 'error' in obj: raise RuntimeError(obj['error'])
+                print('RPC_OK', endpoint, method)
+                return obj['result']
+            except Exception as e:
+                last=e
+                print('RPC_FAIL', endpoint, method, repr(e))
+                time.sleep(.4*(i+1))
+    raise last
 
 # Solve floor(E*b/(B+b)) - floor(qout*lp_bps/10000) > real.
-# Binary search exact integer threshold using the same coarse fee rule as SDK.
 E=POST_INIT_REAL+POST_INIT_VIRTUAL
 def unsafe(b):
     q=(E*b)//(POOL_BASE+b)
