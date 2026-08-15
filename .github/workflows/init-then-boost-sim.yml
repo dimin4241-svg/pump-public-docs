@@ -1,0 +1,26 @@
+name: PumpSwap Atomic Init Then Boost Simulation
+
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths:
+      - audit/init_then_boost_sim.mjs
+      - .github/workflows/init-then-boost-sim.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  simulate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install web3 client only
+        run: npm install --no-save @solana/web3.js@1.98.4
+      - name: Run simulation-only atomic differential
+        run: node audit/init_then_boost_sim.mjs
