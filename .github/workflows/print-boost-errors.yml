@@ -1,0 +1,31 @@
+name: Enumerate Current BOOST Error Contracts
+
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths:
+      - .github/workflows/print-boost-errors.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Print BOOST-related errors and instruction definitions
+        run: |
+          python - <<'PY'
+          import json
+          idl=json.load(open('idl/pump_amm.json'))
+          print('=== BOOST ERRORS ===')
+          for e in idl.get('errors',[]):
+              if 'boost' in (e.get('name','')+' '+e.get('msg','')).lower() or 'virtual' in e.get('msg','').lower():
+                  print(json.dumps(e,sort_keys=True))
+          print('=== RELEVANT INSTRUCTIONS ===')
+          for name in ['buy','sell','deposit','withdraw','init_boost','boost_buy_and_burn']:
+              ix=next(x for x in idl['instructions'] if x['name']==name)
+              print(name, json.dumps({'discriminator':ix['discriminator'],'args':ix['args'],'accounts':[{'name':a['name'],'writable':a.get('writable',False),'signer':a.get('signer',False),'relations':a.get('relations')} for a in ix['accounts']]},sort_keys=True))
+          PY
