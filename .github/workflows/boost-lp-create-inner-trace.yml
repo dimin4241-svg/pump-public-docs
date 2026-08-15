@@ -1,0 +1,24 @@
+name: boost-lp-create-inner-trace
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/boost-lp-create-inner-trace.yml']
+permissions:
+  contents: read
+jobs:
+  trace:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: audit/boost-runtime-probe-20260815}
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          const mint='28EQ4ZxYemsyWyffL1R2fpQi3q86aUjDnVxFViwuf7H1',RPC='https://rpc.solanatracker.io/public';let id=1;async function rpc(m,p){const r=await fetch(RPC,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method:m,params:p})});const x=await r.json();if(x.error)throw Error(JSON.stringify(x.error));return x.result}
+          const ss=await rpc('getSignaturesForAddress',[mint,{limit:5,commitment:'confirmed'}]);console.log('SIGS',JSON.stringify(ss));if(!ss.length)process.exit(0);const tx=await rpc('getTransaction',[ss[0].signature,{encoding:'jsonParsed',commitment:'confirmed',maxSupportedTransactionVersion:0}]);console.log('SLOT',tx.slot,'ERR',JSON.stringify(tx.meta?.err));
+          const all=[];for(const ix of tx.transaction.message.instructions??[])all.push({where:'outer',ix});for(const g of tx.meta?.innerInstructions??[])for(const ix of g.instructions??[])all.push({where:'inner:'+g.index,ix});for(const x of all){const s=JSON.stringify(x.ix);if(s.includes(mint)||/mintTo|transfer|burn|initializeMint/i.test(s))console.log('IX',x.where,s)}
+          console.log('PRETOKEN',JSON.stringify((tx.meta?.preTokenBalances??[]).filter(x=>x.mint===mint)));console.log('POSTTOKEN',JSON.stringify((tx.meta?.postTokenBalances??[]).filter(x=>x.mint===mint)));
+          NODE
