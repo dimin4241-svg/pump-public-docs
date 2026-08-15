@@ -1,0 +1,61 @@
+name: parse-all-live-boost-reachability
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/parse-all-live-boost-reachability.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  parse:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: audit/boost-runtime-probe-20260815}
+      - name: Parse BOOST reachability result
+        shell: bash
+        run: |
+          gh api --allow-escape-sequences -H 'Accept: application/vnd.github+json' repos/dimin4241-svg/pump-public-docs/actions/jobs/95061486652/logs > boost.log
+          python3 - <<'PY'
+          import re,json
+          s=open('boost.log','r',encoding='utf-8-sig',errors='replace').read()
+          s=re.sub(r'\x1b\[[0-9;]*m','',s)
+          s='\n'.join(re.sub(r'^\d{4}-\d\d-\d\dT[^ ]+Z\s+','',x) for x in s.splitlines())
+          def extract(marker):
+              a=s.rfind(marker)
+              if a<0:return None
+              i=a+len(marker)
+              while i<len(s) and s[i].isspace(): i+=1
+              if i>=len(s) or s[i] not in '[{': return None
+              op=s[i];cl='}' if op=='{' else ']';depth=0;ins=False;esc=False
+              for j in range(i,len(s)):
+                  c=s[j]
+                  if ins:
+                      if esc:esc=False
+                      elif c=='\\':esc=True
+                      elif c=='"':ins=False
+                      continue
+                  if c=='"':ins=True;continue
+                  if c==op:depth+=1
+                  elif c==cl:
+                      depth-=1
+                      if depth==0:
+                          raw=s[i:j+1]
+                          try:return json.loads(raw)
+                          except Exception as e:
+                              print('PARSE_ERR',marker,repr(e),raw[:500]);return None
+              return None
+          summary=extract('SUMMARY ')
+          print('SUMMARY_COMPACT',json.dumps(summary,separators=(',',':')) if summary is not None else 'NOT_FOUND')
+          for marker in ['REACHABLE_ROWS ','CLOSEST_BY_GAP ','CLOSEST_BY_RATIO ']:
+              x=extract(marker)
+              print(marker.strip()+'_COUNT',len(x) if isinstance(x,list) else 'NOT_FOUND')
+              if isinstance(x,list):
+                  for i,r in enumerate(x[:20]):print(marker.strip()+'_ROW',i,json.dumps(r,separators=(',',':')))
+          for p in [r'BOOST_KEYS_BY_SIZE\s+(\{[^\n]+\})',r'BOOST_KEY_COUNT\s+(\d+)',r'FULL_BOOST_ROWS\s+(\d+)\s+UNIQUE_BASE_MINTS\s+(\d+)']:
+              ms=list(re.finditer(p,s));print('RAW_MARKER',p,'=>',ms[-1].groups() if ms else None)
+          PY
