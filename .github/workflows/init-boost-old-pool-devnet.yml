@@ -1,0 +1,32 @@
+name: PumpSwap old-pool init_boost Devnet probe
+
+on:
+  push:
+    branches:
+      - research/boost-auth-devnet
+    paths:
+      - "research/init-boost-old-pool/**"
+      - "idl/pump_amm.json"
+      - ".github/workflows/init-boost-old-pool-devnet.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  old-pool-init-boost:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install isolated dependencies
+        working-directory: research/init-boost-old-pool
+        run: npm install --no-audit --no-fund
+      - name: Simulate old-pool init_boost on Devnet only
+        working-directory: research/init-boost-old-pool
+        env:
+          DEVNET_RPC: https://api.devnet.solana.com
+        run: node probe.mjs
