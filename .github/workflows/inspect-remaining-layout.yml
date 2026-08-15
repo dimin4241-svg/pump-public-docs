@@ -1,0 +1,28 @@
+name: Inspect PumpSwap Remaining Account Layout
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: [.github/workflows/inspect-remaining-layout.yml]
+  workflow_dispatch:
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: {node-version: '24'}
+      - run: npm install --no-save @pump-fun/pump-swap-sdk@1.19.0
+      - name: Print compact remaining-account source
+        shell: bash
+        run: |
+          set -euo pipefail
+          F=node_modules/@pump-fun/pump-swap-sdk/src/sdk/offlinePumpAmm.ts
+          echo '=== swapSolanaState / helper ==='
+          sed -n '560,720p' "$F"
+          echo '=== buy ==='
+          sed -n '720,817p' "$F"
+          echo '=== sell ==='
+          sed -n '817,990p' "$F"
+          echo '=== cashback PDA helpers ==='
+          grep -RniE -C 12 --exclude='*.map' 'cashback|buybackFeeRecipient|poolV2Pda|userVolumeAccumulator' node_modules/@pump-fun/pump-swap-sdk/src/sdk/pda.ts node_modules/@pump-fun/pump-swap-sdk/src/sdk/fees.ts || true
