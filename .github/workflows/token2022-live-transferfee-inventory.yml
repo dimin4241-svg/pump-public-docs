@@ -1,0 +1,154 @@
+name: PumpSwap live Token-2022 transfer-fee inventory
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths:
+      - '.github/workflows/token2022-live-transferfee-inventory.yml'
+  workflow_dispatch:
+
+jobs:
+  scan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install exact current SDK + decode deps
+        run: |
+          npm install --no-save @pump-fun/pump-swap-sdk@1.19.0 @solana/web3.js @solana/spl-token bs58
+      - name: Scan recent live PumpSwap mints
+        shell: bash
+        run: |
+          cat > /tmp/scan.mjs <<'NODE'
+          import fs from 'node:fs';
+          import bs58pkg from 'bs58';
+          import { PublicKey } from '@solana/web3.js';
+          import {
+            TOKEN_2022_PROGRAM_ID,
+            unpackMint,
+            getTransferFeeConfig,
+            getExtensionTypes,
+          } from '@solana/spl-token';
+
+          const bs58 = bs58pkg.default ?? bs58pkg;
+          const RPC = process.env.SOLANA_RPC || 'https://api.mainnet-beta.solana.com';
+          const AMM = 'pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA';
+          const T22 = TOKEN_2022_PROGRAM_ID.toBase58();
+          const idl = JSON.parse(fs.readFileSync('node_modules/@pump-fun/pump-swap-sdk/src/idl/pump_amm.json','utf8'));
+
+          let rpcId = 1;
+          async function rpc(method, params) {
+            for (let attempt=0; attempt<6; attempt++) {
+              const r = await fetch(RPC, {
+                method:'POST', headers:{'content-type':'application/json'},
+                body: JSON.stringify({jsonrpc:'2.0', id:rpcId++, method, params}),
+              });
+              if (r.status === 429 || r.status >= 500) {
+                await new Promise(x=>setTimeout(x, 700*(attempt+1)));
+                continue;
+              }
+              const j = await r.json();
+              if (j.error) throw new Error(`${method}: ${JSON.stringify(j.error)}`);
+              return j.result;
+            }
+            throw new Error(`${method}: exhausted retries`);
+          }
+          async function batchGetTx(sigs) {
+            const req = sigs.map(sig=>({
+              jsonrpc:'2.0', id:rpcId++, method:'getTransaction',
+              params:[sig,{encoding:'jsonParsed', commitment:'confirmed', maxSupportedTransactionVersion:0}],
+            }));
+            for (let attempt=0; attempt<6; attempt++) {
+              const r = await fetch(RPC,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(req)});
+              if (r.status === 429 || r.status >= 500) { await new Promise(x=>setTimeout(x,700*(attempt+1))); continue; }
+              const arr = await r.json();
+              if (!Array.isArray(arr)) throw new Error(`batch response not array: ${JSON.stringify(arr).slice(0,400)}`);
+              const byId = new Map(arr.map(x=>[x.id,x]));
+              return req.map(q=>byId.get(q.id)?.result ?? null);
+            }
+            throw new Error('batch getTransaction exhausted retries');
+          }
+
+          const interesting = new Set(['buy','sell','deposit','withdraw','create_pool']);
+          const discToMeta = new Map();
+          for (const ix of idl.instructions) {
+            if (!interesting.has(ix.name)) continue;
+            const flat = ix.accounts ?? [];
+            const baseIndex = flat.findIndex(a=>a.name==='base_mint');
+            const poolIndex = flat.findIndex(a=>a.name==='pool');
+            if (baseIndex < 0) continue;
+            discToMeta.set(Buffer.from(ix.discriminator).toString('hex'), {name:ix.name, baseIndex, poolIndex});
+          }
+          console.log('instruction map', [...discToMeta.entries()]);
+
+          let before = undefined;
+          const collected = new Map(); // mint -> {pool, ix, sig, slot}
+          let seenTx = 0;
+          for (let page=0; page<6 && collected.size<250; page++) {
+            const opts = {limit:100}; if (before) opts.before = before;
+            const sigs = await rpc('getSignaturesForAddress',[AMM,opts]);
+            if (!sigs?.length) break;
+            before = sigs.at(-1).signature;
+            console.log(`page ${page} signatures=${sigs.length} before=${before}`);
+            for (let i=0;i<sigs.length;i+=10) {
+              const chunk = sigs.slice(i,i+10);
+              const txs = await batchGetTx(chunk.map(x=>x.signature));
+              for (let k=0;k<txs.length;k++) {
+                const tx = txs[k]; const sm = chunk[k];
+                if (!tx || tx.meta?.err) continue;
+                seenTx++;
+                const outer = tx.transaction?.message?.instructions ?? [];
+                const inners = (tx.meta?.innerInstructions ?? []).flatMap(x=>x.instructions ?? []);
+                for (const ix of [...outer,...inners]) {
+                  const pid = typeof ix.programId === 'string' ? ix.programId : ix.programId?.toString?.();
+                  if (pid !== AMM || !ix.data || !Array.isArray(ix.accounts)) continue;
+                  let raw; try { raw = Buffer.from(bs58.decode(ix.data)); } catch { continue; }
+                  if (raw.length < 8) continue;
+                  const meta = discToMeta.get(raw.subarray(0,8).toString('hex'));
+                  if (!meta) continue;
+                  const mint = String(ix.accounts[meta.baseIndex]);
+                  const pool = meta.poolIndex >= 0 ? String(ix.accounts[meta.poolIndex]) : null;
+                  if (!collected.has(mint)) collected.set(mint,{pool,ix:meta.name,sig:sm.signature,slot:sm.slot});
+                }
+              }
+              await new Promise(x=>setTimeout(x,180));
+            }
+          }
+          console.log(`seen successful tx=${seenTx} unique base mints=${collected.size}`);
+
+          const mints = [...collected.keys()];
+          const infos = new Map();
+          for (let i=0;i<mints.length;i+=80) {
+            const chunk = mints.slice(i,i+80);
+            const res = await rpc('getMultipleAccounts',[chunk,{encoding:'base64', commitment:'confirmed'}]);
+            for (let j=0;j<chunk.length;j++) infos.set(chunk[j],res.value[j]);
+          }
+
+          const token2022 = [];
+          const transferFee = [];
+          for (const mint of mints) {
+            const ai = infos.get(mint); if (!ai || ai.owner !== T22) continue;
+            const local = {
+              data: Buffer.from(ai.data[0],'base64'),
+              executable: ai.executable,
+              lamports: ai.lamports,
+              owner: new PublicKey(ai.owner),
+              rentEpoch: ai.rentEpoch ?? 0,
+            };
+            let decoded, extTypes=[], cfg=null, decodeError=null;
+            try {
+              decoded = unpackMint(new PublicKey(mint),local,TOKEN_2022_PROGRAM_ID);
+              extTypes = getExtensionTypes(decoded.tlvData).map(x=>String(x));
+              cfg = getTransferFeeConfig(decoded);
+            } catch(e) { decodeError = String(e); }
+            const row = {mint,...collected.get(mint),extTypes,transferFeeConfig:cfg,decodeError};
+            token2022.push(row); if (cfg) transferFee.push(row);
+          }
+          console.log('TOKEN2022_COUNT',token2022.length);
+          console.log('TOKEN2022_ROWS',JSON.stringify(token2022,null,2));
+          console.log('TRANSFER_FEE_COUNT',transferFee.length);
+          console.log('TRANSFER_FEE_ROWS',JSON.stringify(transferFee,null,2));
+          NODE
+          node /tmp/scan.mjs
