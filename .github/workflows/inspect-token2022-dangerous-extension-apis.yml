@@ -1,0 +1,25 @@
+name: inspect-token2022-dangerous-extension-apis
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/inspect-token2022-dangerous-extension-apis.yml']
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: audit/boost-runtime-probe-20260815}
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @solana/spl-token @solana/web3.js @pump-fun/pump-swap-sdk@1.19.0
+      - shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import * as T from '@solana/spl-token';
+          const names=Object.keys(T).filter(x=>/PermanentDelegate|Paus|NonTransfer|DefaultAccount|MintClose|InterestBearing|ScaledUi|TransferHook/i.test(x)).sort();
+          console.log('DANGEROUS_EXPORTS',names);
+          for(const n of names){if(typeof T[n]==='function')console.log('FUNCTION',n,'arity',T[n].length,String(T[n]).slice(0,500));}
+          console.log('EXTENSION_ENUM',Object.entries(T.ExtensionType).filter(([k,v])=>typeof v==='number'&&/Permanent|Paus|NonTransfer|Default|MintClose|Interest|Scaled|Hook/i.test(k)));
+          NODE
