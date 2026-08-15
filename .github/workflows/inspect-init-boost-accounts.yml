@@ -1,0 +1,30 @@
+name: PumpSwap Inspect Real Init Boost Accounts
+
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths:
+      - audit/inspect_init_boost_accounts.py
+      - .github/workflows/inspect-init-boost-accounts.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python audit/inspect_init_boost_accounts.py
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: inspect-init-boost-accounts-result
+          path: inspect_init_boost_accounts_result.json
+          if-no-files-found: warn
+          retention-days: 7
