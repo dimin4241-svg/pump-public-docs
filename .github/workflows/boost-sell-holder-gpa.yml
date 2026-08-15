@@ -1,0 +1,18 @@
+name: PumpSwap BOOST Sell Holder GPA
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths:
+      - audit/boost_sell_holder_gpa.py
+      - .github/workflows/boost-sell-holder-gpa.yml
+  workflow_dispatch:
+jobs:
+  discover:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - name: Discover largest base holders with one filtered GPA
+        run: python audit/boost_sell_holder_gpa.py
