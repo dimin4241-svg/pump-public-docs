@@ -21,7 +21,7 @@ jobs:
       - name: Scan recent live PumpSwap mints
         shell: bash
         run: |
-          cat > /tmp/scan.mjs <<'NODE'
+          cat > scan.mjs <<'NODE'
           import fs from 'node:fs';
           import bs58pkg from 'bs58';
           import { PublicKey } from '@solana/web3.js';
@@ -84,7 +84,7 @@ jobs:
           console.log('instruction map', [...discToMeta.entries()]);
 
           let before = undefined;
-          const collected = new Map(); // mint -> {pool, ix, sig, slot}
+          const collected = new Map();
           let seenTx = 0;
           for (let page=0; page<6 && collected.size<250; page++) {
             const opts = {limit:100}; if (before) opts.before = before;
@@ -151,4 +151,4 @@ jobs:
           console.log('TRANSFER_FEE_COUNT',transferFee.length);
           console.log('TRANSFER_FEE_ROWS',JSON.stringify(transferFee,null,2));
           NODE
-          node /tmp/scan.mjs
+          node ./scan.mjs
