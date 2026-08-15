@@ -21,16 +21,30 @@ jobs:
         with:
           node-version: '24'
       - run: npm install --no-save @solana/web3.js@1.98.4 @solana/spl-token@0.4.14
-      - name: Patch simulation setup so a system wallet pays only the canonical vault rent
+      - name: Patch deterministic simulation harness
         shell: python
         run: |
           from pathlib import Path
           p = Path('audit/boost_jit_lp_probe.mjs')
           s = p.read_text()
-          old = "const initSetup=[];if(!creatorV||creatorV.owner!==SystemProgram.programId.toBase58())throw new Error('canonical pool creator not a system account in this control');if(creatorV.lamports<3_000_000)initSetup.push(SystemProgram.transfer({fromPubkey:user,toPubkey:creator,lamports:5_000_000}));initSetup.push(initIx(p,creator,qProg,va,vault));"
-          new = "console.log('CREATOR_ACCOUNT',JSON.stringify({owner:creatorV?.owner??null,lamports:creatorV?.lamports??null},null,2));const initSetup=[createAssociatedTokenAccountIdempotentInstruction(user,vault,va,WSOL,qProg,ASSOCIATED_TOKEN_PROGRAM_ID),initIx(p,creator,qProg,va,vault)];"
-          if old not in s:
+
+          old_setup = "const initSetup=[];if(!creatorV||creatorV.owner!==SystemProgram.programId.toBase58())throw new Error('canonical pool creator not a system account in this control');if(creatorV.lamports<3_000_000)initSetup.push(SystemProgram.transfer({fromPubkey:user,toPubkey:creator,lamports:5_000_000}));initSetup.push(initIx(p,creator,qProg,va,vault));"
+          new_setup = "console.log('CREATOR_ACCOUNT',JSON.stringify({owner:creatorV?.owner??null,lamports:creatorV?.lamports??null},null,2));const initSetup=[createAssociatedTokenAccountIdempotentInstruction(user,vault,va,WSOL,qProg,ASSOCIATED_TOKEN_PROGRAM_ID),initIx(p,creator,qProg,va,vault)];"
+          if old_setup not in s:
               raise SystemExit('expected initSetup source not found')
-          p.write_text(s.replace(old,new))
-      - name: Simulate LP entry around a BOOST buy-and-burn without broadcasting
+          s = s.replace(old_setup, new_setup)
+
+          marker = "async function simulate(ixs,feePayer,watch,bh){const tx=new Transaction({feePayer,recentBlockhash:bh});tx.add(ComputeBudgetProgram.setComputeUnitLimit({units:1_000_000}),...ixs);const raw=tx.serialize({requireAllSignatures:false,verifySignatures:false}).toString('base64');return rpc('simulateTransaction',[raw,{encoding:'base64',sigVerify:false,replaceRecentBlockhash:false,commitment:'processed',accounts:{encoding:'base64',addresses:watch.map(k=>k.toBase58())}}]);}"
+          addition = marker + "\nasync function simulatePairSameSlot(aIxs,bIxs,feePayer,watch,bh){const mk=(ixs)=>{const tx=new Transaction({feePayer,recentBlockhash:bh});tx.add(ComputeBudgetProgram.setComputeUnitLimit({units:1_000_000}),...ixs);return tx.serialize({requireAllSignatures:false,verifySignatures:false}).toString('base64');};const cfg={encoding:'base64',sigVerify:false,replaceRecentBlockhash:false,commitment:'processed',accounts:{encoding:'base64',addresses:watch.map(k=>k.toBase58())}};const aRaw=mk(aIxs),bRaw=mk(bIxs);for(let attempt=0;attempt<12;attempt++){const payload=[{jsonrpc:'2.0',id:1,method:'simulateTransaction',params:[aRaw,cfg]},{jsonrpc:'2.0',id:2,method:'simulateTransaction',params:[bRaw,cfg]}];const response=await fetch(RPC,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(payload)});if(response.status===429||response.status>=500){await new Promise(x=>setTimeout(x,200+attempt*100));continue;}const arr=await response.json();if(!Array.isArray(arr))throw new Error('batch simulate returned non-array');const byId=new Map(arr.map(x=>[x.id,x]));const ar=byId.get(1),br=byId.get(2);if(ar?.error||br?.error)throw new Error('batch RPC error '+JSON.stringify({a:ar?.error,b:br?.error}));const a=ar.result,b=br.result;console.log('BATCH_SLOT_ATTEMPT',JSON.stringify({attempt:a===undefined?attempt:attempt+1,a:a?.context?.slot,b:b?.context?.slot}));if(a?.context?.slot===b?.context?.slot)return [a,b];await new Promise(x=>setTimeout(x,40));}throw new Error('could not obtain same-slot batch simulations');}"
+          if marker not in s:
+              raise SystemExit('simulate marker not found')
+          s = s.replace(marker, addition)
+
+          old_pair = "const [controlR,testR]=await Promise.all([simulate([...common,wd],user,watch,bh),simulate([...common,boost,wd],user,watch,bh)]);"
+          new_pair = "const [controlR,testR]=await simulatePairSameSlot([...common,wd],[...common,boost,wd],user,watch,bh);"
+          if old_pair not in s:
+              raise SystemExit('pair marker not found')
+          s = s.replace(old_pair, new_pair)
+          p.write_text(s)
+      - name: Run same-slot simulation-only LP differential
         run: node audit/boost_jit_lp_probe.mjs
