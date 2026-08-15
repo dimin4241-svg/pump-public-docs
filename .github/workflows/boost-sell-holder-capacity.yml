@@ -1,0 +1,19 @@
+name: PumpSwap BOOST Sell Holder Capacity
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths:
+      - audit/boost_sell_holder_capacity.py
+      - .github/workflows/boost-sell-holder-capacity.yml
+  workflow_dispatch:
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Compare live holders to BOOST unsafe sell boundary
+        run: python audit/boost_sell_holder_capacity.py
