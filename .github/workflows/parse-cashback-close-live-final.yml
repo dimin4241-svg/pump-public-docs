@@ -1,0 +1,62 @@
+name: parse-cashback-close-live-final
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/parse-cashback-close-live-final.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  parse:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: audit/boost-runtime-probe-20260815}
+      - name: Parse cashback close result
+        shell: bash
+        run: |
+          gh api --allow-escape-sequences -H 'Accept: application/vnd.github+json' repos/dimin4241-svg/pump-public-docs/actions/jobs/95061760039/logs > cash.log
+          python3 - <<'PY'
+          import re,json
+          s=open('cash.log','r',encoding='utf-8-sig',errors='replace').read()
+          s=re.sub(r'\x1b\[[0-9;]*m','',s)
+          s='\n'.join(re.sub(r'^\d{4}-\d\d-\d\dT[^ ]+Z\s+','',x) for x in s.splitlines())
+          def extract(marker):
+              a=s.rfind(marker)
+              if a<0:return None
+              i=a+len(marker)
+              while i<len(s) and s[i].isspace():i+=1
+              if i>=len(s) or s[i] not in '[{':return None
+              op=s[i];cl='}' if op=='{' else ']';depth=0;ins=False;esc=False
+              for j in range(i,len(s)):
+                  c=s[j]
+                  if ins:
+                      if esc:esc=False
+                      elif c=='\\':esc=True
+                      elif c=='"':ins=False
+                      continue
+                  if c=='"':ins=True;continue
+                  if c==op:depth+=1
+                  elif c==cl:
+                      depth-=1
+                      if depth==0:
+                          raw=s[i:j+1]
+                          try:return json.loads(raw)
+                          except Exception as e:
+                              print('PARSE_ERR',marker,repr(e),raw[:500]);return None
+              return None
+          for p in [r'ACCUMULATOR_COUNT\s+(\d+)',r'DECODED\s+(\d+)\s+VALUABLE\s+(\d+)',r'RAW_BYTES\s+(\d+)\s+SIGS\s+(\[[^\n]+\])']:
+              ms=list(re.finditer(p,s));print('MARKER',p,'=>',ms[-1].groups() if ms else None)
+          for marker in ['TOP_VALUABLE ','CLOSE_KEYS ','CLOSE_RESULT ']:
+              x=extract(marker);print(marker.strip()+'_COMPACT',json.dumps(x,separators=(',',':')) if x is not None else 'NOT_FOUND')
+          # Print only runtime-relevant tail from the explicit logs section.
+          a=s.rfind('LOGS_BEGIN');b=s.find('LOGS_END',a)
+          if a>=0 and b>a:
+              lines=s[a:b].splitlines()[1:]
+              keep=[x for x in lines if ('Instruction:' in x or 'AnchorError' in x or 'failed:' in x or 'success' in x or 'Error Code' in x)]
+              for x in keep[-40:]:print('RUNTIME',x)
+          PY
