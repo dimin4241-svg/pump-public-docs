@@ -1,0 +1,48 @@
+name: inspect-live-hook-holder-state
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/inspect-live-hook-holder-state.yml']
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: audit/boost-runtime-probe-20260815}
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-swap-sdk@1.19.0 @solana/web3.js @solana/spl-token
+      - shell: bash
+        run: |
+          echo '=== swapSolanaState implementation ==='
+          sed -n '180,380p' node_modules/@pump-fun/pump-swap-sdk/src/sdk/onlinePumpAmm.ts
+          echo '=== sell builder tail ==='
+          sed -n '900,1010p' node_modules/@pump-fun/pump-swap-sdk/src/sdk/offlinePumpAmm.ts
+          node --input-type=module <<'NODE'
+          import {PublicKey,SystemProgram} from '@solana/web3.js';
+          import {TOKEN_2022_PROGRAM_ID,TOKEN_PROGRAM_ID,NATIVE_MINT,getAssociatedTokenAddressSync} from '@solana/spl-token';
+          const mint='pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn';
+          const knownPoolVaults=new Set(['Ca4XhrnaA8ZMYELnZwKwoAZNDTMpkEfHjNWHnauobTaM','9UT7GyuHEbVkDUh8W4JaRTU3oVfcjqPVJBCjpgaNgkt','3UcBb3Pdt2PXu4YxzXmt1t6DE6qFLXQruVLWqPmLmdp7','4pn2hmkx528TFGAe77MPkhc82Y8vPPWzTMBN9GqK51GV','AVzBeqnracKBR1WcVuL3sg5rKKdzyAqKtUQenW9u4MGx','8TqK4PL3x7zWR2dNinr1LMi8Uf4vTRSFE2Ev1yYW9bhC','Hvn66rUhj3TKHwnt4UUK5c6CeZi4RzScPmBX4CS8HMn','42JKdtiK1gJRrtoVb1BzwQwNLwq8Hxqgs7yiD6Dvey9r','3FyHeokDwucaRAJsJVUKPqrzMGPrgWjaswPVj96b32Yb','CWEmuZiDn5mqzsELNDoZLz32izwwbv6nJdCAq5eH8Xpk','C6CjcqxJ9pgCS85mfhDbwSHkNnqkGPV48ryRy46VTn6Z','DsgNmawKXbcLZvLTJaw9VJGpZRKxFG1h8fmVW3P4AJPG']);
+          const RPCS=['https://api.mainnet-beta.solana.com','https://solana-rpc.publicnode.com','https://solana.public-rpc.com','https://rpc.solanatracker.io/public'];let id=1;
+          const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          async function one(u,m,p,n=5){let e;for(let a=0;a<n;a++){try{const r=await fetch(u,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method:m,params:p})});if(r.status===429||r.status>=500){e=new Error('HTTP '+r.status);await sleep(500+500*a);continue}const x=await r.json();if(x.error){e=new Error(JSON.stringify(x.error));break}return x.result}catch(x){e=x;await sleep(500+500*a)}}throw e}
+          async function rpc(m,p){let e;for(const u of RPCS){try{return await one(u,m,p)}catch(x){e=x;console.log('RPC_FAIL',u,m,String(x).slice(0,160))}}throw e}
+          const ai=async pk=>(await rpc('getAccountInfo',[pk,{encoding:'base64',commitment:'confirmed'}])).value;
+          const la=await rpc('getTokenLargestAccounts',[mint,{commitment:'confirmed'}]);
+          console.log('LARGEST_COUNT',la.value.length);
+          const candidates=[];
+          for(const x of la.value){
+            if(knownPoolVaults.has(x.address))continue;
+            const tr=await ai(x.address);if(!tr)continue;const d=Buffer.from(tr.data[0],'base64');if(d.length<72)continue;
+            const owner=new PublicKey(d.subarray(32,64));
+            const or=await ai(owner.toBase58());
+            const onCurve=PublicKey.isOnCurve(owner.toBytes());
+            const wsol=getAssociatedTokenAddressSync(NATIVE_MINT,owner,true,TOKEN_PROGRAM_ID).toBase58();const wr=await ai(wsol);
+            const c={tokenAccount:x.address,owner:owner.toBase58(),amount:d.readBigUInt64LE(64).toString(),uiAmount:x.uiAmountString,onCurve,ownerProgram:or?.owner,lamports:or?.lamports??0,wsolAta:wsol,wsolExists:!!wr,wsolAmount:wr&&Buffer.from(wr.data[0],'base64').length>=72?Buffer.from(wr.data[0],'base64').readBigUInt64LE(64).toString():null};
+            console.log('CAND',JSON.stringify(c));candidates.push(c);
+            if(onCurve&&or?.owner===SystemProgram.programId.toBase58()&&(or?.lamports??0)>5_000_000&&BigInt(c.amount)>1000n){console.log('SELECTED',JSON.stringify(c));break;}
+          }
+          NODE
