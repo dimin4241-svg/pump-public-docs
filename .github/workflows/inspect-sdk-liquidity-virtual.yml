@@ -1,0 +1,34 @@
+name: Inspect SDK Liquidity Virtual Reserve Math
+
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths:
+      - .github/workflows/inspect-sdk-liquidity-virtual.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm install --no-save @pump-fun/pump-swap-sdk@1.19.0
+      - name: Print deposit implementation
+        run: |
+          echo '=== src/sdk/deposit.ts ==='
+          cat node_modules/@pump-fun/pump-swap-sdk/src/sdk/deposit.ts
+          echo '=== relevant offlinePumpAmm contexts ==='
+          grep -nEi -C 15 'deposit|withdraw|virtualQuote|virtual_quote|lpSupply|lp_supply' node_modules/@pump-fun/pump-swap-sdk/src/sdk/offlinePumpAmm.ts || true
+          echo '=== deposit tests ==='
+          cat node_modules/@pump-fun/pump-swap-sdk/src/__tests__/deposit.spec.ts
+          echo '=== withdraw tests ==='
+          cat node_modules/@pump-fun/pump-swap-sdk/src/__tests__/withdraw.spec.ts
+          echo '=== boost tests ==='
+          cat node_modules/@pump-fun/pump-swap-sdk/src/__tests__/boost.spec.ts
