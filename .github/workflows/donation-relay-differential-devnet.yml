@@ -1,0 +1,31 @@
+name: Pump Fees donation relay Devnet differential
+
+on:
+  push:
+    branches: [research/boost-auth-devnet]
+    paths:
+      - "research/donation-relay-differential/**"
+      - "idl/pump_fees.json"
+      - ".github/workflows/donation-relay-differential-devnet.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  donation-relay-differential:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install isolated dependencies
+        working-directory: research/donation-relay-differential
+        run: npm install --no-audit --no-fund
+      - name: Run read-only discovery and Devnet-only simulations
+        working-directory: research/donation-relay-differential
+        env:
+          DEVNET_RPC: https://api.devnet.solana.com
+        run: node probe.mjs
