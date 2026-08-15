@@ -1,0 +1,31 @@
+name: PumpSwap Live Boost Replay Probe
+
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths:
+      - audit/live_boost_replay_probe.py
+      - .github/workflows/live-boost-replay-probe.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  live-probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Snapshot live vault and simulate newest legitimate/mutated boost
+        run: python audit/live_boost_replay_probe.py
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-boost-replay-probe-result
+          path: live_boost_replay_probe_result.json
+          if-no-files-found: warn
+          retention-days: 7
