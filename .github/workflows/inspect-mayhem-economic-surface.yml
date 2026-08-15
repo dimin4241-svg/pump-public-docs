@@ -1,0 +1,29 @@
+name: inspect-mayhem-economic-surface
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/inspect-mayhem-economic-surface.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: audit/boost-runtime-probe-20260815}
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-swap-sdk@1.19.0
+      - shell: bash
+        run: |
+          echo '=== mayhem hits ==='
+          grep -Rni -E 'mayhem|Mayhem|isMayhem' node_modules/@pump-fun/pump-swap-sdk/src | head -n 500 || true
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';const idl=JSON.parse(fs.readFileSync('node_modules/@pump-fun/pump-swap-sdk/src/idl/pump_amm.json','utf8'));
+          for(const x of idl.instructions??[]){if(/mayhem/i.test(JSON.stringify(x))||/buy|sell|create_pool/i.test(x.name))console.log('INSTR',x.name,JSON.stringify(x,null,2))}
+          for(const x of idl.types??[]){if(/mayhem/i.test(JSON.stringify(x)))console.log('TYPE',x.name,JSON.stringify(x,null,2))}
+          for(const x of idl.events??[]){if(/mayhem/i.test(JSON.stringify(x)))console.log('EVENT',x.name,JSON.stringify(x,null,2))}
+          console.log('MAYHEM_ERRORS',JSON.stringify((idl.errors??[]).filter(e=>/mayhem/i.test((e.name??'')+' '+(e.msg??''))),null,2));
+          NODE
