@@ -1,0 +1,30 @@
+name: PumpSwap Inspect Neighbor Boost Transactions
+
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths:
+      - audit/inspect_neighbor_boost_txs.py
+      - .github/workflows/inspect-neighbor-boost-txs.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python audit/inspect_neighbor_boost_txs.py
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: inspect-neighbor-boost-txs-result
+          path: inspect_neighbor_boost_txs_result.json
+          if-no-files-found: warn
+          retention-days: 7
