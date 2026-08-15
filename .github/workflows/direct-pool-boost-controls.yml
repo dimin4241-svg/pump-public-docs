@@ -1,0 +1,25 @@
+name: PumpSwap Direct Pool BOOST Controls
+
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths:
+      - audit/direct_pool_boost_controls.mjs
+      - .github/workflows/direct-pool-boost-controls.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  controls:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm install --no-save @solana/web3.js@1.98.4 @solana/spl-token@0.4.14 bs58@6.0.0
+      - name: Simulate init_boost across funded direct WSOL pools
+        run: node audit/direct_pool_boost_controls.mjs
