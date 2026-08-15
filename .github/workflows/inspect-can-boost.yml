@@ -1,0 +1,21 @@
+name: Inspect PumpSwap can_boost
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: [.github/workflows/inspect-can-boost.yml]
+  workflow_dispatch:
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: {node-version: '24'}
+      - run: npm install --no-save @pump-fun/pump-swap-sdk@1.19.0
+      - name: Search canBoost and baseSupply logic
+        shell: bash
+        run: |
+          set -euo pipefail
+          PKG=node_modules/@pump-fun/pump-swap-sdk
+          grep -RniE -C 18 --exclude='*.map' 'canBoost|can_boost|baseSupply|base_supply|PoolCannotBoost|poolCannotBoost|SeedLockViolation|seedLockViolation' "$PKG/src" || true
