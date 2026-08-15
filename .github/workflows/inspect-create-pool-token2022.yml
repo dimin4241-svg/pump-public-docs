@@ -1,0 +1,34 @@
+name: Inspect create_pool Token-2022 interface
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths:
+      - '.github/workflows/inspect-create-pool-token2022.yml'
+  workflow_dispatch:
+
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '24' }
+      - run: npm install --no-save @pump-fun/pump-swap-sdk@1.19.0
+      - name: Print exact create_pool IDL and SDK surface
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          import * as sdk from '@pump-fun/pump-swap-sdk';
+          const idl=JSON.parse(fs.readFileSync('node_modules/@pump-fun/pump-swap-sdk/src/idl/pump_amm.json','utf8'));
+          for(const name of ['create_pool','deposit','withdraw','buy','sell']){
+            const ix=idl.instructions.find(x=>x.name===name);
+            console.log(`===IDL ${name}===`);console.log(JSON.stringify(ix,null,2));
+          }
+          for(const clsName of ['OfflinePumpAmmSdk','OnlinePumpAmmSdk']){
+            const C=sdk[clsName];console.log('CLASS',clsName,C?Object.getOwnPropertyNames(C.prototype):'missing');
+          }
+          NODE
+          echo '=== create pool SDK source ==='
+          sed -n '80,235p' node_modules/@pump-fun/pump-swap-sdk/src/sdk/onlinePumpAmm.ts || true
+          sed -n '140,235p' node_modules/@pump-fun/pump-swap-sdk/src/sdk/offlinePumpAmm.ts || true
