@@ -1,0 +1,31 @@
+name: Pump cross-quote volume Devnet inspection
+
+on:
+  push:
+    branches: [research/boost-auth-devnet]
+    paths:
+      - "research/volume-cross-quote/**"
+      - "idl/pump.json"
+      - ".github/workflows/volume-cross-quote-devnet.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect-volume:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install isolated dependencies
+        working-directory: research/volume-cross-quote
+        run: npm install --no-audit --no-fund
+      - name: Inspect current Devnet events read-only
+        working-directory: research/volume-cross-quote
+        env:
+          DEVNET_RPC: https://api.devnet.solana.com
+        run: node inspect.mjs
