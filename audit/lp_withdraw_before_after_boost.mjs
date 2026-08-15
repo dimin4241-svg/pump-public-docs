@@ -6,6 +6,7 @@ import {
   createAssociatedTokenAccountIdempotentInstruction,
   getAssociatedTokenAddressSync,
 } from '@solana/spl-token';
+import bs58 from 'bs58';
 
 const RPC = process.env.SOLANA_RPC || 'https://api.mainnet-beta.solana.com';
 const PROGRAM = new PublicKey('pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA');
@@ -15,6 +16,7 @@ const SYSTEM = new PublicKey('11111111111111111111111111111111');
 const POOL = new PublicKey('GseMAnNDvntR5uFePZ51yZBXzNSn7GdFPkfHwfr6d77J');
 const FEE_PAYER = new PublicKey('HTVZVEQMBsNanubDPTs3CxDAEGNFQHJY8c1441iy2S5r');
 const WITHDRAW_DISC = Buffer.from([183,18,70,156,148,109,161,34]);
+const DEPOSIT_DISC = Buffer.from([242,35,198,137,82,225,242,182]);
 const INIT_BOOST_DISC = Buffer.from([140,233,33,94,132,90,194,143]);
 
 async function rpc(method, params) {
@@ -117,7 +119,75 @@ async function accountInfo(key, commitment='processed') {
 async function multiple(keys) {
   return (await rpc('getMultipleAccounts',[keys.map(k=>k.toBase58()),{encoding:'base64',commitment:'processed'}])).value;
 }
-async function makeTx(ixs, signers, blockhash) {
+function allTxKeys(tx) {
+  const staticKeys=tx?.transaction?.message?.accountKeys||[];
+  const loaded=tx?.meta?.loadedAddresses||{};
+  return [...staticKeys,...(loaded.writable||[]),...(loaded.readonly||[])];
+}
+function instructionStream(tx) {
+  const out=[];
+  for(const [position,ix] of (tx?.transaction?.message?.instructions||[]).entries()) out.push({layer:'top',position,ix});
+  for(const group of (tx?.meta?.innerInstructions||[])) {
+    for(const [position,ix] of (group.instructions||[]).entries()) out.push({layer:`inner@${group.index}`,position,ix});
+  }
+  return out;
+}
+function discriminator(ix) {
+  try { return Buffer.from(bs58.decode(ix.data||'')).subarray(0,8); }
+  catch { return Buffer.alloc(0); }
+}
+async function findLpHolder(p, lpProgram) {
+  const lpMint=new PublicKey(p.lpMint);
+  const creator=new PublicKey(p.creator);
+  const creatorAta=getAssociatedTokenAddressSync(lpMint,creator,true,lpProgram,ASSOCIATED_TOKEN_PROGRAM_ID);
+  const creatorInfo=await accountInfo(creatorAta);
+  if(creatorInfo) {
+    const t=decodeTokenValue(creatorInfo);
+    console.log('CREATOR_LP_ATA',JSON.stringify({address:creatorAta.toBase58(),token:t},null,2));
+    if(t.mint===p.lpMint && t.owner===p.creator && BigInt(t.amount)>0n) {
+      return {key:creatorAta,info:creatorInfo,token:t,source:'creator_canonical_ata'};
+    }
+  } else {
+    console.log('CREATOR_LP_ATA',JSON.stringify({address:creatorAta.toBase58(),exists:false},null,2));
+  }
+
+  // Swaps do not touch the LP mint, so LP-mint history is a low-noise way to find a live liquidity position.
+  const sigRows=await rpc('getSignaturesForAddress',[p.lpMint,{limit:100,commitment:'confirmed'}])||[];
+  console.log('LP_MINT_HISTORY',JSON.stringify({rows:sigRows.length},null,2));
+  for(const row of sigRows) {
+    if(row.err) continue;
+    let tx;
+    try {
+      tx=await rpc('getTransaction',[row.signature,{encoding:'json',commitment:'confirmed',maxSupportedTransactionVersion:0}]);
+    } catch(e) {
+      console.log('LP_HISTORY_TX_ERROR',row.signature,String(e));
+      continue;
+    }
+    if(!tx) continue;
+    const keys=allTxKeys(tx);
+    for(const {layer,position,ix} of instructionStream(tx)) {
+      const pi=ix.programIdIndex;
+      if(pi===undefined || pi>=keys.length || keys[pi]!==PROGRAM.toBase58()) continue;
+      const d=discriminator(ix);
+      if(!d.equals(WITHDRAW_DISC) && !d.equals(DEPOSIT_DISC)) continue;
+      const ai=ix.accounts||[];
+      if(ai.length<9 || ai[2]>=keys.length || ai[8]>=keys.length) continue;
+      const userKey=new PublicKey(keys[ai[2]]);
+      const lpKey=new PublicKey(keys[ai[8]]);
+      const info=await accountInfo(lpKey);
+      if(!info) continue;
+      const t=decodeTokenValue(info);
+      const candidate={signature:row.signature,layer,position,kind:d.equals(WITHDRAW_DISC)?'withdraw':'deposit',user:userKey.toBase58(),userLp:lpKey.toBase58(),currentToken:t};
+      console.log('LP_HISTORY_CANDIDATE',JSON.stringify(candidate,null,2));
+      if(t.mint===p.lpMint && t.owner===userKey.toBase58() && BigInt(t.amount)>0n) {
+        return {key:lpKey,info,token:t,source:'live_account_from_lp_mint_history',sourceTx:row.signature};
+      }
+    }
+    await new Promise(x=>setTimeout(x,120));
+  }
+  throw new Error('No live LP token holder found via creator ATA or LP-mint history');
+}
+async function makeTx(ixs, blockhash) {
   const tx=new Transaction({feePayer:FEE_PAYER,recentBlockhash:blockhash});
   tx.add(...ixs);
   // Signer bits come from instruction metas. sigVerify=false means no private keys are needed.
@@ -161,22 +231,11 @@ async function main() {
   const lpProgram=mintProgram(lpMintInfo.owner);
   console.log('MINT_PROGRAMS',JSON.stringify({base:baseProgram.toBase58(),quote:quoteProgram.toBase58(),lp:lpProgram.toBase58()},null,2));
 
-  const largest=(await rpc('getTokenLargestAccounts',[p.lpMint,{commitment:'processed'}])).value||[];
-  let chosen=null;
-  for(const row of largest) {
-    if(BigInt(row.amount)<=0n) continue;
-    const k=new PublicKey(row.address);
-    const info=await accountInfo(k);
-    if(!info) continue;
-    const t=decodeTokenValue(info);
-    if(t.mint!==p.lpMint || BigInt(t.amount)<=0n) continue;
-    chosen={key:k,info,token:t,row}; break;
-  }
-  if(!chosen) throw new Error('No live LP token holder found');
+  const chosen=await findLpHolder(p,lpProgram);
   const user=new PublicKey(chosen.token.owner);
   const userLp=chosen.key;
   const lpBalance=BigInt(chosen.token.amount);
-  console.log('LP_HOLDER',JSON.stringify({user:user.toBase58(),userLp:userLp.toBase58(),lpBalance:lpBalance.toString(),largestRow:chosen.row},null,2));
+  console.log('LP_HOLDER',JSON.stringify({user:user.toBase58(),userLp:userLp.toBase58(),lpBalance:lpBalance.toString(),source:chosen.source,sourceTx:chosen.sourceTx||null},null,2));
 
   const userBase=getAssociatedTokenAddressSync(new PublicKey(p.baseMint),user,true,baseProgram,ASSOCIATED_TOKEN_PROGRAM_ID);
   const userQuote=getAssociatedTokenAddressSync(new PublicKey(p.quoteMint),user,true,quoteProgram,ASSOCIATED_TOKEN_PROGRAM_ID);
@@ -207,8 +266,8 @@ async function main() {
     const wd=withdrawIx({p,user,userBase,userQuote,userLp,baseProgram,quoteProgram,lpAmount});
     const init=initBoostIx({p,creator,quoteProgram,vaultAuth,vault});
     const bh=(await rpc('getLatestBlockhash',[{commitment:'processed'}])).value.blockhash;
-    const rawA=await makeTx([...setup,wd],[user],bh);
-    const rawB=await makeTx([...setup,init,wd],[creator,user],bh);
+    const rawA=await makeTx([...setup,wd],bh);
+    const rawB=await makeTx([...setup,init,wd],bh);
     // Fire both simulations concurrently so both branches are evaluated against the same RPC bank whenever possible.
     const [a,b]=await Promise.all([simulateRaw(rawA,watch),simulateRaw(rawB,watch)]);
     const sa=summarizeSim(a,pre,names), sb=summarizeSim(b,pre,names);
