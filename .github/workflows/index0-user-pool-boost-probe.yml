@@ -1,0 +1,40 @@
+name: PumpSwap User-Owned Index0 BOOST Probe
+
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths:
+      - .github/workflows/index0-user-pool-boost-probe.yml
+      - audit/direct_pool_boost_controls.mjs
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe-index0:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm install --no-save @solana/web3.js@1.98.4 @solana/spl-token@0.4.14 bs58@6.0.0
+      - name: Convert existing direct-pool control to user-owned index-0 discovery
+        shell: python
+        run: |
+          from pathlib import Path
+          p=Path('audit/direct_pool_boost_controls.mjs')
+          s=p.read_text()
+          s=s.replace('idx.writeUInt16LE(1);','idx.writeUInt16LE(0);')
+          needle="const lpTok=token(await info(creatorLp));"
+          repl=needle+"\n  if(BigInt(lpTok.amount)===0n){console.log('SKIP_NO_CREATOR_LP',p.pubkey);continue;}"
+          if needle not in s: raise SystemExit('creator LP marker not found')
+          s=s.replace(needle,repl)
+          # Search deeper because many index-0 pools are migration pools with burned LP.
+          s=s.replace('ranked.slice(0,80)','ranked.slice(0,600)')
+          s=s.replace('if(tested>=12)break;','if(tested>=20)break;')
+          p.write_text(s)
+      - name: Simulate init_boost only on index-0 pools whose creator still owns LP
+        run: node audit/direct_pool_boost_controls.mjs
