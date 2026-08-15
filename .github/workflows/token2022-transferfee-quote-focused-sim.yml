@@ -1,0 +1,65 @@
+name: token2022-transferfee-quote-focused-sim
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/token2022-transferfee-quote-focused-sim.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  simulate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: audit/boost-runtime-probe-20260815}
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-swap-sdk@1.19.0 @solana/web3.js @solana/spl-token bn.js
+      - name: TransferFee quote create_pool — simulation only
+        shell: bash
+        run: |
+          cat > qfocused.mjs <<'NODE'
+          import BN from 'bn.js';
+          import {PublicKey,Keypair,SystemProgram,Transaction} from '@solana/web3.js';
+          import {
+            TOKEN_2022_PROGRAM_ID,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID,
+            ExtensionType,getMintLen,getAssociatedTokenAddressSync,
+            createAssociatedTokenAccountIdempotentInstruction,createInitializeMintInstruction,
+            createInitializeTransferFeeConfigInstruction,createMintToInstruction,
+            unpackAccount,getTransferFeeAmount,
+          } from '@solana/spl-token';
+          import {OFFLINE_PUMP_AMM_PROGRAM,GLOBAL_CONFIG_PDA,poolPda} from '@pump-fun/pump-swap-sdk';
+          const RPCS=['https://api.mainnet-beta.solana.com','https://solana-rpc.publicnode.com','https://solana.public-rpc.com','https://rpc.solanatracker.io/public'];let id=1;
+          const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          async function one(u,m,p,n=5){let e;for(let a=0;a<n;a++){try{const r=await fetch(u,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method:m,params:p})});if(r.status===429||r.status>=500){e=new Error('HTTP '+r.status);await sleep(600+500*a);continue}const x=await r.json();if(x.error){e=new Error(JSON.stringify(x.error));break}return x.result}catch(x){e=x;await sleep(600+500*a)}}throw e}
+          async function rpc(m,p){let e;for(const u of RPCS){try{return await one(u,m,p)}catch(x){e=x;console.log('RPC_FAIL',u,m,String(x).slice(0,180))}}throw e}
+          async function ai(pk){return (await rpc('getAccountInfo',[pk.toBase58(),{encoding:'base64',commitment:'processed'}])).value}
+          const amount=r=>r&&Buffer.from(r.data[0],'base64').length>=72?Buffer.from(r.data[0],'base64').readBigUInt64LE(64):null;
+          const local=r=>({data:Buffer.from(r.data[0],'base64'),executable:r.executable,lamports:r.lamports,owner:new PublicKey(r.owner),rentEpoch:r.rentEpoch??0});
+          function decT22(pk,r){if(!r)return null;try{const a=unpackAccount(pk,local(r),TOKEN_2022_PROGRAM_ID),f=getTransferFeeAmount(a);return{amount:a.amount.toString(),withheldAmount:f?.withheldAmount?.toString?.()??String(f?.withheldAmount??0)}}catch(e){return{error:String(e)}}}
+
+          const creator=new PublicKey('HTVZVEQMBsNanubDPTs3CxDAEGNFQHJY8c1441iy2S5r');const cr=await ai(creator);if(!cr)throw new Error('creator missing');
+          const seed='q';const base=await PublicKey.createWithSeed(creator,seed,TOKEN_PROGRAM_ID);const existingBase=await ai(base);if(existingBase)throw new Error('seeded base account already exists');
+          const quoteKp=Keypair.generate(),quote=quoteKp.publicKey,index=0,baseIn=100_000_000n,quoteIn=100_000_000n,supply=1_000_000_000n,feeBps=1000,maxFee=1_000_000_000n;
+          const baseLen=82,baseRent=await rpc('getMinimumBalanceForRentExemption',[baseLen,{commitment:'processed'}]);const quoteLen=getMintLen([ExtensionType.TransferFeeConfig]),quoteRent=await rpc('getMinimumBalanceForRentExemption',[quoteLen,{commitment:'processed'}]);
+          const pool=poolPda(index,creator,base,quote),userBase=getAssociatedTokenAddressSync(base,creator,true,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID),userQuote=getAssociatedTokenAddressSync(quote,creator,true,TOKEN_2022_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID),poolBase=getAssociatedTokenAddressSync(base,pool,true,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID),poolQuote=getAssociatedTokenAddressSync(quote,pool,true,TOKEN_2022_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID);
+          const ixs=[
+            SystemProgram.createAccountWithSeed({fromPubkey:creator,newAccountPubkey:base,basePubkey:creator,seed,lamports:baseRent,space:baseLen,programId:TOKEN_PROGRAM_ID}),
+            createInitializeMintInstruction(base,6,creator,null,TOKEN_PROGRAM_ID),
+            createAssociatedTokenAccountIdempotentInstruction(creator,userBase,creator,base,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID),
+            createMintToInstruction(base,userBase,creator,supply,[],TOKEN_PROGRAM_ID),
+            SystemProgram.createAccount({fromPubkey:creator,newAccountPubkey:quote,lamports:quoteRent,space:quoteLen,programId:TOKEN_2022_PROGRAM_ID}),
+            createInitializeTransferFeeConfigInstruction(quote,creator,creator,feeBps,maxFee,TOKEN_2022_PROGRAM_ID),
+            createInitializeMintInstruction(quote,6,creator,null,TOKEN_2022_PROGRAM_ID),
+            createAssociatedTokenAccountIdempotentInstruction(creator,userQuote,creator,quote,TOKEN_2022_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID),
+            createMintToInstruction(quote,userQuote,creator,supply,[],TOKEN_2022_PROGRAM_ID),
+            createAssociatedTokenAccountIdempotentInstruction(creator,poolBase,pool,base,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID),
+            createAssociatedTokenAccountIdempotentInstruction(creator,poolQuote,pool,quote,TOKEN_2022_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID),
+          ];
+          const cp=await OFFLINE_PUMP_AMM_PROGRAM.methods.createPool(index,new BN(baseIn.toString()),new BN(quoteIn.toString()),SystemProgram.programId,false,{0:false}).accountsPartial({globalConfig:GLOBAL_CONFIG_PDA,baseMint:base,quoteMint:quote,creator,userBaseTokenAccount:userBase,userQuoteTokenAccount:userQuote,baseTokenProgram:TOKEN_PROGRAM_ID,quoteTokenProgram:TOKEN_2022_PROGRAM_ID}).instruction();ixs.push(cp);
+          const bh=await rpc('getLatestBlockhash',[{commitment:'processed'}]);const tx=new Transaction({feePayer:creator,recentBlockhash:bh.value.blockhash});tx.add(...ixs);const raw=tx.serialize({requireAllSignatures:false,verifySignatures:false});console.log('RAW_BYTES',raw.length,'SIG_SLOTS',tx.signatures.length,'BASE',base.toBase58(),'QUOTE',quote.toBase58(),'POOL',pool.toBase58());
+          const addrs=[pool,poolBase,poolQuote,userBase,userQuote,quote].map(x=>x.toBase58());const sim=await rpc('simulateTransaction',[raw.toString('base64'),{encoding:'base64',sigVerify:false,replaceRecentBlockhash:true,commitment:'processed',accounts:{encoding:'base64',addresses:addrs}}]);const v=sim.value??{},ps=v.accounts??[],text=(v.logs??[]).join('\n');
+          console.log('RESULT',JSON.stringify({simulationOnly:true,broadcast:false,err:v.err,units:v.unitsConsumed,createPoolReached:text.includes('Instruction: CreatePool'),unsupportedBase:text.includes('UnsupportedBaseMint'),unsupportedQuote:text.includes('UnsupportedQuoteMint'),poolExists:!!ps[0],poolBase:String(amount(ps[1])),poolQuote:decT22(poolQuote,ps[2]),userBase:String(amount(ps[3])),userQuote:decT22(userQuote,ps[4]),nominalQuoteIn:String(quoteIn),expectedNet:String(quoteIn-quoteIn*BigInt(feeBps)/10000n)},null,2));console.log('LOGS_BEGIN');for(const l of v.logs??[])console.log(l);console.log('LOGS_END');
+          NODE
+          node qfocused.mjs
