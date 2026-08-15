@@ -1,0 +1,39 @@
+name: inspect-live-hook-pool-swap-sdk
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/inspect-live-hook-pool-swap-sdk.yml']
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: audit/boost-runtime-probe-20260815}
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-swap-sdk@1.19.0 @solana/web3.js @solana/spl-token
+      - shell: bash
+        run: |
+          echo '=== Online SDK class / constructors / state fetch ==='
+          grep -Rni -E 'class OnlinePumpAmm|constructor\(|swapSolanaState|sellBaseInput|sellInstructions' node_modules/@pump-fun/pump-swap-sdk/src/sdk | head -n 160 || true
+          sed -n '1,180p' node_modules/@pump-fun/pump-swap-sdk/src/sdk/onlinePumpAmm.ts
+          echo '=== exports ==='
+          sed -n '1,220p' node_modules/@pump-fun/pump-swap-sdk/src/index.ts 2>/dev/null || true
+          node --input-type=module <<'NODE'
+          import {PublicKey} from '@solana/web3.js';
+          import {NATIVE_MINT,TOKEN_2022_PROGRAM_ID,unpackMint,getTransferHook} from '@solana/spl-token';
+          const RPC='https://api.mainnet-beta.solana.com';let id=1;
+          async function rpc(m,p){const r=await fetch(RPC,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method:m,params:p})});const x=await r.json();if(x.error)throw new Error(JSON.stringify(x.error));return x.result}
+          const mint='pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn';
+          const pools=['VJf32Y1CFnaeHhaPnEEspP7T9AyYTYadx1WBbxkx4KQ','rrD9TypT3ft7wdCuMhaZ4RzvwJ14LLpEjVMMfKDTVQU','294d8awVqXCsZ4H2munDEiQwti2wtMebfvx3KMhLnjNi','2CmCxpcmik7hwsmum9i284Fne1Vazmthkan9sN2KRBxN','2kDZNk6spSW6AqW6D4g3gne1TAMdxpNu4T4SAFuaAnUa','2uF4Xh61rDwxnG9woyxsVQP7zuA6kLFpb3NvnRQeoiSd','3FgP8She3z53JncZjv86M7eDnKXH8Btuec27ncSHLjap','3tX4Q36FThaFwK7RdzMF8Jm9J8VA9BZn2Aq8Y9fvTQPW','4AXYZbsRJRNxFAg3sCXYqcNxf68KzRA487ybg2V5e2t4','4XRT3BUrudJh8P8NXm1kd7PPpTnD61YokvJbXHGG5XzD','4vhJF9WwiRQUBiCm7eeHdZgEVXEtC6VWJyzAbBDGGrhP','539m4mVWt6iduB6W8rDGPMarzNCMesuqY5eUTiiYHAgR'];
+          const mr=(await rpc('getAccountInfo',[mint,{encoding:'base64',commitment:'confirmed'}])).value;
+          const info={data:Buffer.from(mr.data[0],'base64'),executable:mr.executable,lamports:mr.lamports,owner:new PublicKey(mr.owner),rentEpoch:mr.rentEpoch??0};const mm=unpackMint(new PublicKey(mint),info,TOKEN_2022_PROGRAM_ID);console.log('HOOK',JSON.stringify(getTransferHook(mm),(_k,v)=>v?.toBase58?.()??v));
+          const rows=(await rpc('getMultipleAccounts',[pools,{encoding:'base64',commitment:'confirmed'}])).value;
+          const out=[];
+          for(let i=0;i<rows.length;i++){const r=rows[i];if(!r)continue;const b=Buffer.from(r.data[0],'base64');if(b.length<203)continue;const pk=(a,z)=>new PublicKey(b.subarray(a,z)).toBase58();const base=pk(43,75),quote=pk(75,107),pb=pk(139,171),pq=pk(171,203);const vr=(await rpc('getMultipleAccounts',[[pb,pq],{encoding:'base64',commitment:'confirmed'}])).value;const amt=x=>x?Buffer.from(x.data[0],'base64').readBigUInt64LE(64).toString():null;out.push({pool:pools[i],base,quote,poolBase:pb,poolQuote:pq,baseAmount:amt(vr[0]),quoteAmount:amt(vr[1]),isWsolQuote:quote===NATIVE_MINT.toBase58()});}
+          console.log('POOLS',JSON.stringify(out,null,2));
+          const la=await rpc('getTokenLargestAccounts',[mint,{commitment:'confirmed'}]);console.log('LARGEST',JSON.stringify(la.value.slice(0,8),null,2));
+          NODE
