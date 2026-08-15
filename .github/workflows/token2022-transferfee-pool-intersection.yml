@@ -36,9 +36,9 @@ jobs:
           const RPCS = ['https://api.mainnet-beta.solana.com','https://rpc.ankr.com/solana'];
           const AMM = 'pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA';
           const idl = JSON.parse(fs.readFileSync('node_modules/@pump-fun/pump-swap-sdk/src/idl/pump_amm.json','utf8'));
-          const poolDisc = Buffer.from(idl.accounts.find(x=>x.name==='pool').discriminator);
+          const poolDisc = Buffer.from(idl.accounts.find(x=>x.name.toLowerCase()==='pool').discriminator);
           const poolDisc58 = bs58.encode(poolDisc);
-          const mintAccountType58 = bs58.encode(Buffer.from([1])); // Token-2022 AccountType::Mint
+          const mintAccountType58 = bs58.encode(Buffer.from([1]));
           let id = 1;
 
           async function rpcOn(url, method, params) {
@@ -67,7 +67,6 @@ jobs:
           console.log('POOL_DISC',poolDisc.toString('hex'),poolDisc58);
           console.log('TOKEN2022_MINT_ACCOUNT_TYPE_FILTER',mintAccountType58);
 
-          // Fetch only the 32-byte base_mint slice from every current 300-byte PumpSwap Pool.
           const pools = await rpc('getProgramAccounts',[AMM,{
             commitment:'confirmed',encoding:'base64',
             filters:[{dataSize:300},{memcmp:{offset:0,bytes:poolDisc58}}],
@@ -82,8 +81,6 @@ jobs:
           }
           console.log('POOL_COUNT',pools?.length??0,'UNIQUE_BASE_MINTS',baseToPools.size);
 
-          // Token-2022 extension-bearing mints are padded past the base layouts and carry
-          // AccountType::Mint at byte 165. dataSlice=0 keeps this address inventory small.
           const t22Mints = await rpc('getProgramAccounts',[TOKEN_2022_PROGRAM_ID.toBase58(),{
             commitment:'confirmed',encoding:'base64',
             filters:[{memcmp:{offset:165,bytes:mintAccountType58}}],
