@@ -21,5 +21,9 @@ jobs:
         with:
           node-version: '24'
       - run: npm install --no-save @solana/web3.js@1.98.4 @solana/spl-token@0.4.14 bs58@6.0.0
+      - name: Widen discovery to every index-1 pool and include smaller WSOL pools
+        run: |
+          sed -i 's/candidates\.slice(0,120)/candidates/' audit/direct_pool_init_boost_probe.mjs
+          sed -i 's/1_000_000_000n/50_000_000n/' audit/direct_pool_init_boost_probe.mjs
       - name: Discover direct-created pools and simulate creator init_boost only
         run: node audit/direct_pool_init_boost_probe.mjs
