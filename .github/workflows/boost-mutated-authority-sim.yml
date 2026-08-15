@@ -1,0 +1,33 @@
+name: PumpSwap Mutated Boost Authority Simulation
+
+on:
+  push:
+    branches:
+      - audit/boost-runtime-probe-20260815
+    paths:
+      - audit/boost_mutated_authority_sim.py
+      - .github/workflows/boost-mutated-authority-sim.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  simulate-only:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Simulate original and authority-mutated transaction without broadcasting
+        run: python audit/boost_mutated_authority_sim.py
+      - name: Preserve structured result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: boost-mutated-authority-sim-result
+          path: boost_mutated_authority_sim_result.json
+          if-no-files-found: warn
+          retention-days: 7
