@@ -1,0 +1,18 @@
+name: Decode Current PumpSwap BOOST Events
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths:
+      - audit/decode_current_boost_events.mjs
+      - .github/workflows/decode-current-boost-events.yml
+  workflow_dispatch:
+jobs:
+  decode:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: {node-version: '24'}
+      - run: npm install --no-save @coral-xyz/anchor@0.31.1
+      - run: node audit/decode_current_boost_events.mjs
