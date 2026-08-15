@@ -1,0 +1,25 @@
+name: PumpSwap BOOST Deposit Gate Probe
+
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths:
+      - audit/boost_deposit_gate_probe.mjs
+      - .github/workflows/boost-deposit-gate-probe.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm install --no-save @solana/web3.js@1.98.4 @solana/spl-token@0.4.14
+      - name: Simulate true BOOST initialization followed by LP deposit only
+        run: node audit/boost_deposit_gate_probe.mjs
