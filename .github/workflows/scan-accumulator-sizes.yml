@@ -1,0 +1,17 @@
+name: Scan PumpSwap Accumulator Sizes
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths:
+      - audit/scan_accumulator_sizes.py
+      - .github/workflows/scan-accumulator-sizes.yml
+  workflow_dispatch:
+jobs:
+  scan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python audit/scan_accumulator_sizes.py
