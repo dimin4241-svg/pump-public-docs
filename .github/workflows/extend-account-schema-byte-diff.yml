@@ -1,0 +1,64 @@
+name: extend-account-schema-byte-diff
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/extend-account-schema-byte-diff.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: audit/boost-runtime-probe-20260815}
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-swap-sdk@1.19.0 @solana/web3.js @solana/spl-token bs58
+      - name: Sample schema epochs and byte-diff extendAccount
+        shell: bash
+        run: |
+          cat > extend_schema_probe.mjs <<'NODE'
+          import fs from 'node:fs'; import bs58pkg from 'bs58';
+          import {PublicKey,Transaction} from '@solana/web3.js';
+          import {OFFLINE_PUMP_AMM_PROGRAM,PUMP_AMM_PROGRAM_ID,PUMP_AMM_SDK} from '@pump-fun/pump-swap-sdk';
+          const bs58=bs58pkg.default??bs58pkg;
+          const user=new PublicKey('HTVZVEQMBsNanubDPTs3CxDAEGNFQHJY8c1441iy2S5r');
+          const sizes=[211,243,244,245,261,300,301];
+          const legacy=new Set([211,243,244,245,261]);
+          const RPCS=['https://api.mainnet-beta.solana.com','https://rpc.solanatracker.io/public','https://solana-rpc.publicnode.com','https://solana.public-rpc.com']; let id=1;
+          const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          async function one(u,m,p,n=4){let e;for(let a=0;a<n;a++){try{const r=await fetch(u,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-simulation-only/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method:m,params:p})});if(r.status===429||r.status>=500){e=new Error('HTTP '+r.status);await sleep(500+600*a);continue}const x=await r.json();if(x.error){e=new Error(JSON.stringify(x.error));if(/No response|429|Too many/i.test(String(e))){await sleep(500+600*a);continue}throw e}return x.result}catch(x){e=x;await sleep(500+600*a)}}throw e}
+          async function call(m,p){let e;for(const u of RPCS){try{return await one(u,m,p)}catch(x){e=x;console.log('RPC_FAIL',m,u,String(x).slice(0,170))}}throw e}
+          async function sim(raw,addresses,label){let e;for(const u of RPCS){try{console.log(label,'SIM_TRY',u);const x=await one(u,'simulateTransaction',[raw.toString('base64'),{encoding:'base64',sigVerify:false,replaceRecentBlockhash:true,commitment:'confirmed',accounts:{encoding:'base64',addresses}}],3);console.log(label,'SIM_RPC',u);return x.value}catch(x){e=x;console.log(label,'SIM_FAIL',u,String(x).slice(0,220))}}throw e}
+          const idl=JSON.parse(fs.readFileSync('node_modules/@pump-fun/pump-swap-sdk/src/idl/pump_amm.json','utf8'));const disc58=bs58.encode(Buffer.from(idl.accounts.find(x=>x.name.toLowerCase()==='pool').discriminator));
+          function pk(b,a,z){return b.length>=z?new PublicKey(b.subarray(a,z)).toBase58():null}
+          function i128le(buf,off){if(buf.length<off+16)return null;let u=0n;for(let i=15;i>=0;i--)u=(u<<8n)+BigInt(buf[off+i]);return u&(1n<<127n)?u-(1n<<128n):u}
+          function parsePool(b){return {len:b.length,bump:b.length>8?b[8]:null,index:b.length>=11?b.readUInt16LE(9):null,creator:pk(b,11,43),baseMint:pk(b,43,75),quoteMint:pk(b,75,107),lpMint:pk(b,107,139),poolBase:pk(b,139,171),poolQuote:pk(b,171,203),lpSupply:b.length>=211?b.readBigUInt64LE(203).toString():null,coinCreator:pk(b,211,243),isMayhem:b.length>=244?b[243]:null,isCashback:b.length>=245?b[244]:null,virtual:b.length>=261?i128le(b,245)?.toString():null,tail261:b.length>261?b.subarray(261).toString('hex'):''}}
+          function diff(a,b){const out=[];const n=Math.max(a.length,b.length);for(let i=0;i<n;i++){const x=i<a.length?a[i]:null,y=i<b.length?b[i]:null;if(x!==y)out.push([i,x,y]);}return out}
+          async function accountRows(keys,full=true){return (await call('getMultipleAccounts',[keys,{encoding:'base64',commitment:'confirmed',...(full?{}:{dataSlice:{offset:64,length:8}})}])).value}
+          const selected=[];
+          for(const size of sizes){
+            const g=await call('getProgramAccounts',[PUMP_AMM_PROGRAM_ID.toBase58(),{commitment:'confirmed',encoding:'base64',filters:[{dataSize:size},{memcmp:{offset:0,bytes:disc58}}],dataSlice:{offset:0,length:0}}]);
+            console.log('SIZE_COUNT',size,g.length);
+            const candidates=g.slice(0,80).map(x=>x.pubkey);const infos=await accountRows(candidates,true);
+            const parsed=[];for(let i=0;i<candidates.length;i++){const r=infos[i];if(!r)continue;const b=Buffer.from(r.data[0],'base64'),p=parsePool(b);parsed.push({key:candidates[i],row:r,b,p});}
+            const vaultKeys=[];for(const x of parsed){if(x.p.poolBase)vaultKeys.push(x.p.poolBase);if(x.p.poolQuote)vaultKeys.push(x.p.poolQuote)}
+            const vaultInfo=vaultKeys.length?await accountRows(vaultKeys,true):[];let vi=0,best=null;
+            for(const x of parsed){const rb=x.p.poolBase?vaultInfo[vi++]:null,rq=x.p.poolQuote?vaultInfo[vi++]:null;const amt=r=>{if(!r)return 0n;const d=Buffer.from(r.data[0],'base64');return d.length>=72?d.readBigUInt64LE(64):0n};const ba=amt(rb),qa=amt(rq),score=ba+qa;if(!best||score>best.score)best={...x,baseAmount:ba,quoteAmount:qa,score};}
+            if(!best){console.log('NO_SAMPLE',size);continue}
+            let sdk=null;try{const info={data:best.b,executable:best.row.executable,lamports:best.row.lamports,owner:new PublicKey(best.row.owner),rentEpoch:best.row.rentEpoch??0};const d=PUMP_AMM_SDK.decodePool(info);sdk={creator:d.creator.toBase58(),baseMint:d.baseMint.toBase58(),quoteMint:d.quoteMint.toBase58(),lpSupply:d.lpSupply.toString(),coinCreator:d.coinCreator?.toBase58?.(),isMayhemMode:d.isMayhemMode,isCashbackCoin:d.isCashbackCoin,virtualQuoteReserves:d.virtualQuoteReserves?.toString?.()}}catch(e){sdk={error:String(e)}}
+            console.log('SAMPLE',JSON.stringify({size,key:best.key,lamports:best.row.lamports,baseAmount:best.baseAmount.toString(),quoteAmount:best.quoteAmount.toString(),manual:best.p,sdk},null,2));
+            selected.push({size,...best});
+          }
+          const userInfo=(await call('getAccountInfo',[user.toBase58(),{encoding:'base64',commitment:'confirmed'}])).value;console.log('PAYER_LAMPORTS',userInfo?.lamports);
+          for(const x of selected.filter(x=>legacy.has(x.size))){
+            const ix=await OFFLINE_PUMP_AMM_PROGRAM.methods.extendAccount().accountsPartial({account:new PublicKey(x.key),user}).instruction();const bh=(await call('getLatestBlockhash',[{commitment:'confirmed'}])).value;const tx=new Transaction({feePayer:user,recentBlockhash:bh.blockhash}).add(ix);const raw=tx.serialize({requireAllSignatures:false,verifySignatures:false});const v=await sim(raw,[x.key],`EXTEND_${x.size}`);const post=v.accounts?.[0];const pb=post?Buffer.from(post.data[0],'base64'):null;const text=(v.logs??[]).join('\n');console.log('EXTEND_RESULT',JSON.stringify({size:x.size,key:x.key,simulationOnly:true,broadcast:false,err:v.err,units:v.unitsConsumed,reached:text.includes('Instruction: ExtendAccount'),preLamports:x.row.lamports,postLamports:post?.lamports??null,pre:parsePool(x.b),post:pb?parsePool(pb):null,diffCount:pb?diff(x.b,pb).length:null,diffFirst:pb?diff(x.b,pb).slice(0,80):null},null,2));console.log(`EXTEND_${x.size}_LOGS_BEGIN`);for(const l of v.logs??[])console.log(l);console.log(`EXTEND_${x.size}_LOGS_END`);
+          }
+          // Explicit safety probes on already-large accounts.
+          for(const x of selected.filter(x=>x.size>=300)){
+            const ix=await OFFLINE_PUMP_AMM_PROGRAM.methods.extendAccount().accountsPartial({account:new PublicKey(x.key),user}).instruction();const bh=(await call('getLatestBlockhash',[{commitment:'confirmed'}])).value;const tx=new Transaction({feePayer:user,recentBlockhash:bh.blockhash}).add(ix);const raw=tx.serialize({requireAllSignatures:false,verifySignatures:false});const v=await sim(raw,[x.key],`REEXTEND_${x.size}`);console.log('REEXTEND_RESULT',JSON.stringify({size:x.size,key:x.key,err:v.err,logs:v.logs??[]},null,2));
+          }
+          NODE
+          node extend_schema_probe.mjs
