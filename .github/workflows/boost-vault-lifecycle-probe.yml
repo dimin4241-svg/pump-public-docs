@@ -1,0 +1,33 @@
+name: PumpSwap Boost Vault Lifecycle Probe
+
+on:
+  push:
+    branches:
+      - audit/boost-runtime-probe-20260815
+    paths:
+      - audit/boost_vault_lifecycle_probe.py
+      - .github/workflows/boost-vault-lifecycle-probe.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lifecycle-probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Trace vault lifecycle and simulation-replay init only
+        run: python audit/boost_vault_lifecycle_probe.py
+      - name: Preserve structured result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: boost-vault-lifecycle-probe-result
+          path: boost_vault_lifecycle_probe_result.json
+          if-no-files-found: warn
+          retention-days: 7
