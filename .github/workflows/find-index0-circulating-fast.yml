@@ -1,0 +1,31 @@
+name: PumpSwap Find Index0 Circulating Fast
+
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths:
+      - audit/find_index0_circulating_fast.py
+      - .github/workflows/find-index0-circulating-fast.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Discover index-0 WSOL pools with circulating LP
+        run: python audit/find_index0_circulating_fast.py
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: index0-circulating-candidates
+          path: index0_circulating_candidates.json
+          if-no-files-found: warn
+          retention-days: 7
