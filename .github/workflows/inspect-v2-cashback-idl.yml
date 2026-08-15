@@ -1,0 +1,16 @@
+name: Compact PumpSwap V2 Cashback IDL
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths:
+      - audit/inspect_v2_cashback_idl.py
+      - .github/workflows/inspect-v2-cashback-idl.yml
+  workflow_dispatch:
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python audit/inspect_v2_cashback_idl.py
