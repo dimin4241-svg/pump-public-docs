@@ -32,19 +32,24 @@ jobs:
             const start=size>=244?243:0;const len=size>=261?18:size>=245?2:size>=244?1:0;
             const cfg={commitment:'confirmed',encoding:'base64',filters:[{dataSize:size},{memcmp:{offset:0,bytes:disc58}}],dataSlice:{offset:start,length:len}};
             const rows=await call('getProgramAccounts',[PUMP_AMM_PROGRAM_ID.toBase58(),cfg]);total+=rows.length;let sm=0,sc=0,sb=0;
-            for(const r of rows){const d=Buffer.from(r.account.data[0],'base64');if(size>=244&&d.length>=1&&d[0]!==0){sm++;mayhem.push({pool:r.pubkey,size,value:d[0]})}if(size>=245&&d.length>=2&&d[1]!==0){sc++;cashback.push({pool:r.pubkey,size,value:d[1]})}if(size>=261&&d.length>=18){const v=i128le(d,2);if(v!==0n){sb++;boosted.push({pool:r.pubkey,size,virtual:v.toString(),abs:v<0n?(-v).toString():v.toString()})}}
+            for(const r of rows){
+              const d=Buffer.from(r.account.data[0],'base64');
+              if(size>=244&&d.length>=1&&d[0]!==0){sm++;mayhem.push({pool:r.pubkey,size,value:d[0]})}
+              if(size>=245&&d.length>=2&&d[1]!==0){sc++;cashback.push({pool:r.pubkey,size,value:d[1]})}
+              if(size>=261&&d.length>=18){const v=i128le(d,2);if(v!==0n){sb++;boosted.push({pool:r.pubkey,size,virtual:v.toString(),abs:v<0n?(-v).toString():v.toString()})}}
+            }
             console.log('SIZE_FEATURE_COUNTS',JSON.stringify({size,total:rows.length,mayhem:sm,cashback:sc,boosted:sb}));
           }
           boosted.sort((a,b)=>BigInt(a.abs)>BigInt(b.abs)?-1:BigInt(a.abs)<BigInt(b.abs)?1:0);
           console.log('ALL_POOL_COUNT',total);console.log('MAYHEM_COUNT',mayhem.length);console.log('CASHBACK_COUNT',cashback.length);console.log('BOOSTED_COUNT',boosted.length);
           console.log('TOP_BOOSTED_RAW',JSON.stringify(boosted.slice(0,100),null,2));console.log('CASHBACK_SAMPLE',JSON.stringify(cashback.slice(0,50),null,2));console.log('MAYHEM_SAMPLE',JSON.stringify(mayhem.slice(0,50),null,2));
-          // Enrich top boosted pools with full state and vault amounts.
-          const top=boosted.slice(0,80);const poolRows=[];for(let i=0;i<top.length;i+=100){const ch=top.slice(i,i+100);const r=await call('getMultipleAccounts',[ch.map(x=>x.pool),{encoding:'base64',commitment:'confirmed'}]);poolRows.push(...r.value)}
-          const pk=(b,a,z)=>new PublicKey(b.subarray(a,z)).toBase58();const enriched=[];const vaultKeys=[];
+          const top=boosted.slice(0,80),poolRows=[];
+          for(let i=0;i<top.length;i+=100){const ch=top.slice(i,i+100);if(!ch.length)continue;const r=await call('getMultipleAccounts',[ch.map(x=>x.pool),{encoding:'base64',commitment:'confirmed'}]);poolRows.push(...r.value)}
+          const pk=(b,a,z)=>new PublicKey(b.subarray(a,z)).toBase58(),enriched=[],vaultKeys=[];
           for(let i=0;i<top.length;i++){const a=poolRows[i];if(!a)continue;const b=Buffer.from(a.data[0],'base64');const row={...top[i],creator:pk(b,11,43),baseMint:pk(b,43,75),quoteMint:pk(b,75,107),lpMint:pk(b,107,139),poolBase:pk(b,139,171),poolQuote:pk(b,171,203),lpSupply:b.readBigUInt64LE(203).toString(),coinCreator:b.length>=243?pk(b,211,243):null,isMayhem:b.length>=244?b[243]:null,isCashback:b.length>=245?b[244]:null};enriched.push(row);vaultKeys.push(row.poolBase,row.poolQuote)}
           const vaultRows=[];for(let i=0;i<vaultKeys.length;i+=100){const ch=vaultKeys.slice(i,i+100);const r=await call('getMultipleAccounts',[ch,{encoding:'base64',commitment:'confirmed'}]);vaultRows.push(...r.value);await sleep(100)}
           const amt=a=>{if(!a)return 0n;const d=Buffer.from(a.data[0],'base64');return d.length>=72?d.readBigUInt64LE(64):0n};
-          for(let i=0;i<enriched.length;i++){enriched[i].baseAmount=amt(vaultRows[2*i]).toString();enriched[i].quoteAmount=amt(vaultRows[2*i+1]).toString();}
+          for(let i=0;i<enriched.length;i++){enriched[i].baseAmount=amt(vaultRows[2*i]).toString();enriched[i].quoteAmount=amt(vaultRows[2*i+1]).toString()}
           console.log('TOP_BOOSTED_ENRICHED',JSON.stringify(enriched,null,2));
           NODE
           node feature_scan.mjs
