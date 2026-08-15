@@ -1,0 +1,25 @@
+name: PumpSwap Fresh Pool Init Boost Probe Fast
+
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths:
+      - audit/fresh_pool_init_boost_probe_fast.mjs
+      - .github/workflows/fresh-pool-init-boost-probe-fast.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe-fast:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm install --no-save @solana/web3.js@1.98.4 @solana/spl-token@0.4.14
+      - name: Simulate true init_boost path on ordinary pool without history scan
+        run: node audit/fresh_pool_init_boost_probe_fast.mjs
