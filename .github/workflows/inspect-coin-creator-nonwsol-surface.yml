@@ -1,0 +1,36 @@
+name: inspect-coin-creator-nonwsol-surface
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/inspect-coin-creator-nonwsol-surface.yml']
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: audit/boost-runtime-probe-20260815}
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-swap-sdk@1.19.0 @solana/web3.js @solana/spl-token bs58
+      - shell: bash
+        run: |
+          echo '=== collect creator fee SDK hits ==='
+          grep -Rni -E 'collectCoinCreatorFee|coinCreatorVaultAta|coinCreatorVaultAuthority' node_modules/@pump-fun/pump-swap-sdk/src/sdk | head -n 220 || true
+          echo '=== online relevant section ==='
+          grep -n -B20 -A100 'collectCoinCreatorFeeSolanaState' node_modules/@pump-fun/pump-swap-sdk/src/sdk/onlinePumpAmm.ts || true
+          echo '=== offline relevant section ==='
+          grep -n -B30 -A130 'collectCoinCreatorFee' node_modules/@pump-fun/pump-swap-sdk/src/sdk/offlinePumpAmm.ts || true
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const idl=JSON.parse(fs.readFileSync('node_modules/@pump-fun/pump-swap-sdk/src/idl/pump_amm.json','utf8'));
+          for(const n of ['collect_coin_creator_fee','buy','sell']){
+            const x=idl.instructions.find(i=>i.name.toLowerCase()===n);
+            console.log('IDL',n,JSON.stringify(x,null,2));
+          }
+          const pool=idl.types.find(x=>x.name.toLowerCase()==='pool');console.log('POOL_TYPE',JSON.stringify(pool,null,2));
+          NODE
+          echo '=== PDA helper ==='
+          grep -n -B10 -A40 'coinCreatorVault' node_modules/@pump-fun/pump-swap-sdk/src/sdk/pda.ts || true
