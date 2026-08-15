@@ -1,0 +1,31 @@
+name: PumpSwap Decode BOOST Accounting Series
+
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths:
+      - audit/decode_boost_accounting_series.py
+      - .github/workflows/decode-boost-accounting-series.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  decode:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Decode live historical BOOST event and balance series
+        run: python audit/decode_boost_accounting_series.py
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: boost-accounting-series-result
+          path: boost_accounting_series_result.json
+          if-no-files-found: warn
+          retention-days: 7
