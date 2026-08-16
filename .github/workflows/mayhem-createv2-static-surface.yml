@@ -1,0 +1,38 @@
+name: mayhem-createv2-static-surface
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/mayhem-createv2-static-surface.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: audit/boost-runtime-probe-20260815}
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-sdk@1.36.0 @pump-fun/pump-swap-sdk@1.19.0
+      - name: Extract create_v2 and Mayhem surface
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const path='node_modules/@pump-fun/pump-sdk/src/idl/pump.json';
+          const idl=JSON.parse(fs.readFileSync(path,'utf8'));
+          const wanted=/create_v2|mayhem|migrat|set_mayhem_virtual_params|toggle_mayhem_mode/i;
+          const inst=idl.instructions.filter(i=>wanted.test(i.name));
+          console.log('INSTRUCTIONS',JSON.stringify(inst,null,2));
+          console.log('ERRORS',JSON.stringify((idl.errors??[]).filter(e=>/mayhem|create.?v2|migrat|cpi/i.test((e.name??'')+' '+(e.msg??''))),null,2));
+          console.log('TYPES_MAYHEM',JSON.stringify((idl.types??[]).filter(t=>/mayhem/i.test(t.name??'')),null,2));
+          for(const i of inst){
+            console.log('SUMMARY',JSON.stringify({name:i.name,disc:i.discriminator,args:i.args,accounts:i.accounts.map((a,index)=>({index,name:a.name,writable:!!a.writable,signer:!!a.signer,address:a.address??null,relations:a.relations??null,pda:a.pda??null}))},null,2));
+          }
+          NODE
+          echo '=== SDK SOURCE: CREATE V2 / MAYHEM ==='
+          grep -Rni -B18 -A60 -E 'createV2|create_v2|MAYHEM_PROGRAM_ID|mayhemState|mayhem_state|globalParams|global_params|mayhemTokenVault|mayhem_token_vault|CpitializeMayhemFailed|setMayhemVirtualParams|set_mayhem_virtual_params|isMayhemMode|is_mayhem_mode' node_modules/@pump-fun/pump-sdk/src 2>/dev/null | head -n 5000 || true
+          echo '=== PDA HELPERS ==='
+          grep -Rni -B10 -A35 -E 'mayhem.*Pda|Mayhem.*Pda|mayhem.*vault|solVaultAuthority|globalParams' node_modules/@pump-fun/pump-sdk/src 2>/dev/null | head -n 2500 || true
