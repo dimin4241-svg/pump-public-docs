@@ -1,0 +1,45 @@
+name: coin-creator-real-migrate-trace
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/coin-creator-real-migrate-trace.yml']
+  workflow_dispatch:
+jobs:
+  trace:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: audit/boost-runtime-probe-20260815}
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @solana/web3.js bs58
+      - run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          import bs58pkg from 'bs58';
+          import {PublicKey} from '@solana/web3.js';
+          const bs58=bs58pkg.default??bs58pkg;
+          const SIG='2x548xFRWVz8Avi3x9ssAJqfPBJhNNtqbcRsbk9nQQ5MYoPVxiNSTZc8AA2MzNKkgoXUHuiLZaTpmJpUcmutup5o';
+          const BASE=new PublicKey('7pBddT1hKaKkouo6jgjycLW4sTLwn6Q6xYb3vYFqpump');
+          const PUMP=new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P');
+          const AMM=new PublicKey('pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA');
+          const pump=JSON.parse(fs.readFileSync('idl/pump.json','utf8'));
+          const amm=JSON.parse(fs.readFileSync('idl/pump_amm.json','utf8'));
+          const MIGS=['migrate','migrate_v2'].map(n=>({n,d:Buffer.from(pump.instructions.find(x=>x.name===n).discriminator)}));
+          const CP=Buffer.from(amm.instructions.find(x=>x.name==='create_pool').discriminator);
+          const RPCS=['https://rpc.solanatracker.io/public','https://api.mainnet-beta.solana.com'];let id=1;
+          async function req(u,m,p){const r=await fetch(u,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method:m,params:p})});const x=await r.json();if(x.error)throw Error(JSON.stringify(x.error));return x.result}
+          async function call(m,p){let e;for(const u of RPCS){try{return await req(u,m,p)}catch(x){e=x;console.log('FAIL',m,u,String(x).slice(0,180))}}throw e}
+          const tx=await call('getTransaction',[SIG,{encoding:'jsonParsed',commitment:'finalized',maxSupportedTransactionVersion:0}]);
+          const keys=tx.transaction.message.accountKeys.map(x=>typeof x==='string'?x:x.pubkey);
+          console.log('TX',JSON.stringify({slot:tx.slot,err:tx.meta?.err,outer:tx.transaction.message.instructions.length,innerGroups:tx.meta?.innerInstructions?.length??0}));
+          for(let i=0;i<tx.transaction.message.instructions.length;i++){const ix=tx.transaction.message.instructions[i];if(!ix.data)continue;const d=Buffer.from(bs58.decode(ix.data));if(ix.programId===PUMP.toBase58()){const m=MIGS.find(x=>d.subarray(0,8).equals(x.d));console.log('OUTER_PUMP',i,JSON.stringify({disc:d.subarray(0,8).toString('hex'),name:m?.n??'other',dataLen:d.length,accounts:ix.accounts}));}}
+          let found=null;
+          for(const g of tx.meta?.innerInstructions??[])for(const ix of g.instructions??[]){const pid=typeof ix.programId==='string'?ix.programId:keys[ix.programIdIndex];if(pid!==AMM.toBase58()||!ix.data)continue;const d=Buffer.from(bs58.decode(ix.data));if(!d.subarray(0,8).equals(CP))continue;const index=d.readUInt16LE(8),baseIn=d.readBigUInt64LE(10),quoteIn=d.readBigUInt64LE(18),coinCreator=new PublicKey(d.subarray(26,58)),mayhem=!!d[58],optionTag=d[59],optionVal=d[60]??null;found={innerGroup:g.index,dataLen:d.length,index,baseIn:String(baseIn),quoteIn:String(quoteIn),coinCreator:coinCreator.toBase58(),mayhem,optionTag,optionVal,accounts:ix.accounts};console.log('INNER_CREATE_POOL',JSON.stringify(found,null,2));}
+          if(!found)throw Error('create_pool inner not found');
+          const [bc]=PublicKey.findProgramAddressSync([Buffer.from('bonding-curve'),BASE.toBuffer()],PUMP);
+          const bci=(await call('getAccountInfo',[bc.toBase58(),{encoding:'base64',commitment:'finalized'}])).value;if(!bci)throw Error('bonding curve gone');const b=Buffer.from(bci.data[0],'base64');const creator=new PublicKey(b.subarray(49,81)),isMayhem=!!b[81],isCashback=!!b[82],quoteMint=b.length>=115?new PublicKey(b.subarray(83,115)):null;
+          console.log('BONDING_CURVE_CURRENT',JSON.stringify({pda:bc.toBase58(),len:b.length,creator:creator.toBase58(),isMayhem,isCashback,quoteMint:quoteMint?.toBase58()??null}));
+          console.log('DECISIVE',JSON.stringify({outerMigration:true,createPoolCoinCreator:found.coinCreator,bondingCurveCreator:creator.toBase58(),match:found.coinCreator===creator.toBase58(),createPoolMayhem:found.mayhem,bondingMayhem:isMayhem},null,2));
+          NODE
