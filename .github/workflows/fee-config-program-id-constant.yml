@@ -1,0 +1,38 @@
+name: fee-config-program-id-constant
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/fee-config-program-id-constant.yml']
+  workflow_dispatch:
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: audit/boost-runtime-probe-20260815}
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-swap-sdk@1.19.0 @solana/web3.js
+      - run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          import {PublicKey} from '@solana/web3.js';
+          const idl=JSON.parse(fs.readFileSync('node_modules/@pump-fun/pump-swap-sdk/src/idl/pump_amm.json','utf8'));
+          const c=(idl.constants??[]).find(x=>x.name==='program_id');
+          const buy=idl.instructions.find(x=>x.name.toLowerCase()==='buy');
+          const fc=buy.accounts.find(x=>x.name==='fee_config');
+          const fp=buy.accounts.find(x=>x.name==='fee_program');
+          const pa=buy.accounts.find(x=>x.name==='program');
+          const literalProgramIdAccount=buy.accounts.find(x=>x.name==='program_id');
+          let decoded=null;
+          if(c?.value && Array.isArray(c.value)) decoded=new PublicKey(Uint8Array.from(c.value)).toBase58();
+          console.log('PROGRAM_ID_CONSTANT',JSON.stringify(c,null,2));
+          console.log('PROGRAM_ID_DECODED',decoded);
+          console.log('EXPECTED_AMM','pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA');
+          console.log('MATCH_AMM',decoded==='pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA');
+          console.log('BUY_ACCOUNT_NAMES',JSON.stringify(buy.accounts.map(x=>x.name)));
+          console.log('HAS_MUTABLE_PROGRAM_ID_ACCOUNT',!!literalProgramIdAccount);
+          console.log('FEE_CONFIG',JSON.stringify(fc,null,2));
+          console.log('FEE_PROGRAM',JSON.stringify(fp,null,2));
+          console.log('PROGRAM_ACCOUNT',JSON.stringify(pa,null,2));
+          NODE
