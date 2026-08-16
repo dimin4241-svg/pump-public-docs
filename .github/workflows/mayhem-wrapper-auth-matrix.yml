@@ -1,0 +1,36 @@
+name: mayhem-wrapper-auth-matrix
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/mayhem-wrapper-auth-matrix.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  matrix:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @solana/web3.js bs58
+      - name: Simulation-only wrapper authorization matrix
+        shell: bash
+        run: |
+          cat > x.mjs <<'NODE'
+          import bs58pkg from 'bs58';const bs58=bs58pkg.default??bs58pkg;
+          import {PublicKey,Transaction,TransactionInstruction} from '@solana/web3.js';
+          const MAY='MAyhSmzXzV1pTf7LsNkrNwkWKTo4ougAJ1PPg47MD4e',ALT=new PublicKey('39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg');
+          const NAMES={'66063d1201daebea':'Buy','b817ee6167c5d33d':'BuyV2','de939d076c089151':'BuyPumpSwap','33e685a4017f83ad':'Sell','5df6823ce7e940b2':'SellV2','10c691f0ee6589cb':'SellPumpSwap'};
+          const RPCS=['https://rpc.solanatracker.io/public','https://api.mainnet-beta.solana.com','https://solana-rpc.publicnode.com'];let id=1;const sl=m=>new Promise(r=>setTimeout(r,m));
+          async function q(u,m,p,n=5){let e;for(let i=0;i<n;i++){try{const r=await fetch(u,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-simulation-only/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method:m,params:p})});if(r.status===429||r.status>=500){e=Error('HTTP '+r.status);await sl(300+500*i);continue}const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));return j.result}catch(x){e=x;await sl(180)}}throw e}
+          async function call(m,p){let e;for(const u of RPCS){try{return await q(u,m,p)}catch(x){e=x;console.log('RPC_FAIL',m,u,String(x).slice(0,140))}}throw e}
+          const sigs=[];let before;for(let p=0;p<3;p++){const o={limit:100};if(before)o.before=before;const a=await call('getSignaturesForAddress',[MAY,o]);sigs.push(...a.filter(x=>!x.err));if(a.length<100)break;before=a.at(-1).signature;await sl(120)}console.log('SIGS',sigs.length,sigs[0]?.slot,sigs.at(-1)?.slot);
+          const key=x=>typeof x==='string'?x:x?.pubkey??String(x);function ctx(t){const stat=(t.transaction.message.accountKeys??[]).map(key),loaded=t.meta?.loadedAddresses??{},all=[...stat,...(loaded.writable??[]).map(key),...(loaded.readonly??[]).map(key)],h=t.transaction.message.header,nreq=h.numRequiredSignatures,nros=h.numReadonlySignedAccounts,nrou=h.numReadonlyUnsignedAccounts;function fl(i){if(i<stat.length){const signer=i<nreq,writable=signer?i<nreq-nros:(i-nreq)<(stat.length-nreq-nrou);return {isSigner:signer,isWritable:writable}}return {isSigner:false,isWritable:(i-stat.length)<(loaded.writable??[]).length}}function dec(ix){let data=Buffer.alloc(0);try{data=Buffer.from(bs58.decode(ix.data??''))}catch{}return {pid:all[ix.programIdIndex],data,idx:ix.accounts??[]}}return {stat,all,fl,dec}}
+          const samples={};
+          for(let i=0;i<sigs.length&&Object.keys(samples).length<6;i++){let t;try{t=await call('getTransaction',[sigs[i].signature,{encoding:'json',maxSupportedTransactionVersion:0,commitment:'confirmed'}])}catch(e){continue}if(!t)continue;const c=ctx(t);for(const ix0 of t.transaction.message.instructions??[]){const d=c.dec(ix0);if(d.pid!==MAY||d.data.length<8)continue;const disc=d.data.subarray(0,8).toString('hex'),name=NAMES[disc];if(!name||samples[name])continue;samples[name]={sig:sigs[i].signature,slot:sigs[i].slot,t,c,d};console.log('SAMPLE',name,sigs[i].signature,sigs[i].slot,d.idx.length,d.data.toString('hex'))}await sl(45)}
+          async function sim(sample,replace){const {t,c,d}=sample;const metas=d.idx.map((gi,i)=>{const f=c.fl(gi);return {pubkey:new PublicKey(i===0&&replace?ALT.toBase58():c.all[gi]),isSigner:i===0&&replace?true:f.isSigner,isWritable:f.isWritable}});const who=replace?ALT:metas.find(x=>x.isSigner)?.pubkey;if(!who)return {noSigner:true};const ix=new TransactionInstruction({programId:new PublicKey(MAY),keys:metas,data:Buffer.from(d.data)});const bh=(await call('getLatestBlockhash',[{commitment:'confirmed'}])).value.blockhash;const tx=new Transaction({feePayer:who,recentBlockhash:bh}).add(ix);let raw;try{raw=tx.serialize({requireAllSignatures:false,verifySignatures:false})}catch(e){return {serializeError:String(e)}}let v=null,used=null;for(const u of RPCS){try{v=(await q(u,'simulateTransaction',[raw.toString('base64'),{encoding:'base64',sigVerify:false,replaceRecentBlockhash:true,commitment:'confirmed'}],3)).value;used=u;break}catch(e){}}if(!v)return {noSim:true};const logs=v.logs??[];return {who:who.toBase58(),rpc:used,bytes:raw.length,err:v.err,units:v.unitsConsumed,instructions:logs.filter(x=>x.includes('Instruction:')),anchor:logs.filter(x=>/AnchorError|Error Code|Error Number/.test(x)),failed:logs.filter(x=>x.includes('failed:'))}}
+          const out={};for(const name of Object.keys(NAMES).map(x=>NAMES[x])){const s=samples[name];if(!s){out[name]={missingSample:true};continue}const control=await sim(s,false),alt=await sim(s,true);out[name]={signature:s.sig,slot:s.slot,control,substitute:alt};console.log('CASE',name,JSON.stringify(out[name],null,2));await sl(100)}
+          console.log('SUMMARY',JSON.stringify(out,null,2));
+          NODE
+          node x.mjs
