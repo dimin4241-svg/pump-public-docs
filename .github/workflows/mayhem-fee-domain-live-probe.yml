@@ -1,0 +1,76 @@
+name: mayhem-fee-domain-live-probe
+on:
+  push:
+    paths:
+      - '.github/workflows/mayhem-fee-domain-live-probe.yml'
+  workflow_dispatch:
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: audit/boost-runtime-probe-20260815
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm install --no-save @pump-fun/pump-swap-sdk@1.19.0 @solana/web3.js @solana/spl-token bn.js
+      - shell: bash
+        run: |
+          cat > mayhem_probe.mjs <<'NODE'
+          import BN from 'bn.js';
+          import {Connection,PublicKey,Transaction,TransactionInstruction,ComputeBudgetProgram} from '@solana/web3.js';
+          import {getAssociatedTokenAddressSync,AccountLayout} from '@solana/spl-token';
+          import {OnlinePumpAmmSdk,PUMP_AMM_SDK,PUMP_AMM_PROGRAM_ID} from '@pump-fun/pump-swap-sdk';
+
+          const POOL=new PublicKey('BkyEQLxRpKkWpToGidioiBHMaqbkiKd29jTsqPGshuPB');
+          const USER=new PublicKey('HTVZVEQMBsNanubDPTs3CxDAEGNFQHJY8c1441iy2S5r');
+          const RESERVED=[
+            'GesfTA3X2arioaHp8bbKdjG9vJtskViWACZoYvxp4twS','4budycTjhs9fD6xw62VBducVTNgMgJJ5BgtKq7mAZwn6',
+            '8SBKzEQU4nLSzcwF4a74F2iaUDQyTfjGndn6qUWBnrpR','4UQeTP1T39KZ9Sfxzo3WR5skgsaP6NZa87BAkuazLEKH',
+            '8sNeir4QsLsJdYpc9RZacohhK1Y5FLU3nC5LXgYB4aa6','Fh9HmeLNUMVCvejxCtCL2DbYaRyBFVJ5xrWkLnMH6fdk',
+            '463MEnMeGyJekNZFQSTUABBEbLnvMTALbT6ZmsxAbAdq','6AUH3WEHucYZyC61hqpqYUWVto5qA5hjHuNQ32GNnNxA'
+          ].map(x=>new PublicKey(x));
+          const NORMAL=[
+            '62qc2CNXwrYqQScmEdiZFFAnJR262PxWEuNQtxfafNgV','7VtfL8fvgNfhz17qKRMjzQEXgbdpnHHHQRh54R9jP2RJ',
+            '7hTckgnGnLQR6sdH7YkqFTAA7VwTfYFaZ6EhEsU3saCX','9rPYyANsfQZw3DnDmKE3YCQF5E8oD89UXoHn9JFEhJUz',
+            'AVmoTthdrX6tKt4nDjco2D775W2YK3sDhxPcMmzUAmTY','CebN5WGQ4jvEPvsVU4EoHEpgzq1VV7AbicfhtW4xC9iM',
+            'FWsW1xNtWscwNmKv6wVsU1iTzRN6wmmk3MjxRP5tT7hz','G5UZAVbAf46s7cKWoyKu8kYTip9DGTpbLZ2qa9Aq69dP'
+          ].map(x=>new PublicKey(x));
+          const RPCS=['https://rpc.solanatracker.io/public','https://api.mainnet-beta.solana.com','https://solana-rpc.publicnode.com'];
+          const sleep=ms=>new Promise(r=>setTimeout(r,ms)); let rid=1;
+          async function raw(u,m,p,n=4){let last;for(let i=0;i<n;i++){try{const r=await fetch(u,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-simulation-only/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:rid++,method:m,params:p})});if(r.status===429||r.status>=500){last=Error('HTTP '+r.status);await sleep(300+350*i);continue}const j=await r.json();if(j.error){last=Error(JSON.stringify(j.error));if(/429|No response|Too many/i.test(String(last))){await sleep(300+350*i);continue}throw last}return j.result}catch(e){last=e;await sleep(200)}}throw last}
+          async function call(m,p){let e;for(const u of RPCS){try{return await raw(u,m,p)}catch(x){e=x;console.log('RPC_FAIL',m,u,String(x).slice(0,180))}}throw e}
+          let conn;for(const u of RPCS){try{const c=new Connection(u,'confirmed');await c.getLatestBlockhash();conn=c;console.log('SDK_RPC',u);break}catch(e){console.log('SDK_RPC_FAIL',u,String(e).slice(0,140))}}if(!conn)throw Error('no sdk rpc');
+          const sdk=new OnlinePumpAmmSdk(conn);const state=await sdk.swapSolanaState(POOL,USER);
+          const p=state.pool;
+          console.log('STATE',JSON.stringify({pool:POOL.toBase58(),isMayhemMode:p.isMayhemMode,isCashbackCoin:p.isCashbackCoin,virtualQuoteReserves:p.virtualQuoteReserves?.toString?.(),baseMint:p.baseMint.toBase58(),quoteMint:p.quoteMint.toBase58(),creator:p.creator.toBase58(),coinCreator:p.coinCreator.toBase58(),poolBase:p.poolBaseTokenAccount.toBase58(),poolQuote:p.poolQuoteTokenAccount.toBase58(),baseAmount:state.poolBaseAmount.toString(),quoteAmount:state.poolQuoteAmount.toString(),userQuote:state.userQuoteTokenAccount.toBase58(),quoteProgram:state.quoteTokenProgram.toBase58()},null,2));
+          console.log('GLOBAL_KEYS',Object.keys(state.globalConfig??{}));
+          console.log('GLOBAL_RECIPS',JSON.stringify({protocol:(state.globalConfig?.protocolFeeRecipients??[]).map(x=>x.toBase58()),reserved:(state.globalConfig?.mayhemModeProtocolFeeRecipients??state.globalConfig?.mayhemProtocolFeeRecipients??state.globalConfig?.protocolFeeRecipientsMayhem??[]).map?.(x=>x.toBase58())??[],buyback:(state.globalConfig?.buybackFeeRecipients??[]).map(x=>x.toBase58())},null,2));
+
+          const all=await PUMP_AMM_SDK.buyQuoteInput(state,new BN(1_000_000),5);
+          const pumpIndex=all.findIndex(ix=>ix.programId.equals(PUMP_AMM_PROGRAM_ID)); if(pumpIndex<0)throw Error('pump buy missing');
+          const buy=all[pumpIndex], keys=buy.keys;
+          const rs=new Set(RESERVED.map(x=>x.toBase58())), ns=new Set(NORMAL.map(x=>x.toBase58()));
+          const reservedIndex=keys.findIndex(k=>rs.has(k.pubkey.toBase58()));
+          const normalIndex=keys.findIndex(k=>ns.has(k.pubkey.toBase58()));
+          console.log('BUY_META',JSON.stringify({allPrograms:all.map(x=>x.programId.toBase58()),pumpIndex,keyCount:keys.length,reservedIndex,normalIndex,data:buy.data.toString('hex'),keys:keys.map((k,i)=>({i,p:k.pubkey.toBase58(),w:k.isWritable,s:k.isSigner,reserved:rs.has(k.pubkey.toBase58()),normal:ns.has(k.pubkey.toBase58())}))},null,2));
+          if(reservedIndex<0)throw Error('SDK did not choose reserved fee recipient for mayhem pool');
+          const feeI=reservedIndex, feeAtaI=reservedIndex+1;
+          const normal=NORMAL[0], normalAta=getAssociatedTokenAddressSync(p.quoteMint,normal,true,state.quoteTokenProgram);
+          const userAta=state.userQuoteTokenAccount;
+          function replacePump(repls){const k=keys.map((x,i)=>repls[i]?{...x,pubkey:repls[i]}:{...x});return new TransactionInstruction({programId:buy.programId,data:Buffer.from(buy.data),keys:k})}
+          const cases={
+            control:buy,
+            normal_domain:replacePump({[feeI]:normal,[feeAtaI]:normalAta}),
+            arbitrary_user:replacePump({[feeI]:USER,[feeAtaI]:userAta}),
+            reserved_wrong_ata:replacePump({[feeAtaI]:userAta}),
+            normal_recipient_reserved_ata:replacePump({[feeI]:normal})
+          };
+          function caseIxs(mut){return all.map((ix,i)=>i===pumpIndex?mut:ix)}
+          function tok(a){if(!a)return null;const b=Buffer.from(a.data[0],'base64');return b.length>=72?AccountLayout.decode(b).amount.toString():null}
+          async function sim(name,mut){const bh=(await call('getLatestBlockhash',[{commitment:'processed'}])).value.blockhash;const tx=new Transaction({feePayer:USER,recentBlockhash:bh}).add(ComputeBudgetProgram.setComputeUnitLimit({units:900000}),...caseIxs(mut));let bytes;try{bytes=tx.serialize({requireAllSignatures:false,verifySignatures:false})}catch(e){console.log('CASE',name,JSON.stringify({serializeError:String(e)}));return}const watch=[p.poolBaseTokenAccount,p.poolQuoteTokenAccount,state.userBaseTokenAccount,state.userQuoteTokenAccount,keys[feeAtaI].pubkey,normalAta];let val=null;for(const u of RPCS){try{val=(await raw(u,'simulateTransaction',[bytes.toString('base64'),{encoding:'base64',sigVerify:false,replaceRecentBlockhash:true,commitment:'processed',accounts:{encoding:'base64',addresses:watch.map(x=>x.toBase58())}}],3)).value;console.log('SIM_RPC',name,u);break}catch(e){console.log('SIM_FAIL',name,u,String(e).slice(0,200))}}if(!val){console.log('CASE',name,JSON.stringify({noSim:true}));return}console.log('CASE',name,JSON.stringify({err:val.err,units:val.unitsConsumed,accounts:(val.accounts??[]).map(tok),instructions:(val.logs??[]).filter(l=>l.includes('Instruction:')),anchor:(val.logs??[]).filter(l=>l.includes('AnchorError')||l.includes('Error Code:')),failed:(val.logs??[]).filter(l=>l.includes('failed:'))},null,2));if(val.err)for(const l of val.logs??[])if(/AnchorError|Error Code|failed:|Invalid|fee recipient|FeeRecipient/i.test(l))console.log('ERRLOG',name,l)}
+          for(const [n,ix] of Object.entries(cases))await sim(n,ix);
+          NODE
+          node mayhem_probe.mjs
