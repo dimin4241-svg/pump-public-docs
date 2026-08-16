@@ -1,0 +1,37 @@
+name: mayhem-createv2-focused
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/mayhem-createv2-focused.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-sdk@1.36.0
+      - name: Focused extract
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const root='node_modules/@pump-fun/pump-sdk/src';
+          const idl=JSON.parse(fs.readFileSync(root+'/idl/pump.json','utf8'));
+          const names=['create_v2','set_mayhem_virtual_params','toggle_mayhem_mode','migrate'];
+          for(const n of names){
+            const x=idl.instructions.find(i=>i.name===n);
+            console.log('===IX '+n+'===');
+            if(!x){console.log('MISSING');continue;}
+            console.log(JSON.stringify({name:x.name,discriminator:x.discriminator,args:x.args,accounts:x.accounts.map((a,i)=>({i,name:a.name,writable:!!a.writable,signer:!!a.signer,address:a.address??null,relations:a.relations??null,pda:a.pda??null}))},null,2));
+          }
+          console.log('===ERRORS===');
+          console.log(JSON.stringify((idl.errors??[]).filter(e=>/mayhem|cpi|create.?v2|migrat/i.test((e.name??'')+' '+(e.msg??''))),null,2));
+          NODE
+          echo '===SOURCE_FILES=== '
+          grep -RIl -E 'createV2|create_v2|CpitializeMayhemFailed|mayhemState|mayhem_state|mayhemTokenVault|mayhem_token_vault|globalParams|global_params|setMayhemVirtualParams|set_mayhem_virtual_params' node_modules/@pump-fun/pump-sdk/src --include='*.ts' | head -n 30
+          echo '===SOURCE_SNIPPETS=== '
+          grep -Rni -B12 -A35 -E 'createV2|CpitializeMayhemFailed|setMayhemVirtualParams|mayhemState|mayhemTokenVault|globalParams' node_modules/@pump-fun/pump-sdk/src --include='*.ts' 2>/dev/null | head -n 900
