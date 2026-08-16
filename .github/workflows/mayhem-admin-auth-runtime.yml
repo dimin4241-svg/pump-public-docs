@@ -1,0 +1,55 @@
+name: mayhem-admin-auth-runtime
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/mayhem-admin-auth-runtime.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm install --no-save @solana/web3.js
+      - name: Simulation-only admin/trader/arbitrary authorization differential
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import {PublicKey,TransactionInstruction,TransactionMessage,VersionedTransaction} from '@solana/web3.js';
+          import crypto from 'node:crypto';
+          const P=new PublicKey('MAyhSmzXzV1pTf7LsNkrNwkWKTo4ougAJ1PPg47MD4e');
+          const GLOBAL=new PublicKey('13ec7XdrjF3h3YcqBTFDSReRcUFwbCnJaAQspM4j6DDJ');
+          const ADMIN=new PublicKey('FFWtrEQ4B4PKQoVuHYzZq8FabGkVatYzDpEVHsK5rrhF');
+          const TRADER=new PublicKey('Gygj9QQby4j2jryqyqBHvLP7ctv2SaANgh4sCb69BUpA');
+          const RANDOM=new PublicKey('Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1');
+          const SYSTEM=new PublicKey('11111111111111111111111111111111');
+          const [EVENT]=PublicKey.findProgramAddressSync([Buffer.from('__event_authority')],P);
+          console.log('EVENT_AUTHORITY',EVENT.toBase58());
+          const RPCS=['https://rpc.solanatracker.io/public','https://api.mainnet-beta.solana.com','https://solana-rpc.publicnode.com'];let id=1;const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          async function rpc(method,params){let last;for(const url of RPCS){try{const r=await fetch(url,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-simulation-only-admin-auth/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method,params})});if(!r.ok)throw Error('HTTP '+r.status);const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));return {url,result:j.result}}catch(e){last=e;console.log('RPCFAIL',method,url,String(e).slice(0,160));await sleep(250)}}throw last}
+          const bh=(await rpc('getLatestBlockhash',[{commitment:'processed'}])).result.value.blockhash;
+          function disc(name){return crypto.createHash('sha256').update('global:'+name).digest().subarray(0,8)}
+          const instructions=['reset_state','reset_sol_deployed','reset_stable_deployed','resume_trading','stop_trading'];
+          console.log('DISCS',Object.fromEntries(instructions.map(n=>[n,disc(n).toString('hex')])));
+          const layouts={
+            caller_global_event_program:(caller)=>[
+              {pubkey:caller,isSigner:true,isWritable:false},{pubkey:GLOBAL,isSigner:false,isWritable:true},{pubkey:EVENT,isSigner:false,isWritable:false},{pubkey:P,isSigner:false,isWritable:false}],
+            caller_global:(caller)=>[
+              {pubkey:caller,isSigner:true,isWritable:false},{pubkey:GLOBAL,isSigner:false,isWritable:true}],
+            caller_system_global_event_program:(caller)=>[
+              {pubkey:caller,isSigner:true,isWritable:true},{pubkey:SYSTEM,isSigner:false,isWritable:false},{pubkey:GLOBAL,isSigner:false,isWritable:true},{pubkey:EVENT,isSigner:false,isWritable:false},{pubkey:P,isSigner:false,isWritable:false}],
+            caller_global_system_event_program:(caller)=>[
+              {pubkey:caller,isSigner:true,isWritable:true},{pubkey:GLOBAL,isSigner:false,isWritable:true},{pubkey:SYSTEM,isSigner:false,isWritable:false},{pubkey:EVENT,isSigner:false,isWritable:false},{pubkey:P,isSigner:false,isWritable:false}],
+            global_caller_event_program:(caller)=>[
+              {pubkey:GLOBAL,isSigner:false,isWritable:true},{pubkey:caller,isSigner:true,isWritable:false},{pubkey:EVENT,isSigner:false,isWritable:false},{pubkey:P,isSigner:false,isWritable:false}]
+          };
+          async function sim(name,layoutName,caller){const ix=new TransactionInstruction({programId:P,keys:layouts[layoutName](caller),data:disc(name)});const msg=new TransactionMessage({payerKey:TRADER,recentBlockhash:bh,instructions:[ix]}).compileToV0Message();const tx=new VersionedTransaction(msg);const b64=Buffer.from(tx.serialize()).toString('base64');const {url,result}=await rpc('simulateTransaction',[b64,{encoding:'base64',sigVerify:false,replaceRecentBlockhash:true,commitment:'processed'}]);const v=result?.value;const logs=v?.logs??[];const interesting=logs.filter(x=>/Instruction:|AnchorError|Error Code|Error Number|caused by account|Left:|Right:|failed|success|Rate limit|Permission|signer constraint|has one/.test(x));console.log('SIM',JSON.stringify({name,layoutName,caller:caller.toBase58(),rpc:url,err:v?.err??null,units:v?.unitsConsumed??null,interesting},null,2));return {v,logs}}
+          let viable=[];
+          for(const name of instructions){console.log('\n=== FIND CONTROL LAYOUT',name,'===');for(const ln of Object.keys(layouts)){const r=await sim(name,ln,ADMIN);const text=r.logs.join('\n');const parserish=/NotEnoughAccountKeys|AccountNotEnoughKeys|ConstraintSeeds|AccountDiscriminator|AccountNotInitialized|AccountOwnedByWrongProgram|Program ID was not as expected|InvalidProgramId/.test(text)||JSON.stringify(r.v?.err??{}).includes('NotEnoughAccountKeys');if(!parserish){viable.push({name,ln,controlErr:r.v?.err??null});console.log('VIABLE_LAYOUT',name,ln);break}}
+          }
+          console.log('VIABLE_SUMMARY',JSON.stringify(viable,null,2));
+          for(const x of viable){console.log('\n=== AUTH DIFFERENTIAL',x.name,x.ln,'===');await sim(x.name,x.ln,ADMIN);await sim(x.name,x.ln,TRADER);await sim(x.name,x.ln,RANDOM)}
+          NODE
