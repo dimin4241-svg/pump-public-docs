@@ -1,0 +1,37 @@
+name: public-value-moving-risk-inventory
+on:
+  push:
+    paths:
+      - '.github/workflows/public-value-moving-risk-inventory.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inventory:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-swap-sdk@1.19.0 @pump-fun/pump-sdk@1.36.0
+      - name: Static signer/binding/sibling risk inventory
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';import path from 'node:path';
+          const roots=['node_modules/@pump-fun/pump-swap-sdk/src/idl','node_modules/@pump-fun/pump-sdk/src/idl'];
+          const files=[];for(const root of roots){if(!fs.existsSync(root))continue;for(const f of fs.readdirSync(root))if(f.endsWith('.json'))files.push(path.join(root,f))}
+          console.log('IDL_FILES',files);
+          const valueRe=/(withdraw|transfer|collect|claim|close|burn|sweep|migrate|distribute|fee|reward|incentive|redeem|sell|buy|deposit|create|set|update|sync|boost)/i;
+          function flat(accounts,out=[]){for(const a of accounts??[]){if(a.accounts)flat(a.accounts,out);else out.push(a)}return out}
+          function fixedness(a){return {pda:!!a.pda,address:!!a.address,relations:(a.relations??[]).length,signer:!!a.signer,writable:!!a.writable}}
+          const all=[];
+          for(const file of files){let j;try{j=JSON.parse(fs.readFileSync(file,'utf8'))}catch{continue}for(const ix of j.instructions??[]){const acc=flat(ix.accounts),signers=acc.filter(a=>a.signer),w=acc.filter(a=>a.writable),unboundW=w.filter(a=>!a.pda&&!a.address&&!(a.relations??[]).length),unboundTokenish=unboundW.filter(a=>/(token|vault|account|recipient|destination|user|creator|authority|pool|curve|config)/i.test(a.name));let score=0;if(valueRe.test(ix.name))score+=4;if(signers.length===0)score+=5;else if(signers.length===1)score+=2;if(unboundTokenish.length)score+=Math.min(8,unboundTokenish.length*2);if(/v2$/i.test(ix.name))score+=1;if(/admin/i.test(ix.name)&&signers.length)score-=3;all.push({file:path.basename(file),program:j.address,name:ix.name,disc:Buffer.from(ix.discriminator??[]).toString('hex'),score,args:ix.args??[],signers:signers.map(a=>a.name),writable:w.map(a=>({name:a.name,...fixedness(a)})),unboundWritable:unboundW.map(a=>a.name),unboundTokenish:unboundTokenish.map(a=>a.name),accounts:acc.map(a=>({name:a.name,...fixedness(a),docs:a.docs??null}))})}}
+          all.sort((a,b)=>b.score-a.score||a.file.localeCompare(b.file)||a.name.localeCompare(b.name));
+          console.log('\n=== TOP PUBLIC VALUE SURFACES ===');for(const x of all.filter(x=>x.score>=7).slice(0,150))console.log('RISK',JSON.stringify(x));
+          console.log('\n=== NO-SIGNER VALUE MOVERS ===');for(const x of all.filter(x=>valueRe.test(x.name)&&x.signers.length===0))console.log('NOSIGN',JSON.stringify(x));
+          console.log('\n=== SIBLING DIFFS ===');
+          const groups=new Map();for(const x of all){const base=x.name.replace(/_v\d+$/i,'').replace(/v\d+$/i,'');if(!groups.has(base))groups.set(base,[]);groups.get(base).push(x)}
+          for(const [base,g] of groups)if(g.length>1){const sig=new Set(g.map(x=>JSON.stringify({s:x.signers,u:x.unboundWritable,w:x.writable.map(z=>z.name)})));if(sig.size>1)console.log('SIBLING',base,JSON.stringify(g.map(x=>({file:x.file,name:x.name,score:x.score,signers:x.signers,unbound:x.unboundWritable,writable:x.writable}))))}
+          NODE
+          echo '=== SDK method grep for top economic verbs ==='
+          grep -RniE 'claimTokenIncentives|claim.*incentive|collectCreator|collectCoinCreator|transferCreator|migrate.*Creator|closeUserVolume|syncUserVolume|withdraw|distributeCreator' node_modules/@pump-fun/pump-swap-sdk/src node_modules/@pump-fun/pump-sdk/src --exclude='*.map' | head -800 || true
