@@ -1,0 +1,37 @@
+name: inspect-mayhem-fee-surface
+on:
+  push:
+    paths:
+      - '.github/workflows/inspect-mayhem-fee-surface.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: audit/boost-runtime-probe-20260815
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: |
+          echo PUMP_SWAP_SDK=$(npm view @pump-fun/pump-swap-sdk version)
+          echo PUMP_SDK=$(npm view @pump-fun/pump-sdk version)
+          npm install --no-save @pump-fun/pump-swap-sdk@1.19.0 @pump-fun/pump-sdk
+      - name: Grep Mayhem and fee recipient logic
+        shell: bash
+        run: |
+          echo '=== SWAP SDK MAYHEM/FEE ==='
+          grep -Rni -B12 -A40 -E 'isMayhem|is_mayhem|mayhem|reserved.*fee|fee.*reserved|protocolFeeRecipient|protocol_fee_recipient|feeRecipient' node_modules/@pump-fun/pump-swap-sdk/src 2>/dev/null | head -n 1800 || true
+          echo '=== PUMP SDK MAYHEM/FEE ==='
+          grep -Rni -B12 -A40 -E 'isMayhem|is_mayhem|mayhem|reserved.*fee|fee.*reserved|feeRecipient' node_modules/@pump-fun/pump-sdk/src 2>/dev/null | head -n 1800 || true
+          echo '=== AMM IDL BUY SELL ACCOUNT SLICES ==='
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const p='node_modules/@pump-fun/pump-swap-sdk/src/idl/pump_amm.json';const idl=JSON.parse(fs.readFileSync(p,'utf8'));
+          for(const n of ['buy','sell']){const x=idl.instructions.find(i=>i.name.toLowerCase()===n);console.log('IDL_'+n.toUpperCase(),JSON.stringify(x,null,2));}
+          console.log('ERRORS',JSON.stringify((idl.errors??[]).filter(e=>/fee|recipient|mayhem/i.test((e.name??'')+' '+(e.msg??''))),null,2));
+          NODE
