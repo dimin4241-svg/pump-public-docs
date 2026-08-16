@@ -23,7 +23,7 @@ jobs:
           grep -Rni -B20 -A45 'computeFeesBps' node_modules/@pump-fun/pump-swap-sdk/src/sdk/offlinePumpAmm.ts | head -n 260 || true
           echo '=== SDK FEE IMPLEMENTATION ==='
           sed -n '1,145p' node_modules/@pump-fun/pump-swap-sdk/src/sdk/fees.ts
-          cat > mayhem_fee_semantics.ts <<'NODE'
+          cat > mayhem_fee_semantics.mts <<'NODE'
           import BN from 'bn.js';
           import {Connection,PublicKey,Transaction,ComputeBudgetProgram,SystemProgram} from '@solana/web3.js';
           import {getAssociatedTokenAddressSync,createAssociatedTokenAccountIdempotentInstruction,createSyncNativeInstruction,TOKEN_PROGRAM_ID} from '@solana/spl-token';
@@ -94,4 +94,4 @@ jobs:
           console.log('DECISIVE',JSON.stringify({pool:POOL.toBase58(),isMayhemMode:state.pool.isMayhemMode,simulationOnly:true,broadcast:false,sdkTuple,runtimeTuple,legacyGlobalTuple:legacyTuple,sdkMatchesRuntime:matches,legacyMatchesRuntime:Array.isArray(runtimeTuple)&&legacyTuple.every((x:string,i:number)=>x===runtimeTuple[i]),verdict:matches?'MATCH':'DIVERGENCE'},null,2));
           if(sim.err)process.exitCode=2;
           NODE
-          npx tsx mayhem_fee_semantics.ts
+          npx tsx mayhem_fee_semantics.mts
