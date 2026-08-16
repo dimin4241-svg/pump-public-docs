@@ -1,0 +1,35 @@
+name: reward-account-layout-live
+on:
+  push:
+    paths:
+      - '.github/workflows/reward-account-layout-live.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-sdk@1.36.0 @pump-fun/pump-swap-sdk@1.19.0 @solana/web3.js bs58
+      - name: Read-only discriminator-only GPA and raw layout recovery
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import bs58pkg from 'bs58';const bs58=bs58pkg.default??bs58pkg;
+          import {PublicKey} from '@solana/web3.js';
+          import * as pump from '@pump-fun/pump-sdk';import * as amm from '@pump-fun/pump-swap-sdk';
+          const DISC=Buffer.from('56ff700e66359afa','hex'),DISC58=bs58.encode(DISC),RPCS=['https://api.mainnet-beta.solana.com','https://rpc.solanatracker.io/public','https://solana-rpc.publicnode.com'];let id=1;const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          async function one(url,method,params,n=3){let last;for(let a=0;a<n;a++){try{const r=await fetch(url,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-readonly-reward-layout/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method,params})});if(r.status===429||r.status>=500){last=Error('HTTP '+r.status);await sleep(500+700*a);continue}if(!r.ok)throw Error('HTTP '+r.status);const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));return j.result}catch(e){last=e;await sleep(400+500*a)}}throw last}
+          async function rpc(method,params){let last;for(const u of RPCS){try{return await one(u,method,params,3)}catch(e){last=e;console.log('RPC_FAIL',method,u,String(e).slice(0,180))}}throw last}
+          function parse(pk,b){if(b.length<90)return {account:pk,len:b.length,hex:b.toString('hex')};return {account:pk,len:b.length,user:bs58.encode(b.subarray(8,40)),needsClaim:b[40]!==0,totalUnclaimed:b.readBigUInt64LE(41).toString(),totalClaimed:b.readBigUInt64LE(49).toString(),currentSolVolume:b.readBigUInt64LE(57).toString(),lastUpdate:b.readBigInt64LE(65).toString(),hasTotalClaimed:b[73]!==0,cashbackEarned:b.readBigUInt64LE(74).toString(),totalCashbackClaimed:b.readBigUInt64LE(82).toString(),tailHex:b.subarray(90).toString('hex')}}
+          for(const [label,pid] of [['pump',pump.PUMP_PROGRAM_ID],['amm',amm.PUMP_AMM_PROGRAM_ID]]){
+            console.log('\n===',label,pid.toBase58(),'disc',DISC58,'===');
+            let rows;try{rows=await rpc('getProgramAccounts',[pid.toBase58(),{encoding:'base64',commitment:'confirmed',filters:[{memcmp:{offset:0,bytes:DISC58}}]}])}catch(e){console.log('GPA_DISC_FAIL',label,String(e));continue}
+            console.log('ROW_COUNT',rows.length);const sizes={};const out=[];for(const r of rows){const b=Buffer.from(r.account.data[0],'base64');sizes[b.length]=(sizes[b.length]??0)+1;out.push(parse(r.pubkey,b))}console.log('SIZE_COUNTS',JSON.stringify(sizes));
+            out.sort((a,b)=>{const score=x=>{try{const c=BigInt(x.cashbackEarned??0)-BigInt(x.totalCashbackClaimed??0),u=BigInt(x.totalUnclaimed??0);return (c>0n?c:0n)+u}catch{return 0n}};return score(a)>score(b)?-1:score(a)<score(b)?1:0});
+            for(const x of out.slice(0,60))console.log('TOP',label,JSON.stringify(x));
+          }
+          NODE
