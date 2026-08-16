@@ -1,0 +1,40 @@
+name: usdc-sim-user-discovery
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/usdc-sim-user-discovery.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  discover:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - name: Read-only USDC holder discovery
+        shell: bash
+        run: |
+          cat > x.mjs <<'NODE'
+          const USDC='EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+          const RPCS=['https://api.mainnet-beta.solana.com','https://rpc.solanatracker.io/public','https://solana-rpc.publicnode.com'];
+          let id=1; const sl=m=>new Promise(r=>setTimeout(r,m));
+          async function q(u,m,p,n=4){let e;for(let i=0;i<n;i++){try{const r=await fetch(u,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-readonly/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method:m,params:p})});if(r.status===429||r.status>=500){e=Error('HTTP '+r.status);await sl(250+400*i);continue}const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));return j.result}catch(x){e=x;await sl(150)}}throw e}
+          async function call(m,p){let e;for(const u of RPCS){try{return await q(u,m,p)}catch(x){e=x;console.log('RPC_FAIL',m,u,String(x).slice(0,160))}}throw e}
+          const largest=(await call('getTokenLargestAccounts',[USDC,{commitment:'confirmed'}])).value;
+          console.log('LARGEST',JSON.stringify(largest,null,2));
+          for(const x of largest.slice(0,20)){
+            try{
+              const ai=(await call('getAccountInfo',[x.address,{encoding:'jsonParsed',commitment:'confirmed'}])).value;
+              const owner=ai?.data?.parsed?.info?.owner;
+              if(!owner)continue;
+              const [bal,ataOwner]=await Promise.all([
+                call('getBalance',[owner,{commitment:'confirmed'}]).catch(()=>null),
+                call('getAccountInfo',[owner,{encoding:'base64',commitment:'confirmed'}]).catch(()=>null)
+              ]);
+              console.log('CANDIDATE',JSON.stringify({tokenAccount:x.address,usdcAmount:x.amount,owner,ownerLamports:bal?.value??null,ownerAccountOwner:ataOwner?.value?.owner??null,ownerExists:!!ataOwner?.value}));
+            }catch(e){console.log('CANDIDATE_FAIL',x.address,String(e).slice(0,160))}
+          }
+          NODE
+          node x.mjs
