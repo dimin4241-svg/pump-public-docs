@@ -1,0 +1,50 @@
+name: mayhem-buyback-domain-runtime
+on:
+  push:
+    paths:
+      - '.github/workflows/mayhem-buyback-domain-runtime.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-swap-sdk@1.19.0 @solana/web3.js @solana/spl-token bn.js
+      - name: Simulation-only buyback recipient differential
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import {Connection,PublicKey,TransactionInstruction,TransactionMessage,VersionedTransaction} from '@solana/web3.js';
+          import {getAssociatedTokenAddressSync,ASSOCIATED_TOKEN_PROGRAM_ID} from '@solana/spl-token';
+          import BN from 'bn.js';
+          import {OnlinePumpAmmSdk,PUMP_AMM_SDK,PUMP_AMM_PROGRAM_ID} from '@pump-fun/pump-swap-sdk';
+          const RPC='https://api.mainnet-beta.solana.com', c=new Connection(RPC,'confirmed'), online=new OnlinePumpAmmSdk(c);
+          const POOL=new PublicKey('DSV2CUbhfEWRPRn9QRZWkYohRi47WEeauz8s89ekKBdN'), USER=new PublicKey('Gygj9QQby4j2jryqyqBHvLP7ctv2SaANgh4sCb69BUpA');
+          const state=await online.swapSolanaState(POOL,USER);const quote=new BN('1000000');const ixs=await PUMP_AMM_SDK.buyQuoteInput(state,quote,0);
+          const buyIndex=ixs.findIndex(ix=>ix.programId.equals(PUMP_AMM_PROGRAM_ID)&&Buffer.from(ix.data).subarray(0,8).toString('hex')==='66063d1201daebea');if(buyIndex<0)throw Error('buy instruction not found');const buy=ixs[buyIndex];
+          const auth=state.globalConfig.buybackFeeRecipients; const qmint=state.pool.quoteMint, qprog=state.quoteTokenProgram;
+          const authAtas=auth.map(r=>getAssociatedTokenAddressSync(qmint,r,true,qprog,ASSOCIATED_TOKEN_PROGRAM_ID));
+          const infos=await c.getMultipleAccountsInfo(authAtas,'confirmed');const existingAuth=auth.map((r,i)=>({r,ata:authAtas[i],exists:!!infos[i]}));
+          const userAta=getAssociatedTokenAddressSync(qmint,USER,true,qprog,ASSOCIATED_TOKEN_PROGRAM_ID);const userInfo=await c.getAccountInfo(userAta,'confirmed');
+          const recognized=buy.keys.map((k,i)=>{const ri=auth.findIndex(r=>r.equals(k.pubkey)),ai=authAtas.findIndex(a=>a.equals(k.pubkey));return {i,pk:k.pubkey.toBase58(),w:k.isWritable,s:k.isSigner,buybackRecipientIndex:ri,buybackAtaIndex:ai}}).filter(x=>x.buybackRecipientIndex>=0||x.buybackAtaIndex>=0);
+          console.log('CONTEXT',JSON.stringify({pool:POOL.toBase58(),isMayhem:state.pool.isMayhemMode,isCashback:state.pool.isCashbackCoin,buybackBasisPoints:state.globalConfig.buybackBasisPoints.toString(),quoteMint:qmint.toBase58(),quoteProgram:qprog.toBase58(),userAta:userAta.toBase58(),userAtaExists:!!userInfo,authorized:existingAuth.map(x=>({recipient:x.r.toBase58(),ata:x.ata.toBase58(),exists:x.exists})),recognized,buyKeys:buy.keys.map((k,i)=>({i,pk:k.pubkey.toBase58(),w:k.isWritable,s:k.isSigner}))},null,2));
+          function parse(v){const logs=v.logs??[],t=logs.join('\n');return {account:t.match(/AnchorError caused by account: ([A-Za-z0-9_\-]+)/)?.[1]??null,code:t.match(/Error Code: ([A-Za-z0-9_]+)/)?.[1]??null,num:Number(t.match(/Error Number: (\d+)/)?.[1]??0)||null,interesting:logs.filter(x=>/Instruction: Buy|GetFees|AnchorError|Error Code|Error Number|Buyback|buyback|failed|success/i.test(x)).slice(-80)}}
+          async function sim(label,list){const {blockhash}=await c.getLatestBlockhash('processed');const tx=new VersionedTransaction(new TransactionMessage({payerKey:USER,recentBlockhash:blockhash,instructions:list}).compileToV0Message());const v=(await c.simulateTransaction(tx,{sigVerify:false,replaceRecentBlockhash:true,commitment:'processed'})).value,e=parse(v);console.log('\nSIM',label,JSON.stringify({err:v.err,units:v.unitsConsumed,account:e.account,code:e.code,num:e.num,interesting:e.interesting},null,2));return {v,e}}
+          function withBuyKeys(mut){const keys=buy.keys.map(k=>({...k}));mut(keys);const b=new TransactionInstruction({programId:buy.programId,keys,data:Buffer.from(buy.data)});return ixs.map((ix,i)=>i===buyIndex?b:ix)}
+          await sim('control',ixs);
+          const recHit=recognized.find(x=>x.buybackRecipientIndex>=0),ataHit=recognized.find(x=>x.buybackAtaIndex>=0);
+          if(!recHit&&!ataHit){console.log('NO_EXPLICIT_BUYBACK_KEYS_FOUND');process.exit(0)}
+          if(recHit&&ataHit){
+            await sim('arbitrary_user_with_own_ata',withBuyKeys(keys=>{keys[recHit.i].pubkey=USER;keys[ataHit.i].pubkey=userAta}));
+            await sim('arbitrary_user_keep_authorized_ata',withBuyKeys(keys=>{keys[recHit.i].pubkey=USER}));
+            await sim('authorized_recipient_with_user_ata',withBuyKeys(keys=>{keys[ataHit.i].pubkey=userAta}));
+            const alt=existingAuth.find((x,i)=>i!==recHit.buybackRecipientIndex&&x.exists);if(alt)await sim('other_authorized_with_own_ata',withBuyKeys(keys=>{keys[recHit.i].pubkey=alt.r;keys[ataHit.i].pubkey=alt.ata}));else console.log('NO_ALT_AUTHORIZED_EXISTING_ATA');
+          } else if(ataHit){
+            await sim('buyback_ata_to_user',withBuyKeys(keys=>{keys[ataHit.i].pubkey=userAta}));
+            const alt=existingAuth.find((x,i)=>i!==ataHit.buybackAtaIndex&&x.exists);if(alt)await sim('buyback_ata_to_other_authorized',withBuyKeys(keys=>{keys[ataHit.i].pubkey=alt.ata}));
+          } else if(recHit){await sim('buyback_recipient_to_user',withBuyKeys(keys=>{keys[recHit.i].pubkey=USER}))}
+          NODE
