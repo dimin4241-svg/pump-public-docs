@@ -1,0 +1,38 @@
+name: mayhem-sdk-fee-tier-live
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/mayhem-sdk-fee-tier-live.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  parity:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-swap-sdk@1.19.0 @solana/web3.js @solana/spl-token bn.js
+      - name: Read-only live SDK fee calculation
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import {Connection,PublicKey} from '@solana/web3.js'; import BN from 'bn.js'; import {unpackAccount} from '@solana/spl-token';
+          import {OnlinePumpAmmSdk} from '@pump-fun/pump-swap-sdk';
+          import * as feeMod from './node_modules/@pump-fun/pump-swap-sdk/dist/esm/sdk/fees.js';
+          const connection=new Connection('https://api.mainnet-beta.solana.com','confirmed'), online=new OnlinePumpAmmSdk(connection);
+          const POOL=new PublicKey('DSV2CUbhfEWRPRn9QRZWkYohRi47WEeauz8s89ekKBdN');
+          const pool=await online.fetchPool(POOL); const gc=await online.fetchGlobalConfigAccount(); const fc=await online.fetchFeeConfigAccount();
+          const safe=x=>{if(x==null)return x;if(typeof x==='bigint')return x.toString();if(BN.isBN(x))return x.toString();if(x?.toBase58)return x.toBase58();if(Array.isArray(x))return x.map(safe);if(typeof x==='object'){const o={};for(const [k,v] of Object.entries(x))o[k]=safe(v);return o}return x};
+          console.log('POOL',JSON.stringify(safe(pool),null,2)); console.log('FEE_CONFIG_KEYS',Object.keys(fc)); console.log('FEE_CONFIG',JSON.stringify(safe(fc),null,2));
+          const baseMint=pool.baseMint, creator=pool.coinCreator; const baseAta=pool.poolBaseTokenAccount, quoteAta=pool.poolQuoteTokenAccount;
+          console.log('KEYS',JSON.stringify({baseMint:baseMint?.toBase58?.(),creator:creator?.toBase58?.(),baseAta:baseAta?.toBase58?.(),quoteAta:quoteAta?.toBase58?.(),isMayhemMode:pool.isMayhemMode},null,2));
+          if(!baseMint||!creator||!baseAta||!quoteAta)throw Error('unexpected pool field names; inspect POOL output');
+          const [supply,ba,qa]=await Promise.all([connection.getTokenSupply(baseMint,'confirmed'),connection.getTokenAccountBalance(baseAta,'confirmed'),connection.getTokenAccountBalance(quoteAta,'confirmed')]);
+          const baseMintSupply=new BN(supply.value.amount),baseReserve=new BN(ba.value.amount),quoteReserve=new BN(qa.value.amount),tradeSize=new BN('1000000');
+          console.log('LIVE_INPUTS',JSON.stringify({baseMintSupply:baseMintSupply.toString(),baseReserve:baseReserve.toString(),quoteReserve:quoteReserve.toString(),tradeSize:tradeSize.toString()},null,2));
+          const fees=feeMod.computeFeesBps({globalConfig:gc,feeConfig:fc,creator,baseMintSupply,baseMint,baseReserve,quoteReserve,tradeSize});
+          console.log('SDK_COMPUTED_FEES',JSON.stringify(safe(fees),null,2));
+          const rb=Buffer.from('AgAAAAAAAABdAAAAAAAAAB4AAAAAAAAA','base64'),runtime={lpFeeBps:rb.readBigUInt64LE(0).toString(),protocolFeeBps:rb.readBigUInt64LE(8).toString(),creatorFeeBps:rb.readBigUInt64LE(16).toString()};
+          console.log('RUNTIME_GET_FEES',JSON.stringify(runtime,null,2)); console.log('PARITY',String(fees.lpFeeBps)===runtime.lpFeeBps&&String(fees.protocolFeeBps)===runtime.protocolFeeBps&&String(fees.creatorFeeBps)===runtime.creatorFeeBps);
+          NODE
