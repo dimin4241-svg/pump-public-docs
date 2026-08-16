@@ -1,0 +1,26 @@
+name: coin-creator-migrate-constraints-compact
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/coin-creator-migrate-constraints-compact.yml']
+  workflow_dispatch:
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: audit/boost-runtime-probe-20260815}
+      - run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const p=JSON.parse(fs.readFileSync('idl/pump.json','utf8'));
+          for(const name of ['migrate_v2','migrate_bonding_curve_creator']){
+            const ix=p.instructions.find(x=>x.name===name);
+            console.log('IX',name,'ARGS',JSON.stringify(ix.args));
+            ix.accounts.forEach((a,i)=>{if(/creator|bonding_curve|sharing|pool|user|mint|fee_config|program/i.test(a.name))console.log('ACCOUNT',name,i,a.name,JSON.stringify(a));});
+          }
+          const bc=p.types.find(x=>x.name==='BondingCurve');
+          const sc=p.types.find(x=>x.name==='SharingConfig');
+          console.log('BC_CREATOR_FIELD',JSON.stringify(bc?.type?.fields?.filter(x=>/creator|mayhem|cashback|quote_mint/i.test(x.name))));
+          console.log('SC_FIELDS',JSON.stringify(sc?.type?.fields?.filter(x=>/mint|admin|share/i.test(x.name))));
+          NODE
