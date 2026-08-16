@@ -1,0 +1,31 @@
+name: distribute-creator-targeted-source
+on:
+  push:
+    paths:
+      - '.github/workflows/distribute-creator-targeted-source.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 6
+    steps:
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-sdk@1.36.0 @solana/web3.js bs58
+      - name: SDK source and two targeted mints
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import {Connection,PublicKey} from '@solana/web3.js';
+          import * as p from '@pump-fun/pump-sdk';
+          const c=new Connection('https://api.mainnet-beta.solana.com','confirmed');
+          console.log('PUMP_SDK_METHODS',Object.getOwnPropertyNames(p.PumpSdk.prototype));
+          console.log('ONLINE_METHODS',Object.getOwnPropertyNames(p.OnlinePumpSdk.prototype));
+          for(const [C,n] of [[p.PumpSdk,'PumpSdk'],[p.OnlinePumpSdk,'OnlinePumpSdk']]) for(const m of Object.getOwnPropertyNames(C.prototype)) if(/distribut|minimum|sharing|bonding|creator/i.test(m)) console.log('\nMETHOD',n,m,'arity',C.prototype[m].length,'SRC',String(C.prototype[m]).slice(0,24000));
+          console.log('\nMODULE_FUNCS'); for(const k of Object.keys(p).filter(x=>/distribut|sharing|creator|bonding/i.test(x)).sort()) if(typeof p[k]==='function') console.log('FUNC',k,'arity',p[k].length,'SRC',String(p[k]).slice(0,16000));
+          const mints=['DSbo9t1p4tsch4PvCLSp1VLZEoSbKEqrAXaGP5ajpump','CY1dPRpeQxfCwg7TyCBcDp4P3XMSCCqiMWKaMPdYpump'];
+          const online=new p.OnlinePumpSdk(c);
+          for(const ms of mints){const mint=new PublicKey(ms),bc=p.bondingCurvePda(mint),share=p.feeSharingConfigPda(mint),info=await c.getAccountInfo(bc,'confirmed'),sinfo=await c.getAccountInfo(share,'confirmed');console.log('\nTARGET',JSON.stringify({mint:ms,bondingCurve:bc.toBase58(),bcExists:!!info,bcLen:info?.data.length??null,sharingConfig:share.toBase58(),sharingExists:!!sinfo,sharingOwner:sinfo?.owner.toBase58()??null,sharingLen:sinfo?.data.length??null},null,2));if(info){for(const call of [()=>p.PUMP_SDK.decodeBondingCurve(info),()=>p.PUMP_SDK.decodeBondingCurve({data:info.data}),()=>p.PUMP_SDK.decodeBondingCurve(info.data)]){try{const d=call();console.log('DECODE_OK',JSON.stringify(Object.fromEntries(Object.entries(d).map(([k,v])=>[k,v?.toBase58?.()??v?.toString?.()??v])),null,2));break}catch(e){console.log('DECODE_FAIL',String(e).slice(0,300))}}}for(const meth of ['fetchBondingCurve','fetchBondingCurveAccount'])if(typeof online[meth]==='function')try{const d=await online[meth](mint);console.log('ONLINE_FETCH_OK',meth,JSON.stringify(Object.fromEntries(Object.entries(d??{}).map(([k,v])=>[k,v?.toBase58?.()??v?.toString?.()??v])),null,2))}catch(e){console.log('ONLINE_FETCH_FAIL',meth,String(e).slice(0,300))}}
+          NODE
