@@ -1,0 +1,47 @@
+name: mayhem-buyv2-account-map
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/mayhem-buyv2-account-map.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  map:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-sdk@1.36.0 @solana/web3.js @solana/spl-token bs58
+      - name: Read-only account map
+        shell: bash
+        run: |
+          cat > x.mjs <<'NODE'
+          import bs58pkg from 'bs58'; const bs58=bs58pkg.default??bs58pkg;
+          import {PublicKey} from '@solana/web3.js';
+          import {getAssociatedTokenAddressSync,TOKEN_PROGRAM_ID,TOKEN_2022_PROGRAM_ID} from '@solana/spl-token';
+          import {getMayhemStatePda,getTokenVaultPda,getSolVaultPda,bondingCurvePda,creatorVaultPda,userVolumeAccumulatorPda,GLOBAL_PDA,PUMP_FEE_CONFIG_PDA} from '@pump-fun/pump-sdk';
+          const SIG='2YVbGh94B3tnxEN1DDmqvNPc3hoSEqFELovwMCy2Yxkc7SRtT5x14iQfagHxasTFu1nS6VjuoBMDwRSr1oLJikU1';
+          const MAYHEM='MAyhSmzXzV1pTf7LsNkrNwkWKTo4ougAJ1PPg47MD4e';
+          const RPCS=['https://rpc.solanatracker.io/public','https://api.mainnet-beta.solana.com']; let id=1; const sl=m=>new Promise(r=>setTimeout(r,m));
+          async function q(u,m,p){const r=await fetch(u,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-readonly/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method:m,params:p})});if(!r.ok)throw Error('HTTP '+r.status);const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));return j.result}
+          async function call(m,p){let e;for(const u of RPCS){for(let n=0;n<5;n++)try{return await q(u,m,p)}catch(x){e=x;await sl(300+400*n)}console.log('RPCFAIL',m,u,String(e).slice(0,140))}throw e}
+          const t=await call('getTransaction',[SIG,{encoding:'json',maxSupportedTransactionVersion:0,commitment:'confirmed'}]); if(!t) throw Error('tx unavailable');
+          const key=x=>typeof x==='string'?x:x?.pubkey??String(x); const stat=(t.transaction.message.accountKeys??[]).map(key), loaded=t.meta?.loadedAddresses??{}, keys=[...stat,...(loaded.writable??[]).map(key),...(loaded.readonly??[]).map(key)];
+          const h=t.transaction.message.header, nreq=h.numRequiredSignatures, nros=h.numReadonlySignedAccounts, nrou=h.numReadonlyUnsignedAccounts;
+          function flags(i){if(i<stat.length){const signer=i<nreq;let writable;if(signer)writable=i<(nreq-nros);else {const u=i-nreq,uc=stat.length-nreq,uw=uc-nrou;writable=u<uw}return {signer,writable,loaded:false}}const li=i-stat.length;if(li<(loaded.writable??[]).length)return {signer:false,writable:true,loaded:true};return {signer:false,writable:false,loaded:true}}
+          function dec(ix){let data=Buffer.alloc(0);try{data=Buffer.from(bs58.decode(ix.data??''))}catch{}return {program:keys[ix.programIdIndex],data,accountIndexes:ix.accounts??[],accounts:(ix.accounts??[]).map(i=>keys[i])}}
+          const outer=(t.transaction.message.instructions??[]).map(dec); const oi=outer.findIndex(x=>x.program===MAYHEM&&x.data.subarray(0,8).toString('hex')==='b817ee6167c5d33d'); if(oi<0)throw Error('BuyV2 outer missing'); const o=outer[oi];
+          const mint=new PublicKey(o.accounts[3]),quote=new PublicKey(o.accounts[4]);
+          const deriv={mayhemState:getMayhemStatePda(mint).toBase58(),mayhemTokenVault:getTokenVaultPda(mint).toBase58(),solVault:getSolVaultPda().toBase58(),bondingCurve:bondingCurvePda(mint).toBase58(),global:GLOBAL_PDA.toBase58(),feeConfig:PUMP_FEE_CONFIG_PDA.toBase58(),solVaultQuoteAta:getAssociatedTokenAddressSync(quote,getSolVaultPda(),true,TOKEN_PROGRAM_ID).toBase58(),solVaultUserVol:userVolumeAccumulatorPda(getSolVaultPda()).toBase58()};
+          console.log('TX_META',JSON.stringify({slot:t.slot,blockTime:t.blockTime,outerIndex:oi,header:h,staticCount:stat.length,loadedWritable:(loaded.writable??[]).length,loadedReadonly:(loaded.readonly??[]).length,instructionDataHex:o.data.toString('hex'),arg1:o.data.length>=16?o.data.readBigUInt64LE(8).toString():null,arg2:o.data.length>=24?o.data.readBigUInt64LE(16).toString():null,tail:o.data.subarray(24).toString('hex'),deriv},null,2));
+          const infos=[]; for(let p=0;p<o.accounts.length;p+=20){const batch=o.accounts.slice(p,p+20);let vals=null;try{vals=(await call('getMultipleAccounts',[batch,{encoding:'base64',commitment:'confirmed'}])).value}catch(e){console.log('GMAFAIL',String(e));vals=[];for(const a of batch)vals.push((await call('getAccountInfo',[a,{encoding:'base64',commitment:'confirmed'}])).value)}for(let j=0;j<batch.length;j++)infos[p+j]=vals?.[j]??null}
+          const labels={}; for(const [k,v] of Object.entries(deriv))labels[v]=(labels[v]?[labels[v],k]:k);
+          const preTB=new Map((t.meta?.preTokenBalances??[]).map(x=>[x.accountIndex,x])); const postTB=new Map((t.meta?.postTokenBalances??[]).map(x=>[x.accountIndex,x]));
+          const rows=o.accountIndexes.map((gi,li)=>{const a=keys[gi],f=flags(gi),inf=infos[li],b=inf?Buffer.from(inf.data[0],'base64'):null;let token=null;if(inf&&(inf.owner===TOKEN_PROGRAM_ID.toBase58()||inf.owner===TOKEN_2022_PROGRAM_ID.toBase58())&&b&&b.length>=72)token={mint:new PublicKey(b.subarray(0,32)).toBase58(),tokenOwner:new PublicKey(b.subarray(32,64)).toBase58(),amount:b.readBigUInt64LE(64).toString(),dataLen:b.length};const pre=preTB.get(gi),post=postTB.get(gi);return {outerIndex:li,globalIndex:gi,address:a,...f,derived:labels[a]??null,owner:inf?.owner??null,lamports:inf?.lamports??null,dataLen:b?.length??null,token,preToken:pre?{mint:pre.mint,owner:pre.owner,amount:pre.uiTokenAmount.amount}:null,postToken:post?{mint:post.mint,owner:post.owner,amount:post.uiTokenAmount.amount}:null,preLamports:t.meta?.preBalances?.[gi]??null,postLamports:t.meta?.postBalances?.[gi]??null};});
+          console.log('OUTER_ACCOUNT_MAP',JSON.stringify(rows,null,2));
+          const inn=(t.meta?.innerInstructions??[]).find(g=>g.index===oi)?.instructions??[]; console.log('INNER',JSON.stringify(inn.map((ix,n)=>{const d=dec(ix);return {n,program:d.program,disc:d.data.subarray(0,8).toString('hex'),dataHex:d.data.toString('hex'),accounts:d.accounts}}),null,2));
+          console.log('LOGS',JSON.stringify(t.meta?.logMessages??[],null,2));
+          NODE
+          node x.mjs
