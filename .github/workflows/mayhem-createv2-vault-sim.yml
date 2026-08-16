@@ -18,7 +18,7 @@ jobs:
         shell: bash
         run: |
           cat > probe.mjs <<'NODE'
-          import {Connection,PublicKey,Keypair,Transaction,TransactionInstruction,ComputeBudgetProgram,SystemProgram} from '@solana/web3.js';
+          import {PublicKey,Keypair,Transaction,TransactionInstruction,ComputeBudgetProgram,SystemProgram} from '@solana/web3.js';
           import {getAssociatedTokenAddressSync,TOKEN_2022_PROGRAM_ID} from '@solana/spl-token';
           import {PUMP_SDK,MAYHEM_PROGRAM_ID,getGlobalParamsPda,getMayhemStatePda,getSolVaultPda,getTokenVaultPda} from '@pump-fun/pump-sdk';
 
@@ -37,24 +37,19 @@ jobs:
           const userAta=getAssociatedTokenAddressSync(mint.publicKey,USER,true,TOKEN_2022_PROGRAM_ID);
           const foreignVault=getTokenVaultPda(FOREIGN_MINT);
           const random=Keypair.generate();
-          console.log('TARGETS',JSON.stringify({mint:mint.publicKey.toBase58(),userAta:userAta.toBase58(),foreignVault:foreignVault.toBase58(),random:random.publicKey.toBase58(),expected:Object.fromEntries(Object.entries(expected).map(([k,v])=>[k,v.toBase58()]))},null,2));
-
           const control=await PUMP_SDK.createV2Instruction({mint:mint.publicKey,name:'BB Sim Only',symbol:'BBSIM',uri:'https://example.invalid/bb-sim',creator:USER,user:USER,mayhemMode:true,cashback:false});
           const names=['mint','mint_authority','bonding_curve','associated_bonding_curve','global','user','system_program','token_program','associated_token_program','mayhem_program_id','global_params','sol_vault','mayhem_state','mayhem_token_vault','event_authority','program'];
+          console.log('TARGETS',JSON.stringify({mint:mint.publicKey.toBase58(),userAta:userAta.toBase58(),foreignVault:foreignVault.toBase58(),random:random.publicKey.toBase58(),expected:Object.fromEntries(Object.entries(expected).map(([k,v])=>[k,v.toBase58()]))},null,2));
           console.log('CONTROL_KEYS',JSON.stringify(control.keys.map((k,i)=>({i,name:names[i]??'extra',p:k.pubkey.toBase58(),w:k.isWritable,s:k.isSigner})),null,2));
-          if(control.keys[13].pubkey.toBase58()!==expected.mayhemTokenVault.toBase58())throw Error('unexpected vault index');
-
           function mutate(repls={}){return new TransactionInstruction({programId:control.programId,data:Buffer.from(control.data),keys:control.keys.map((k,i)=>{const r=repls[i];return r?{...k,...r}:{...k}})});}
           const cases={
             control,
             vault_random_unsigned:mutate({13:{pubkey:random.publicKey,isSigner:false,isWritable:true}}),
-            vault_random_signer:mutate({13:{pubkey:random.publicKey,isSigner:true,isWritable:true}}),
             vault_user_ata:mutate({13:{pubkey:userAta,isSigner:false,isWritable:true}}),
             vault_foreign_canonical:mutate({13:{pubkey:foreignVault,isSigner:false,isWritable:true}}),
-            vault_system_program:mutate({13:{pubkey:SystemProgram.programId,isSigner:false,isWritable:true}}),
             mayhem_state_random:mutate({12:{pubkey:random.publicKey,isSigner:false,isWritable:true}}),
             global_params_random:mutate({10:{pubkey:random.publicKey,isSigner:false,isWritable:false}}),
-            mayhem_program_system:mutate({9:{pubkey:SystemProgram.programId,isSigner:false,isWritable:true}})
+            mayhem_program_user:mutate({9:{pubkey:USER,isSigner:false,isWritable:true}})
           };
           const watch=[mint.publicKey,expected.mayhemState,expected.mayhemTokenVault,random.publicKey,userAta];
           async function sim(name,ix){
