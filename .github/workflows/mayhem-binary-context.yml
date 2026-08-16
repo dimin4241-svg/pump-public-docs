@@ -1,0 +1,29 @@
+name: mayhem-binary-context
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/mayhem-binary-context.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save bs58
+      - name: Context strings
+        shell: bash
+        run: |
+          cat > dump.mjs <<'NODE'
+          import bs58pkg from 'bs58';const bs58=bs58pkg.default??bs58pkg;import fs from 'fs';const P='MAyhSmzXzV1pTf7LsNkrNwkWKTo4ougAJ1PPg47MD4e';let id=1;async function q(m,p){const r=await fetch('https://api.mainnet-beta.solana.com',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method:m,params:p})});const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));return j.result}const pi=(await q('getAccountInfo',[P,{encoding:'base64'}])).value,pb=Buffer.from(pi.data[0],'base64'),pd=bs58.encode(pb.subarray(4,36)),di=(await q('getAccountInfo',[pd,{encoding:'base64'}])).value,db=Buffer.from(di.data[0],'base64'),off=db.indexOf(Buffer.from([0x7f,0x45,0x4c,0x46]));fs.writeFileSync('m.so',db.subarray(off));console.log('PD',pd,'ELF',db.length-off);
+          NODE
+          node dump.mjs
+          strings -a -t d -n 4 m.so > strings.txt
+          echo '=== BURN ==='; grep -B40 -A50 -E 'BurnTokens|burn\.rs' strings.txt || true
+          echo '=== SWEEP ==='; grep -B50 -A70 -E 'SweepFees|SweepFee|sweep' strings.txt || true
+          echo '=== WITHDRAW ==='; grep -B50 -A80 -E 'WithdrawAdmin|WithdrawQuoteAdmin|Withdraw Rate|withdraw' strings.txt || true
+          echo '=== UPDATE AUTH ==='; grep -B50 -A80 -E 'UpdateTrader|UpdateAdmin|PermissionDenied|AccountNotSigner' strings.txt || true
+          echo '=== RISK ==='; grep -B60 -A100 -E 'CoinRiskExceeded|OverallRiskExceeded|TradeRateLimit|SolReservesTooLow' strings.txt || true
