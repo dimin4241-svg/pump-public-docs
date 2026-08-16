@@ -1,0 +1,24 @@
+name: coin-creator-trust-surface-v2
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/coin-creator-trust-surface-v2.yml']
+  workflow_dispatch:
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: audit/boost-runtime-probe-20260815}
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-swap-sdk@1.19.0
+      - run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const idl=JSON.parse(fs.readFileSync('node_modules/@pump-fun/pump-swap-sdk/src/idl/pump_amm.json','utf8'));
+          for(const ix of idl.instructions){const s=JSON.stringify(ix);if(/coin_creator|creator/i.test(ix.name)||/coin_creator/i.test(s)){console.log('IX',ix.name,JSON.stringify(ix,null,2));}}
+          for(const e of idl.errors??[]){if(/creator|canonical|pump/i.test(e.name)||/creator|canonical|pump/i.test(e.msg??''))console.log('ERR',JSON.stringify(e));}
+          NODE
+          echo '--- SDK source refs ---'
+          grep -Rni -B8 -A35 -E 'setCoinCreator|set_coin_creator|adminSetCoinCreator|coinCreator' node_modules/@pump-fun/pump-swap-sdk/src/sdk 2>/dev/null | head -n 1200 || true
