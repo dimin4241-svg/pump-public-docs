@@ -1,0 +1,49 @@
+name: mayhem-sharing-ready-scan
+on:
+  push:
+    paths:
+      - '.github/workflows/mayhem-sharing-ready-scan.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  scan:
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @solana/web3.js bs58
+      - name: Read-only ready-to-migrate sharing scan
+        env:
+          SHARD: ${{ matrix.shard }}
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import bs58pkg from 'bs58'; const bs58=bs58pkg.default??bs58pkg;
+          import {PublicKey} from '@solana/web3.js';
+          const shard=Number(process.env.SHARD), START=shard*5000, END=START+5000;
+          const PROGRAM='pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA';
+          const SHARE_PROG=new PublicKey('pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ');
+          const RPCS=['https://api.mainnet-beta.solana.com','https://rpc.solanatracker.io/public','https://solana-rpc.publicnode.com'];
+          let id=1; const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          async function one(url,method,params,n=3){let last;for(let a=0;a<n;a++){try{const r=await fetch(url,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-readonly-sharing-ready/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method,params})});if(r.status===429||r.status>=500){last=Error('HTTP '+r.status);await sleep(500+700*a);continue}if(!r.ok)throw Error('HTTP '+r.status);const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));return j.result}catch(e){last=e;await sleep(350+500*a)}}throw last}
+          async function rpc(method,params){let last;for(const u of RPCS){try{return await one(u,method,params,3)}catch(e){last=e;console.log('RPC_FAIL',method,u,String(e).slice(0,180))}}throw last}
+          const rows=await rpc('getProgramAccounts',[PROGRAM,{encoding:'base64',commitment:'confirmed',filters:[{dataSize:301},{memcmp:{offset:243,bytes:'2'}}],dataSlice:{offset:0,length:245}}]);
+          const slice=rows.slice(START,Math.min(END,rows.length));
+          console.log('SHARD_META',JSON.stringify({shard,start:START,end:END,totalMayhem:rows.length,rows:slice.length}));
+          const pools=slice.map(r=>{const b=Buffer.from(r.account.data[0],'base64');const baseMint=new PublicKey(b.subarray(43,75));const [sharing]=PublicKey.findProgramAddressSync([Buffer.from('sharing-config'),baseMint.toBuffer()],SHARE_PROG);return {pool:r.pubkey,baseMint:baseMint.toBase58(),poolQuote:bs58.encode(b.subarray(171,203)),coinCreator:bs58.encode(b.subarray(211,243)),sharing:sharing.toBase58()}});
+          const existing=[];
+          for(let off=0;off<pools.length;off+=100){const batch=pools.slice(off,off+100);let vals;try{vals=(await rpc('getMultipleAccounts',[batch.map(x=>x.sharing),{encoding:'base64',commitment:'confirmed'}])).value}catch(e){console.log('SKIP_SHARING_BATCH',off,String(e).slice(0,180));continue}for(let i=0;i<batch.length;i++){const a=vals[i];if(!a)continue;existing.push({...batch[i],sharingOwner:a.owner,sharingLen:Buffer.from(a.data[0],'base64').length})}if(off%1000===0)console.log('PROGRESS',off,'existing',existing.length);await sleep(170)}
+          const ready=existing.filter(x=>x.coinCreator!==x.sharing);
+          console.log('READY_SUMMARY',JSON.stringify({shard,scanned:pools.length,sharingExists:existing.length,alreadyMigrated:existing.length-ready.length,ready:ready.length},null,2));
+          if(!ready.length){console.log('READY_TOP []');process.exit(0)}
+          for(let off=0;off<ready.length;off+=100){const batch=ready.slice(off,off+100);let vals;try{vals=(await rpc('getMultipleAccounts',[batch.map(x=>x.poolQuote),{encoding:'base64',commitment:'confirmed'}])).value}catch(e){console.log('SKIP_QUOTE_BATCH',off,String(e).slice(0,180));continue}for(let i=0;i<batch.length;i++){const a=vals[i],d=a?.data?.[0]?Buffer.from(a.data[0],'base64'):null;batch[i].quoteAmount=d?.length>=72?d.readBigUInt64LE(64).toString():'0';batch[i].quoteOwner=a?.owner??null}await sleep(170)}
+          ready.sort((a,b)=>BigInt(a.quoteAmount??'0')>BigInt(b.quoteAmount??'0')?-1:BigInt(a.quoteAmount??'0')<BigInt(b.quoteAmount??'0')?1:0);
+          console.log('READY_TOP',JSON.stringify(ready.slice(0,50),null,2));
+          for(const x of ready.slice(0,10))console.log('READY_HIT',JSON.stringify(x));
+          NODE
