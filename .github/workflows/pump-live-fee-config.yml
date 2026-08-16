@@ -1,0 +1,23 @@
+name: pump-live-fee-config
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/pump-live-fee-config.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  decode:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-sdk@1.36.0
+      - name: Decode fee config read-only
+        run: |
+          node --input-type=module <<'NODE'
+          import BN from 'bn.js';import {PUMP_SDK,PUMP_FEE_CONFIG_PDA} from '@pump-fun/pump-sdk';
+          const rpc='https://rpc.solanatracker.io/public';let id=1;async function q(method,params){const r=await fetch(rpc,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method,params})});const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));return j.result}
+          const a=(await q('getAccountInfo',[PUMP_FEE_CONFIG_PDA.toBase58(),{encoding:'base64',commitment:'confirmed'}])).value;if(!a)throw Error('missing');const x=PUMP_SDK.decodeFeeConfig({data:Buffer.from(a.data[0],'base64')});const rep=(k,v)=>BN.isBN(v)?v.toString():v;console.log('PDA',PUMP_FEE_CONFIG_PDA.toBase58());console.log('CONFIG',JSON.stringify(x,rep,2));
+          NODE
