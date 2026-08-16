@@ -1,0 +1,38 @@
+name: mayhem-create-solvault-pair-sim
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/mayhem-create-solvault-pair-sim.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  simulate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-sdk@1.36.0 @solana/web3.js @solana/spl-token
+      - name: Simulation-only joint sol-vault substitution
+        shell: bash
+        run: |
+          cat > x.mjs <<'NODE'
+          import {PublicKey,Keypair,Transaction,TransactionInstruction,SystemProgram} from '@solana/web3.js';
+          import {getAssociatedTokenAddressSync,TOKEN_2022_PROGRAM_ID} from '@solana/spl-token';
+          import {PUMP_SDK,getSolVaultPda,getTokenVaultPda} from '@pump-fun/pump-sdk';
+          const USER=new PublicKey('39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg');
+          const RPCS=['https://rpc.solanatracker.io/public','https://api.mainnet-beta.solana.com','https://solana-rpc.publicnode.com'];let id=1;const sl=m=>new Promise(r=>setTimeout(r,m));
+          async function q(u,m,p,n=4){let e;for(let i=0;i<n;i++){try{const r=await fetch(u,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-simulation-only/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method:m,params:p})});if(r.status===429||r.status>=500){e=Error('HTTP '+r.status);await sl(250+400*i);continue}const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));return j.result}catch(x){e=x;await sl(150)}}throw e}
+          async function call(m,p){let e;for(const u of RPCS){try{return await q(u,m,p)}catch(x){e=x;console.log('RPC_FAIL',m,u,String(x).slice(0,160))}}throw e}
+          const ui=(await call('getAccountInfo',[USER.toBase58(),{encoding:'base64',commitment:'confirmed'}])).value;if(!ui||ui.owner!==SystemProgram.programId.toBase58())throw Error('user unavailable');
+          const mint=Keypair.generate();const control=await PUMP_SDK.createV2Instruction({mint:mint.publicKey,name:'PairTest',symbol:'PAIR',uri:'x',creator:USER,user:USER,mayhemMode:true,cashback:false});
+          const canonicalSol=getSolVaultPda(),canonicalVault=getTokenVaultPda(mint.publicKey),userVault=getAssociatedTokenAddressSync(mint.publicKey,USER,true,TOKEN_2022_PROGRAM_ID);const randomOwner=Keypair.generate().publicKey,randomVault=getAssociatedTokenAddressSync(mint.publicKey,randomOwner,true,TOKEN_2022_PROGRAM_ID);
+          console.log('TARGET',JSON.stringify({mint:mint.publicKey.toBase58(),canonicalSol:canonicalSol.toBase58(),canonicalVault:canonicalVault.toBase58(),user:USER.toBase58(),userVault:userVault.toBase58(),randomOwner:randomOwner.toBase58(),randomVault:randomVault.toBase58()}));
+          function mut(map){return new TransactionInstruction({programId:control.programId,data:Buffer.from(control.data),keys:control.keys.map((k,i)=>map[i]?{...k,...map[i]}:{...k})})}
+          const cases={control,solvault_user_only:mut({11:{pubkey:USER,isWritable:true,isSigner:false}}),solvault_user_and_vault:mut({11:{pubkey:USER,isWritable:true,isSigner:false},13:{pubkey:userVault,isWritable:true,isSigner:false}}),solvault_random_and_vault:mut({11:{pubkey:randomOwner,isWritable:true,isSigner:false},13:{pubkey:randomVault,isWritable:true,isSigner:false}})};
+          const watch=[mint.publicKey,control.keys[2].pubkey,control.keys[3].pubkey,control.keys[12].pubkey,canonicalVault,userVault,randomVault,canonicalSol,USER];
+          async function sim(name,ix){const bh=(await call('getLatestBlockhash',[{commitment:'confirmed'}])).value.blockhash;const tx=new Transaction({feePayer:USER,recentBlockhash:bh}).add(ix);const raw=tx.serialize({requireAllSignatures:false,verifySignatures:false});let v,used;for(const u of RPCS){try{v=(await q(u,'simulateTransaction',[raw.toString('base64'),{encoding:'base64',sigVerify:false,replaceRecentBlockhash:true,commitment:'confirmed',accounts:{encoding:'base64',addresses:watch.map(x=>x.toBase58())}}],3)).value;used=u;break}catch(e){console.log('SIMFAIL',name,u,String(e).slice(0,160))}}if(!v){console.log('RESULT',name,JSON.stringify({noSim:true}));return}const logs=v.logs??[];const snap=(v.accounts??[]).map((a,i)=>({address:watch[i].toBase58(),exists:!!a,owner:a?.owner??null,lamports:a?.lamports??null,dataLen:a?Buffer.from(a.data[0],'base64').length:null,tokenAmount:a&&Buffer.from(a.data[0],'base64').length>=72?Buffer.from(a.data[0],'base64').readBigUInt64LE(64).toString():null}));console.log('RESULT',name,JSON.stringify({simulationOnly:true,broadcast:false,rpc:used,err:v.err,units:v.unitsConsumed,snapshot:snap,instructions:logs.filter(x=>x.includes('Instruction:')),anchor:logs.filter(x=>/AnchorError|Error Code|Error Number/.test(x)),failed:logs.filter(x=>x.includes('failed:')),interesting:logs.filter(x=>/vault|Vault|seed|constraint|owner|Mayhem|mayhem/i.test(x))},null,2))}
+          for(const [n,ix] of Object.entries(cases))await sim(n,ix);
+          NODE
+          node x.mjs
