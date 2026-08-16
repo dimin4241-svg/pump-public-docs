@@ -1,0 +1,35 @@
+name: mayhem-anchor-idl-probe
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/mayhem-anchor-idl-probe.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @coral-xyz/anchor @solana/web3.js pako
+      - name: Read-only Anchor IDL discovery
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import * as anchor from '@coral-xyz/anchor';
+          import {PublicKey} from '@solana/web3.js';
+          const P=new PublicKey('MAyhSmzXzV1pTf7LsNkrNwkWKTo4ougAJ1PPg47MD4e');
+          console.log('ANCHOR_EXPORTS',Object.keys(anchor).filter(x=>/idl/i.test(x)).sort());
+          console.log('UTILS_IDL',Object.keys(anchor.utils?.idl??{}));
+          for(const f of ['idlAddress','decodeIdlAccount'])console.log('FN',f,typeof anchor[f],typeof anchor.utils?.idl?.[f]);
+          let addr=null;
+          if(anchor.idlAddress)addr=await anchor.idlAddress(P);else if(anchor.utils?.idl?.idlAddress)addr=await anchor.utils.idl.idlAddress(P);
+          console.log('IDL_ADDRESS',addr?.toBase58?.()??null);
+          if(!addr)process.exit(0);
+          const rpc='https://api.mainnet-beta.solana.com';const r=await fetch(rpc,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:1,method:'getAccountInfo',params:[addr.toBase58(),{encoding:'base64',commitment:'confirmed'}]})});const j=await r.json();const a=j.result?.value;console.log('ACCOUNT',JSON.stringify({exists:!!a,owner:a?.owner,lamports:a?.lamports,dataLen:a?Buffer.from(a.data[0],'base64').length:null,head:a?Buffer.from(a.data[0],'base64').subarray(0,80).toString('hex'):null}));
+          if(a){const b=Buffer.from(a.data[0],'base64');try{const fn=anchor.decodeIdlAccount??anchor.utils?.idl?.decodeIdlAccount;const dec=fn?fn(b):null;console.log('DECODED_META',dec?JSON.stringify({authority:dec.authority?.toBase58?.()??dec.authority,dataLen:dec.data?.length}):null);if(dec?.data){const zlib=await import('node:zlib');for(const mode of ['inflate','inflateRaw','gunzip'])try{const raw=zlib[mode+'Sync'](Buffer.from(dec.data));console.log('IDL_TEXT_'+mode,raw.toString('utf8').slice(0,200000));break}catch(e){console.log('DECOMP_FAIL',mode,String(e).slice(0,100))}}}catch(e){console.log('DECODE_FAIL',String(e),e.stack)}}
+          NODE
+          echo '=== ANCHOR IDL SOURCE ==='
+          grep -RniE 'function idlAddress|const idlAddress|decodeIdlAccount' node_modules/@coral-xyz/anchor/dist node_modules/@coral-xyz/anchor/src 2>/dev/null | head -80 || true
