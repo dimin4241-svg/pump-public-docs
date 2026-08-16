@@ -1,0 +1,37 @@
+name: fee-sharing-pool-auth-constraints
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/fee-sharing-pool-auth-constraints.yml']
+  workflow_dispatch:
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: audit/boost-runtime-probe-20260815}
+      - name: Parse official current IDLs
+        shell: bash
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/pump-fun/pump-public-docs/main/idl/pump_fees.json -o /tmp/pump_fees.json
+          curl -fsSL https://raw.githubusercontent.com/pump-fun/pump-public-docs/main/idl/pump_amm.json -o /tmp/pump_amm.json
+          curl -fsSL https://raw.githubusercontent.com/pump-fun/pump-public-docs/main/idl/pump.json -o /tmp/pump.json
+          node <<'NODE'
+          const fs=require('fs');
+          const pf=JSON.parse(fs.readFileSync('/tmp/pump_fees.json'));
+          const amm=JSON.parse(fs.readFileSync('/tmp/pump_amm.json'));
+          const pump=JSON.parse(fs.readFileSync('/tmp/pump.json'));
+          const ix=pf.instructions.find(x=>x.name==='create_fee_sharing_config');
+          console.log('CREATE_FEE_SHARING_ARGS',JSON.stringify(ix?.args));
+          console.log('CREATE_FEE_SHARING_ACCOUNT_COUNT',ix?.accounts?.length);
+          for(const [i,a] of (ix?.accounts??[]).entries()) console.log('FS_ACCOUNT',i,a.name,JSON.stringify(a));
+          console.log('FS_RELEVANT_ERRORS');
+          for(const e of pf.errors??[]) if(/pool|creator|bonding|graduat|migrat|sharing|payer|mint|canonical|authority/i.test((e.name??'')+' '+(e.msg??''))) console.log('FS_ERR',JSON.stringify(e));
+          console.log('AMM_CREATOR_INSTRUCTIONS');
+          for(const a of amm.instructions??[]) if(/creator|sharing|transfer.*pump|migrat/i.test(a.name)) console.log('AMM_IX',a.name,JSON.stringify(a,null,2));
+          console.log('AMM_RELEVANT_ERRORS');
+          for(const e of amm.errors??[]) if(/creator|sharing|pump|canonical|pool/i.test((e.name??'')+' '+(e.msg??''))) console.log('AMM_ERR',JSON.stringify(e));
+          console.log('PUMP_CREATOR_INSTRUCTIONS');
+          for(const a of pump.instructions??[]) if(/creator|sharing/i.test(a.name)) console.log('PUMP_IX',a.name,JSON.stringify(a,null,2));
+          NODE
