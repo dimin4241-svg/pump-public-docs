@@ -1,0 +1,40 @@
+name: mayhem-fee-recipient-history
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/mayhem-fee-recipient-history.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  scan:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm install --no-save bs58
+      - name: Read-only fee recipient inventory and sweep scan
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import crypto from 'node:crypto'; import bs58pkg from 'bs58'; const bs58=bs58pkg.default??bs58pkg;
+          const P='MAyhSmzXzV1pTf7LsNkrNwkWKTo4ougAJ1PPg47MD4e';
+          const names=['initialize_fee_recipient','sweep_fees','sweep_fees_admin','update_max_sol_per_sweep','update_max_stable_per_sweep','withdraw_admin','withdraw_quote_admin','update_trader','update_admin','reset_state','reset_sol_deployed','reset_stable_deployed','resume_trading','stop_trading','burn_tokens','update_global_params'];
+          const byDisc=new Map(names.map(n=>[crypto.createHash('sha256').update('global:'+n).digest().subarray(0,8).toString('hex'),n]));
+          console.log('RARE_DISCS',JSON.stringify(Object.fromEntries([...byDisc].map(([d,n])=>[n,d])),null,2));
+          for(const n of ['FeeRecipient','FeeRecipientState','MayhemFeeRecipient'])console.log('ACCOUNT_DISC',n,crypto.createHash('sha256').update('account:'+n).digest().subarray(0,8).toString('hex'));
+          const RPCS=['https://rpc.solanatracker.io/public','https://api.mainnet-beta.solana.com','https://solana-rpc.publicnode.com'];let id=1;const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          async function post(url,body){const r=await fetch(url,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-read-only-fee-recipient-history/1.0'},body:JSON.stringify(body)});if(!r.ok)throw Error('HTTP '+r.status);return await r.json()}
+          async function one(method,params){let last;for(const u of RPCS){try{const j=await post(u,{jsonrpc:'2.0',id:id++,method,params});if(j.error)throw Error(JSON.stringify(j.error));return j.result}catch(e){last=e;console.log('RPCFAIL',method,u,String(e).slice(0,160));await sleep(300)}}throw last}
+          async function batchTx(sigs){let last;for(const u of RPCS){try{const req=sigs.map(sig=>({jsonrpc:'2.0',id:id++,method:'getTransaction',params:[sig,{encoding:'json',commitment:'confirmed',maxSupportedTransactionVersion:0}]}));const a=await post(u,req);if(!Array.isArray(a))throw Error('non-array');const m=new Map(a.map(x=>[x.id,x.result]));return req.map(x=>m.get(x.id)??null)}catch(e){last=e;console.log('BATCHFAIL',u,String(e).slice(0,160));await sleep(350)}}throw last}
+          const rows=await one('getProgramAccounts',[P,{encoding:'base64',commitment:'confirmed',filters:[{dataSize:74}]}]);
+          console.log('DATA_SIZE_74_COUNT',rows.length);
+          for(const r of rows){const b=Buffer.from(r.account.data[0],'base64');console.log('FEE_ACCOUNT',JSON.stringify({pubkey:r.pubkey,lamports:r.account.lamports,owner:r.account.owner,dataLen:b.length,disc:b.subarray(0,8).toString('hex'),hex:b.toString('hex')},null,2));
+            for(let off=8;off+32<=b.length;off++){const pk=bs58.encode(b.subarray(off,off+32));if(pk==='11111111111111111111111111111111')continue; if(off===8||off===9||off===10||off===40||off===41)console.log('WINDOW',r.pubkey,off,pk)}
+          }
+          function mayhemIxs(tx){if(!tx)return[];const msg=tx.transaction.message;const flat=[...msg.accountKeys,...(tx.meta?.loadedAddresses?.writable??[]),...(tx.meta?.loadedAddresses?.readonly??[])];const out=[];const add=(ix,where)=>{if(flat[ix.programIdIndex]!==P||!ix.data)return;let raw;try{raw=Buffer.from(bs58.decode(ix.data))}catch{return}const d=raw.subarray(0,8).toString('hex');out.push({where,disc:d,name:byDisc.get(d)??null,dataHex:raw.toString('hex'),accounts:(ix.accounts??[]).map(i=>flat[i])})};(msg.instructions??[]).forEach((ix,i)=>add(ix,'top:'+i));for(const g of (tx.meta?.innerInstructions??[]))for(const [i,ix] of (g.instructions??[]).entries())add(ix,'inner:'+g.index+':'+i);return out}
+          let allRare=[];
+          for(const r of rows){const sigs=await one('getSignaturesForAddress',[r.pubkey,{limit:250,commitment:'confirmed'}]);console.log('RECENT_SIGS',r.pubkey,sigs.length,sigs[0]?.slot,sigs.at(-1)?.slot);let counts={};for(let off=0;off<sigs.length;off+=6){const chunk=sigs.slice(off,off+6).filter(x=>x.err==null);let txs;try{txs=await batchTx(chunk.map(x=>x.signature))}catch(e){console.log('SKIP',r.pubkey,off,String(e));continue}for(let j=0;j<txs.length;j++)for(const ix of mayhemIxs(txs[j])){counts[ix.disc]=(counts[ix.disc]??0)+1;if(ix.name){const hit={feeAccount:r.pubkey,signature:chunk[j].signature,slot:txs[j].slot,blockTime:txs[j].blockTime,...ix};allRare.push(hit);console.log('RARE_HIT',JSON.stringify(hit,null,2))}}await sleep(120)}console.log('DISC_COUNTS',r.pubkey,JSON.stringify(counts))}
+          console.log('ALL_RARE',JSON.stringify(allRare,null,2));
+          NODE
