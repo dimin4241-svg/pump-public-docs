@@ -1,0 +1,36 @@
+name: mayhem-binary-forensics
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/mayhem-binary-forensics.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save bs58
+      - name: Read-only deployed program binary inspection
+        shell: bash
+        run: |
+          cat > dump.mjs <<'NODE'
+          import bs58pkg from 'bs58';const bs58=bs58pkg.default??bs58pkg;import fs from 'fs';
+          const P='MAyhSmzXzV1pTf7LsNkrNwkWKTo4ougAJ1PPg47MD4e',RPCS=['https://api.mainnet-beta.solana.com','https://rpc.solanatracker.io/public'];let id=1;async function q(u,m,p){const r=await fetch(u,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method:m,params:p})});if(!r.ok)throw Error('HTTP '+r.status);const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));return j.result}async function call(m,p){let e;for(const u of RPCS)try{return await q(u,m,p)}catch(x){e=x}throw e}
+          const pi=(await call('getAccountInfo',[P,{encoding:'base64',commitment:'confirmed'}])).value;if(!pi)throw Error('program missing');const pb=Buffer.from(pi.data[0],'base64');console.log('PROGRAM',JSON.stringify({owner:pi.owner,lamports:pi.lamports,len:pb.length,head:pb.subarray(0,40).toString('hex')}));if(pb.length<36)throw Error('not upgradeable loader Program state');const pd=bs58.encode(pb.subarray(4,36));console.log('PROGRAMDATA',pd);const di=(await call('getAccountInfo',[pd,{encoding:'base64',commitment:'confirmed'}])).value;if(!di)throw Error('programdata missing');const db=Buffer.from(di.data[0],'base64');console.log('PROGRAMDATA_META',JSON.stringify({owner:di.owner,lamports:di.lamports,len:db.length,head:db.subarray(0,64).toString('hex')}));let off=db.indexOf(Buffer.from([0x7f,0x45,0x4c,0x46]));console.log('ELF_OFFSET',off);if(off<0)throw Error('ELF magic not found');fs.writeFileSync('mayhem.so',db.subarray(off));console.log('ELF_LEN',db.length-off);
+          NODE
+          node dump.mjs
+          file mayhem.so || true
+          readelf -h mayhem.so || true
+          readelf -S mayhem.so | head -120 || true
+          echo '=== SECURITY/ERROR STRINGS ==='
+          strings -a -n 5 mayhem.so | grep -Ei 'error|invalid|unauthor|authority|signer|constraint|slippage|pump|swap|quote|mint|vault|state|fee|buy|sell|migrat|owner|cashback|global|timestamp|expired|price|reserve|balance' | sort -u | head -1200 || true
+          echo '=== ALL LONG STRINGS TAIL ==='
+          strings -a -n 12 mayhem.so | tail -1200 || true
+          echo '=== DISASSEMBLY TOOL ==='
+          command -v llvm-objdump || true
+          command -v objdump || true
+          llvm-objdump -d mayhem.so 2>/dev/null | head -120 || objdump -d mayhem.so 2>/dev/null | head -120 || true
