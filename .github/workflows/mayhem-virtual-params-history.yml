@@ -1,0 +1,57 @@
+name: mayhem-virtual-params-history
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/mayhem-virtual-params-history.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  trace:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save bs58
+      - name: Read-only CPI history trace
+        shell: bash
+        run: |
+          cat > trace.mjs <<'NODE'
+          import bs58pkg from 'bs58';const bs58=bs58pkg.default??bs58pkg;
+          const SOLVAULT='BwWK17cbHxwWBKZkUYvzxLcNQ1YVyaFezduWbtm2de6s';
+          const PUMP='6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P';
+          const MAYHEM='MAyhSmzXzV1pTf7LsNkrNwkWKTo4ougAJ1PPg47MD4e';
+          const target=Buffer.from([61,169,188,191,153,149,42,97]);
+          console.log('TARGET',target.toString('hex'),bs58.encode(target));
+          const RPCS=['https://rpc.solanatracker.io/public','https://api.mainnet-beta.solana.com'];let id=1;
+          const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          async function req(u,m,p,n=4){let e;for(let a=0;a<n;a++){try{const r=await fetch(u,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-readonly/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method:m,params:p})});if(r.status===429||r.status>=500){e=Error('HTTP '+r.status);await sleep(300+600*a);continue}const j=await r.json();if(j.error){e=Error(JSON.stringify(j.error));await sleep(200);continue}return j.result}catch(x){e=x;await sleep(200)}}throw e}
+          async function call(m,p){let e;for(const u of RPCS){try{return await req(u,m,p)}catch(x){e=x;console.log('RPC_FAIL',m,u,String(x).slice(0,140))}}throw e}
+          function keystr(k){return typeof k==='string'?k:(k?.pubkey??k?.toString?.()??String(k))}
+          function allKeys(tx){const m=tx.transaction.message;const base=(m.accountKeys??[]).map(keystr);const la=tx.meta?.loadedAddresses??{};return [...base,...(la.writable??[]).map(keystr),...(la.readonly??[]).map(keystr)];}
+          function decodeIx(ix,keys){try{const pid=typeof ix.programId==='string'?ix.programId:(ix.programIdIndex!==undefined?keys[ix.programIdIndex]:keystr(ix.programId));const data=Buffer.from(bs58.decode(ix.data??''));const accts=(ix.accounts??[]).map(i=>typeof i==='number'?keys[i]:keystr(i));return {pid,data,accts,raw:ix}}catch{return null}}
+          let sigs=[];let before=undefined;
+          for(let page=0;page<8;page++){
+            const opts={limit:100};if(before)opts.before=before;
+            const rows=await call('getSignaturesForAddress',[SOLVAULT,opts]);if(!rows.length)break;
+            sigs.push(...rows);before=rows.at(-1).signature;console.log('SIG_PAGE',page,rows.length,'TOTAL',sigs.length,'LAST_SLOT',rows.at(-1).slot);
+            if(rows.length<100)break;await sleep(120);
+          }
+          let found=[];let fetched=0;
+          for(const s of sigs){
+            let tx;try{tx=await call('getTransaction',[s.signature,{encoding:'json',maxSupportedTransactionVersion:0,commitment:'confirmed'}])}catch(e){console.log('TX_FAIL',s.signature,String(e).slice(0,120));continue}if(!tx)continue;fetched++;
+            const keys=allKeys(tx);const groups=[];
+            const outer=tx.transaction.message.instructions??[];groups.push({kind:'outer',parent:null,ixs:outer});
+            for(const g of tx.meta?.innerInstructions??[])groups.push({kind:'inner',parent:g.index,ixs:g.instructions??[]});
+            for(const g of groups)for(let j=0;j<g.ixs.length;j++){
+              const d=decodeIx(g.ixs[j],keys);if(!d||d.pid!==PUMP||d.data.length<8||!d.data.subarray(0,8).equals(target))continue;
+              const parent=g.kind==='inner'?decodeIx(outer[g.parent],keys):null;
+              const row={signature:s.signature,slot:s.slot,blockTime:s.blockTime,err:s.err,kind:g.kind,parentIndex:g.parent,index:j,parentProgram:parent?.pid??null,parentData:parent?.data?.toString('hex')??null,accounts:d.accts,data:d.data.toString('hex'),logMessages:(tx.meta?.logMessages??[]).filter(x=>/SetMayhemVirtualParams|mayhem|Mayhem|Invoke|Program .* invoke/i.test(x))};
+              found.push(row);console.log('FOUND',JSON.stringify(row,null,2));
+            }
+            if(found.length>=12)break;if(fetched%25===0)console.log('PROGRESS',fetched,'FOUND',found.length);await sleep(65);
+          }
+          console.log('SUMMARY',JSON.stringify({signaturesScanned:sigs.length,transactionsFetched:fetched,found:found.length,rows:found},null,2));
+          NODE
+          node trace.mjs
