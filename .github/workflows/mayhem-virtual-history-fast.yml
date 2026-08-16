@@ -1,0 +1,30 @@
+name: mayhem-virtual-history-fast
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/mayhem-virtual-history-fast.yml']
+  workflow_dispatch:
+permissions: {contents: read}
+jobs:
+  trace:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save bs58
+      - shell: bash
+        run: |
+          cat > fast.mjs <<'NODE'
+          import bs58pkg from 'bs58';const bs58=bs58pkg.default??bs58pkg;
+          const SV='BwWK17cbHxwWBKZkUYvzxLcNQ1YVyaFezduWbtm2de6s',PUMP='6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P',TARGET=Buffer.from([61,169,188,191,153,149,42,97]);
+          const RPCS=['https://rpc.solanatracker.io/public','https://api.mainnet-beta.solana.com'];let id=1;const sl=m=>new Promise(r=>setTimeout(r,m));
+          async function one(u,m,p){const r=await fetch(u,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-readonly/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method:m,params:p})});if(!r.ok)throw Error('HTTP '+r.status);const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));return j.result}
+          async function call(m,p){let e;for(const u of RPCS)try{return await one(u,m,p)}catch(x){e=x}throw e}
+          const sigs=[];let before;for(let p=0;p<5;p++){const o={limit:100};if(before)o.before=before;const a=await call('getSignaturesForAddress',[SV,o]);sigs.push(...a);if(!a.length||a.length<100)break;before=a.at(-1).signature;await sl(60)}console.log('SIGS',sigs.length,sigs[0]?.slot,sigs.at(-1)?.slot);
+          async function batch(chunk){const body=chunk.map(s=>({jsonrpc:'2.0',id:id++,method:'getTransaction',params:[s.signature,{encoding:'json',maxSupportedTransactionVersion:0,commitment:'confirmed'}]}));let last;for(const u of RPCS){try{const r=await fetch(u,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-readonly/1.0'},body:JSON.stringify(body)});if(!r.ok)throw Error('HTTP '+r.status);const j=await r.json();if(!Array.isArray(j))throw Error('not batch');const by=new Map(j.map(x=>[x.id,x]));return body.map((b,i)=>by.get(b.id)?.result??null)}catch(e){last=e;console.log('BATCH_FAIL',u,String(e).slice(0,120));await sl(150)}}throw last}
+          function k(x){return typeof x==='string'?x:(x?.pubkey??String(x))}function keys(tx){const a=(tx.transaction.message.accountKeys??[]).map(k),l=tx.meta?.loadedAddresses??{};return [...a,...(l.writable??[]).map(k),...(l.readonly??[]).map(k)]}
+          function ixdec(ix,ks){try{return {pid:ks[ix.programIdIndex],data:Buffer.from(bs58.decode(ix.data??'')),accounts:(ix.accounts??[]).map(i=>ks[i])}}catch{return null}}
+          const found=[];let fetched=0;for(let off=0;off<sigs.length;off+=15){const chunk=sigs.slice(off,off+15),txs=await batch(chunk);for(let z=0;z<txs.length;z++){const tx=txs[z];if(!tx)continue;fetched++;const ks=keys(tx),outer=tx.transaction.message.instructions??[];for(const g of tx.meta?.innerInstructions??[])for(let j=0;j<(g.instructions??[]).length;j++){const d=ixdec(g.instructions[j],ks);if(!d||d.pid!==PUMP||d.data.length<8||!d.data.subarray(0,8).equals(TARGET))continue;const p=ixdec(outer[g.index],ks);const row={signature:chunk[z].signature,slot:chunk[z].slot,blockTime:chunk[z].blockTime,parentIndex:g.index,parentProgram:p?.pid,parentData:p?.data?.toString('hex'),accounts:d.accounts,logs:(tx.meta?.logMessages??[]).filter(x=>/SetMayhemVirtualParams|Mayhem|mayhem/.test(x))};found.push(row);console.log('FOUND',JSON.stringify(row,null,2))}}if(found.length>=10)break;console.log('PROGRESS',Math.min(off+15,sigs.length),'found',found.length);await sl(80)}console.log('SUMMARY',JSON.stringify({scanned:sigs.length,fetched,found:found.length,rows:found},null,2));
+          NODE
+          node fast.mjs
