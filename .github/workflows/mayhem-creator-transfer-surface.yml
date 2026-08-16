@@ -1,0 +1,32 @@
+name: mayhem-creator-transfer-surface
+on:
+  push:
+    paths:
+      - '.github/workflows/mayhem-creator-transfer-surface.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-swap-sdk@1.19.0 @pump-fun/pump-sdk@1.36.0 @solana/web3.js
+      - name: Exact IDL and SDK transfer surface
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs'; import crypto from 'node:crypto';
+          for(const path of ['node_modules/@pump-fun/pump-swap-sdk/src/idl/pump_amm.json','node_modules/@pump-fun/pump-sdk/src/idl/pump_amm.json']){
+            const j=JSON.parse(fs.readFileSync(path,'utf8'));console.log('\n===',path,'===');
+            for(const ix of j.instructions??[]){if(!/creator|fee|transfer|collect/i.test(ix.name))continue;console.log('\nIX',ix.name,'disc',Buffer.from(ix.discriminator??[]).toString('hex'),'args',JSON.stringify(ix.args??[]));for(const [i,a] of (ix.accounts??[]).entries())console.log(' A',i,JSON.stringify(a));}
+            console.log('\nERRORS');for(const e of j.errors??[])if(/creator|fee|sharing|cashback|buyback/i.test((e.name??'')+' '+(e.msg??'')))console.log(e.code,e.name,e.msg);
+          }
+          const names=['transfer_creator_fees_to_pump','transfer_creator_fees_to_pump_v2','collect_coin_creator_fee','collect_coin_creator_fee_v2','set_coin_creator','migrate_pool_coin_creator'];for(const n of names)console.log('DISC',n,crypto.createHash('sha256').update('global:'+n).digest().subarray(0,8).toString('hex'));
+          NODE
+          echo '=== source grep ==='
+          grep -RniE 'transferCreatorFeesToPump|transfer_creator_fees_to_pump|collectCoinCreatorFee|collect_coin_creator_fee|coinCreatorVault' node_modules/@pump-fun/pump-swap-sdk/src node_modules/@pump-fun/pump-sdk/src --exclude='*.map' | head -700 || true
+          echo '=== likely source chunks ==='
+          sed -n '620,1040p' node_modules/@pump-fun/pump-swap-sdk/src/sdk/offlinePumpAmm.ts || true
+          sed -n '1,380p' node_modules/@pump-fun/pump-swap-sdk/src/sdk/onlinePumpAmm.ts || true
