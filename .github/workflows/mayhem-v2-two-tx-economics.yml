@@ -1,0 +1,29 @@
+name: mayhem-v2-two-tx-economics
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/mayhem-v2-two-tx-economics.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  decode:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save bs58
+      - name: Read-only exact CPI decode
+        shell: bash
+        run: |
+          cat > x.mjs <<'NODE'
+          import bs58pkg from 'bs58';const bs58=bs58pkg.default??bs58pkg;
+          const SIGS=[['BuyV2','4aJD24nGqzJzWYB1bUi6pt2a45gShZwXaK4z4aGeYwJTuzHHQDNx9TDNaYptxPtLcY2AEKL763modULazMbpY9ng'],['SellV2','5waSUE1fF8WsnF4Hf6urM85cgwNFaDRqhsgfHaLGsrCQeB98Bfbg6TGjuHCAB3GdKzPbGoLqXDgh8Q8TPLUew5AL']];
+          const MAY='MAyhSmzXzV1pTf7LsNkrNwkWKTo4ougAJ1PPg47MD4e',PUMP='6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P';
+          const RPCS=['https://api.mainnet-beta.solana.com','https://rpc.solanatracker.io/public'];let id=1;const sl=m=>new Promise(r=>setTimeout(r,m));async function q(u,m,p){const r=await fetch(u,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method:m,params:p})});if(!r.ok)throw Error('HTTP '+r.status);const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));return j.result}async function call(m,p){let e;for(const u of RPCS){for(let n=0;n<6;n++)try{return await q(u,m,p)}catch(x){e=x;await sl(350+500*n)}}throw e}
+          const key=x=>typeof x==='string'?x:x?.pubkey??String(x);function keys(t){const a=(t.transaction.message.accountKeys??[]).map(key),l=t.meta?.loadedAddresses??{};return [...a,...(l.writable??[]).map(key),...(l.readonly??[]).map(key)]}function dec(ix,k){let d=Buffer.alloc(0);try{d=Buffer.from(bs58.decode(ix.data??''))}catch{}return {pid:k[ix.programIdIndex],data:d,idx:ix.accounts??[],accounts:(ix.accounts??[]).map(i=>k[i])}}function args(b){return {hex:b.toString('hex'),len:b.length,disc:b.subarray(0,8).toString('hex'),u64_8:b.length>=16?b.readBigUInt64LE(8).toString():null,u64_16:b.length>=24?b.readBigUInt64LE(16).toString():null,u32_24:b.length>=28?b.readUInt32LE(24):null}}
+          for(const [name,sig] of SIGS){const t=await call('getTransaction',[sig,{encoding:'json',maxSupportedTransactionVersion:0,commitment:'confirmed'}]);const k=keys(t),out=(t.transaction.message.instructions??[]).map(ix=>dec(ix,k));const oi=out.findIndex(x=>x.pid===MAY&&x.data.subarray(0,8).toString('hex')===(name==='BuyV2'?'b817ee6167c5d33d':'5df6823ce7e940b2'));const o=out[oi],inners=((t.meta?.innerInstructions??[]).find(g=>g.index===oi)?.instructions??[]).map(ix=>dec(ix,k));const pumps=inners.filter(x=>x.pid===PUMP);const balances=[];const pre=t.meta?.preTokenBalances??[],post=t.meta?.postTokenBalances??[];const ids=new Set([...pre.map(x=>x.accountIndex),...post.map(x=>x.accountIndex)]);for(const gi of ids){const a=pre.find(x=>x.accountIndex===gi),b=post.find(x=>x.accountIndex===gi);if(!a||!b)continue;const pa=BigInt(a.uiTokenAmount.amount),pb=BigInt(b.uiTokenAmount.amount);if(pa===pb)continue;balances.push({index:gi,address:k[gi],mint:b.mint,owner:b.owner,pre:pa.toString(),post:pb.toString(),delta:(pb-pa).toString()})}
+            console.log('CASE',name,JSON.stringify({signature:sig,slot:t.slot,blockTime:t.blockTime,outerIndex:oi,outer:args(o.data),outerAccounts:o.accounts,pumpInner:pumps.map(x=>({args:args(x.data),accounts:x.accounts})),tokenChanges:balances,preBalances:t.meta?.preBalances,postBalances:t.meta?.postBalances,logs:t.meta?.logMessages},null,2));await sl(500)}
+          NODE
+          node x.mjs
