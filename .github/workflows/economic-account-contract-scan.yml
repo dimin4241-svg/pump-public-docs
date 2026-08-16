@@ -1,0 +1,34 @@
+name: economic-account-contract-scan
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/economic-account-contract-scan.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  scan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: audit/boost-runtime-probe-20260815}
+      - shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          j=json.load(open('idl/pump_amm.json'))
+          names=['buy','sell','deposit','withdraw','claim_cashback','sync_user_volume_accumulator','collect_coin_creator_fee','set_coin_creator','create_pool','create_pool_v2']
+          for n in names:
+            x=next((i for i in j.get('instructions',[]) if i['name']==n),None)
+            if not x: continue
+            print('\nINSTR',n)
+            for idx,a in enumerate(x.get('accounts',[])):
+              constrained=any(k in a for k in ['pda','address','relations'])
+              print('ACCOUNT',idx,json.dumps({'name':a['name'],'writable':a.get('writable',False),'signer':a.get('signer',False),'optional':a.get('optional',False),'constrained':constrained,'pda':a.get('pda'),'address':a.get('address'),'relations':a.get('relations')},separators=(',',':')))
+          print('\nOPTIONAL_ALL')
+          for x in j.get('instructions',[]):
+            for idx,a in enumerate(x.get('accounts',[])):
+              if a.get('optional'):
+                print('OPTIONAL',x['name'],idx,json.dumps(a,separators=(',',':')))
+          PY
