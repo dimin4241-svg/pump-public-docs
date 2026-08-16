@@ -1,0 +1,44 @@
+name: distribute-creator-fast-probe
+on:
+  push:
+    paths:
+      - '.github/workflows/distribute-creator-fast-probe.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-sdk@1.36.0 @solana/web3.js bs58
+      - name: Fast source and live sharing probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '=== FILES WITH DISTRIBUTE CREATOR FEES ==='
+          grep -RnlE 'distributeCreatorFees|distribute_creator_fees' node_modules/@pump-fun/pump-sdk/src node_modules/@pump-fun/pump-sdk/dist --exclude='*.map' | head -60 || true
+          for f in $(grep -RnlE 'distributeCreatorFees|distribute_creator_fees' node_modules/@pump-fun/pump-sdk/src --exclude='*.map' | head -15); do echo "--- $f"; grep -n -B25 -A100 -E 'distributeCreatorFees|distribute_creator_fees' "$f" | head -450; done
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          import bs58pkg from 'bs58'; const bs58=bs58pkg.default??bs58pkg;
+          import {PublicKey} from '@solana/web3.js';
+          import * as pump from '@pump-fun/pump-sdk';
+          const idl=JSON.parse(fs.readFileSync('node_modules/@pump-fun/pump-sdk/src/idl/pump.json','utf8'));
+          const ix=idl.instructions.find(x=>x.name==='distribute_creator_fees');
+          const sharing=ix.accounts.find(x=>x.name==='sharing_config');
+          const SHARE_PROGRAM=new PublicKey(Uint8Array.from(sharing.pda.program.value));
+          const DISC=Buffer.from(idl.accounts.find(x=>x.name==='SharingConfig').discriminator);
+          console.log('SHARE_PROGRAM',SHARE_PROGRAM.toBase58(),'DISC',DISC.toString('hex'),'DISC58',bs58.encode(DISC));
+          console.log('PUMP_SDK_PROTO',Object.getOwnPropertyNames(pump.PumpSdk.prototype));
+          console.log('ONLINE_PROTO',Object.getOwnPropertyNames(pump.OnlinePumpSdk.prototype));
+          for(const [C,n] of [[pump.PumpSdk,'PumpSdk'],[pump.OnlinePumpSdk,'OnlinePumpSdk']])for(const m of Object.getOwnPropertyNames(C.prototype))if(/distribut|creator|sharing/i.test(m))console.log('METHOD_SRC',n,m,String(C.prototype[m]).slice(0,16000));
+          const RPCS=['https://rpc.solanatracker.io/public','https://api.mainnet-beta.solana.com','https://solana-rpc.publicnode.com'];let id=1;const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          async function rpc(method,params){let last;for(const url of RPCS){try{const r=await fetch(url,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-readonly-distribute-fast/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method,params})});if(!r.ok)throw Error('HTTP '+r.status);const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));return {url,result:j.result}}catch(e){last=e;console.log('RPCFAIL',method,url,String(e).slice(0,160));await sleep(250)}}throw last}
+          let gpa;try{gpa=await rpc('getProgramAccounts',[SHARE_PROGRAM.toBase58(),{encoding:'base64',commitment:'confirmed',filters:[{memcmp:{offset:0,bytes:bs58.encode(DISC)}}],dataSlice:{offset:0,length:80}}])}catch(e){console.log('GPA_FAIL_FINAL',String(e));process.exit(0)}
+          console.log('GPA_OK',gpa.url,'COUNT',gpa.result.length);
+          const first=gpa.result.slice(0,50).map(r=>{const b=Buffer.from(r.account.data[0],'base64');return {pk:r.pubkey,len:b.length,head:b.toString('hex'),mint:b.length>=43?bs58.encode(b.subarray(11,43)):null,admin:b.length>=75?bs58.encode(b.subarray(43,75)):null}});
+          console.log('FIRST50',JSON.stringify(first,null,2));
+          NODE
