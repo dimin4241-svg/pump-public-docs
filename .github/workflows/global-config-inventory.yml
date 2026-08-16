@@ -1,0 +1,31 @@
+name: global-config-inventory
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/global-config-inventory.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  scan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: audit/boost-runtime-probe-20260815}
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save bs58
+      - shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';import bs58pkg from 'bs58';const bs58=bs58pkg.default??bs58pkg;
+          const idl=JSON.parse(fs.readFileSync('idl/pump_amm.json','utf8'));
+          const a=idl.accounts.find(x=>x.name.toLowerCase()==='global_config');if(!a)throw Error('GlobalConfig account idl missing');
+          const disc=Buffer.from(a.discriminator);console.log('GLOBAL_CONFIG_DISCRIMINATOR',disc.toString('hex'),bs58.encode(disc));
+          const PROGRAM='pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA',RPCS=['https://api.mainnet-beta.solana.com','https://solana-rpc.publicnode.com','https://rpc.solanatracker.io/public'];let id=1;const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          async function req(u,m,p,n=3){let e;for(let i=0;i<n;i++){try{const r=await fetch(u,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-readonly/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method:m,params:p})});if(r.status===429||r.status>=500){e=Error('HTTP '+r.status);await sleep(250+400*i);continue}const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));return j.result}catch(x){e=x;await sleep(180)}}throw e}
+          let rows=null;for(const u of RPCS){try{rows=await req(u,'getProgramAccounts',[PROGRAM,{encoding:'base64',commitment:'confirmed',filters:[{memcmp:{offset:0,bytes:bs58.encode(disc)}}]}],2);console.log('GPA_RPC',u,'COUNT',rows.length);break}catch(e){console.log('GPA_FAIL',u,String(e).slice(0,220))}}
+          if(!rows)throw Error('all GPA failed');for(const r of rows){const b=Buffer.from(r.account.data[0],'base64');console.log('ROW',JSON.stringify({pubkey:r.pubkey,len:b.length,lamports:r.account.lamports,owner:r.account.owner,hex:b.toString('hex')}));}
+          console.log('CANONICAL_PRESENT',rows.some(r=>r.pubkey==='ADyA8hdefvWN2dbGGWFotbzWxrAvLW83WG6QCVXvJKqw'));
+          NODE
