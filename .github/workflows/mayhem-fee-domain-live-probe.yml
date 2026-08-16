@@ -26,13 +26,13 @@ jobs:
 
           const POOL=new PublicKey('BkyEQLxRpKkWpToGidioiBHMaqbkiKd29jTsqPGshuPB');
           const USER=new PublicKey('HTVZVEQMBsNanubDPTs3CxDAEGNFQHJY8c1441iy2S5r');
-          const RESERVED=[
+          const RESERVED_FALLBACK=[
             'GesfTA3X2arioaHp8bbKdjG9vJtskViWACZoYvxp4twS','4budycTjhs9fD6xw62VBducVTNgMgJJ5BgtKq7mAZwn6',
             '8SBKzEQU4nLSzcwF4a74F2iaUDQyTfjGndn6qUWBnrpR','4UQeTP1T39KZ9Sfxzo3WR5skgsaP6NZa87BAkuazLEKH',
             '8sNeir4QsLsJdYpc9RZacohhK1Y5FLU3nC5LXgYB4aa6','Fh9HmeLNUMVCvejxCtCL2DbYaRyBFVJ5xrWkLnMH6fdk',
             '463MEnMeGyJekNZFQSTUABBEbLnvMTALbT6ZmsxAbAdq','6AUH3WEHucYZyC61hqpqYUWVto5qA5hjHuNQ32GNnNxA'
           ].map(x=>new PublicKey(x));
-          const NORMAL=[
+          const NORMAL_FALLBACK=[
             '62qc2CNXwrYqQScmEdiZFFAnJR262PxWEuNQtxfafNgV','7VtfL8fvgNfhz17qKRMjzQEXgbdpnHHHQRh54R9jP2RJ',
             '7hTckgnGnLQR6sdH7YkqFTAA7VwTfYFaZ6EhEsU3saCX','9rPYyANsfQZw3DnDmKE3YCQF5E8oD89UXoHn9JFEhJUz',
             'AVmoTthdrX6tKt4nDjco2D775W2YK3sDhxPcMmzUAmTY','CebN5WGQ4jvEPvsVU4EoHEpgzq1VV7AbicfhtW4xC9iM',
@@ -43,34 +43,75 @@ jobs:
           async function raw(u,m,p,n=4){let last;for(let i=0;i<n;i++){try{const r=await fetch(u,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-simulation-only/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:rid++,method:m,params:p})});if(r.status===429||r.status>=500){last=Error('HTTP '+r.status);await sleep(300+350*i);continue}const j=await r.json();if(j.error){last=Error(JSON.stringify(j.error));if(/429|No response|Too many/i.test(String(last))){await sleep(300+350*i);continue}throw last}return j.result}catch(e){last=e;await sleep(200)}}throw last}
           async function call(m,p){let e;for(const u of RPCS){try{return await raw(u,m,p)}catch(x){e=x;console.log('RPC_FAIL',m,u,String(x).slice(0,180))}}throw e}
           let conn;for(const u of RPCS){try{const c=new Connection(u,'confirmed');await c.getLatestBlockhash();conn=c;console.log('SDK_RPC',u);break}catch(e){console.log('SDK_RPC_FAIL',u,String(e).slice(0,140))}}if(!conn)throw Error('no sdk rpc');
+
+          function onePk(x){try{return x?.toBase58?x:null}catch{return null}}
+          function pkList(x){if(!x)return[];const xs=Array.isArray(x)?x:[x];return xs.filter(v=>v?.toBase58)}
+          function uniq(xs){const m=new Map();for(const x of xs)if(x?.toBase58)m.set(x.toBase58(),x);return [...m.values()]}
+          function safePk(x){try{return x?.toBase58?.()??null}catch{return null}}
+
           const sdk=new OnlinePumpAmmSdk(conn);const state=await sdk.swapSolanaState(POOL,USER);
-          const p=state.pool;
-          console.log('STATE',JSON.stringify({pool:POOL.toBase58(),isMayhemMode:p.isMayhemMode,isCashbackCoin:p.isCashbackCoin,virtualQuoteReserves:p.virtualQuoteReserves?.toString?.(),baseMint:p.baseMint.toBase58(),quoteMint:p.quoteMint.toBase58(),creator:p.creator.toBase58(),coinCreator:p.coinCreator.toBase58(),poolBase:p.poolBaseTokenAccount.toBase58(),poolQuote:p.poolQuoteTokenAccount.toBase58(),baseAmount:state.poolBaseAmount.toString(),quoteAmount:state.poolQuoteAmount.toString(),userQuote:state.userQuoteTokenAccount.toBase58(),quoteProgram:state.quoteTokenProgram.toBase58()},null,2));
-          console.log('GLOBAL_KEYS',Object.keys(state.globalConfig??{}));
-          console.log('GLOBAL_RECIPS',JSON.stringify({protocol:(state.globalConfig?.protocolFeeRecipients??[]).map(x=>x.toBase58()),reserved:(state.globalConfig?.mayhemModeProtocolFeeRecipients??state.globalConfig?.mayhemProtocolFeeRecipients??state.globalConfig?.protocolFeeRecipientsMayhem??[]).map?.(x=>x.toBase58())??[],buyback:(state.globalConfig?.buybackFeeRecipients??[]).map(x=>x.toBase58())},null,2));
+          const p=state.pool, gc=state.globalConfig;
+          console.log('STATE',JSON.stringify({pool:POOL.toBase58(),isMayhemMode:p.isMayhemMode,isCashbackCoin:p.isCashbackCoin,virtualQuoteReserves:p.virtualQuoteReserves?.toString?.(),baseMint:p.baseMint.toBase58(),quoteMint:p.quoteMint.toBase58(),creator:p.creator.toBase58(),coinCreator:p.coinCreator.toBase58(),poolBase:p.poolBaseTokenAccount.toBase58(),poolQuote:p.poolQuoteTokenAccount.toBase58(),baseAmount:state.poolBaseAmount.toString(),quoteAmount:state.poolQuoteAmount.toString(),userBase:state.userBaseTokenAccount.toBase58(),userQuote:state.userQuoteTokenAccount.toBase58(),quoteProgram:state.quoteTokenProgram.toBase58()},null,2));
+          console.log('GLOBAL_KEYS',Object.keys(gc??{}));
+          console.log('GLOBAL_FEE_FIELDS',JSON.stringify({
+            protocolFeeRecipients:pkList(gc?.protocolFeeRecipients).map(safePk),
+            reservedFeeRecipient:safePk(onePk(gc?.reservedFeeRecipient)),
+            reservedFeeRecipients:pkList(gc?.reservedFeeRecipients).map(safePk),
+            mayhemFeeRecipient:safePk(onePk(gc?.mayhemFeeRecipient)),
+            mayhemFeeRecipientTokenAccount:safePk(onePk(gc?.mayhemFeeRecipientTokenAccount)),
+            coinCreatorFeeRecipients:pkList(gc?.coinCreatorFeeRecipients).map(safePk)
+          },null,2));
 
           const all=await PUMP_AMM_SDK.buyQuoteInput(state,new BN(1_000_000),5);
-          const pumpIndex=all.findIndex(ix=>ix.programId.equals(PUMP_AMM_PROGRAM_ID)); if(pumpIndex<0)throw Error('pump buy missing');
-          const buy=all[pumpIndex], keys=buy.keys;
-          const rs=new Set(RESERVED.map(x=>x.toBase58())), ns=new Set(NORMAL.map(x=>x.toBase58()));
-          const reservedIndex=keys.findIndex(k=>rs.has(k.pubkey.toBase58()));
-          const normalIndex=keys.findIndex(k=>ns.has(k.pubkey.toBase58()));
-          console.log('BUY_META',JSON.stringify({allPrograms:all.map(x=>x.programId.toBase58()),pumpIndex,keyCount:keys.length,reservedIndex,normalIndex,data:buy.data.toString('hex'),keys:keys.map((k,i)=>({i,p:k.pubkey.toBase58(),w:k.isWritable,s:k.isSigner,reserved:rs.has(k.pubkey.toBase58()),normal:ns.has(k.pubkey.toBase58())}))},null,2));
-          if(reservedIndex<0)throw Error('SDK did not choose reserved fee recipient for mayhem pool');
-          const feeI=reservedIndex, feeAtaI=reservedIndex+1;
-          const normal=NORMAL[0], normalAta=getAssociatedTokenAddressSync(p.quoteMint,normal,true,state.quoteTokenProgram);
+          const pumpEntries=all.map((ix,i)=>({ix,i})).filter(x=>x.ix.programId.equals(PUMP_AMM_PROGRAM_ID));
+          console.log('ALL_PROGRAMS',JSON.stringify(all.map((x,i)=>({i,program:x.programId.toBase58(),keyCount:x.keys.length,data:x.data.toString('hex')})),null,2));
+          console.log('PUMP_CANDIDATES',JSON.stringify(pumpEntries.map(({ix,i})=>({i,keyCount:ix.keys.length,data:ix.data.toString('hex'),keys:ix.keys.map((k,j)=>({j,p:k.pubkey.toBase58(),w:k.isWritable,s:k.isSigner}))})),null,2));
+          if(!pumpEntries.length)throw Error('pump buy missing');
+          const trade=pumpEntries.slice().sort((a,b)=>b.ix.keys.length-a.ix.keys.length)[0];
+          const pumpIndex=trade.i,buy=trade.ix,keys=buy.keys;
+          console.log('TRADE_SELECTED',JSON.stringify({pumpIndex,keyCount:keys.length,data:buy.data.toString('hex')}));
+
+          const reservedDynamic=uniq([...pkList(gc?.reservedFeeRecipients),...pkList(gc?.reservedFeeRecipient)]);
+          const normalDynamic=uniq(pkList(gc?.protocolFeeRecipients));
+          const reserved=reservedDynamic.length?reservedDynamic:RESERVED_FALLBACK;
+          const normalList=normalDynamic.length?normalDynamic:NORMAL_FALLBACK;
+          const rs=new Set(reserved.map(x=>x.toBase58())), ns=new Set(normalList.map(x=>x.toBase58()));
+          const reservedHits=keys.map((k,i)=>({i,k})).filter(x=>rs.has(x.k.pubkey.toBase58()));
+          const normalHits=keys.map((k,i)=>({i,k})).filter(x=>ns.has(x.k.pubkey.toBase58()));
+          const mayhemRecipient=safePk(onePk(gc?.mayhemFeeRecipient));
+          const mayhemToken=safePk(onePk(gc?.mayhemFeeRecipientTokenAccount));
+          const exactHits=keys.map((k,i)=>({i,p:k.pubkey.toBase58()})).filter(x=>x.p===mayhemRecipient||x.p===mayhemToken);
+          console.log('FEE_HITS',JSON.stringify({reservedSource:reservedDynamic.length?'decoded':'fallback',normalSource:normalDynamic.length?'decoded':'fallback',reservedHits:reservedHits.map(x=>({i:x.i,p:x.k.pubkey.toBase58()})),normalHits:normalHits.map(x=>({i:x.i,p:x.k.pubkey.toBase58()})),mayhemRecipient,mayhemToken,exactHits},null,2));
+
+          const reservedIndex=reservedHits[0]?.i??-1;
+          const normalIndex=normalHits[0]?.i??-1;
+          let feeAtaI=-1;
+          if(reservedIndex>=0){
+            const rpk=keys[reservedIndex].pubkey;
+            for(const prog of [state.quoteTokenProgram]){
+              try{const ata=getAssociatedTokenAddressSync(p.quoteMint,rpk,true,prog);const j=keys.findIndex(k=>k.pubkey.equals(ata));console.log('RESERVED_DERIVED_ATA',JSON.stringify({recipientIndex:reservedIndex,recipient:rpk.toBase58(),program:prog.toBase58(),ata:ata.toBase58(),keyIndex:j}));if(j>=0){feeAtaI=j;break}}catch(e){console.log('ATA_DERIVE_FAIL',String(e))}
+            }
+          }
+          if(feeAtaI<0&&mayhemToken){const j=keys.findIndex(k=>k.pubkey.toBase58()===mayhemToken);if(j>=0)feeAtaI=j}
+          console.log('PAIR_SELECTION',JSON.stringify({reservedIndex,normalIndex,feeAtaI,feeRecipient:reservedIndex>=0?keys[reservedIndex].pubkey.toBase58():null,feeToken:feeAtaI>=0?keys[feeAtaI].pubkey.toBase58():null}));
+          if(reservedIndex<0)throw Error('actual trade instruction does not contain decoded/fallback reserved fee recipient');
+          if(feeAtaI<0)throw Error('reserved recipient found but matching fee token account could not be identified safely');
+
+          const normal=normalList.find(x=>!x.equals(keys[reservedIndex].pubkey))??normalList[0];
+          if(!normal)throw Error('no normal protocol recipient available');
+          const normalAta=getAssociatedTokenAddressSync(p.quoteMint,normal,true,state.quoteTokenProgram);
           const userAta=state.userQuoteTokenAccount;
           function replacePump(repls){const k=keys.map((x,i)=>repls[i]?{...x,pubkey:repls[i]}:{...x});return new TransactionInstruction({programId:buy.programId,data:Buffer.from(buy.data),keys:k})}
           const cases={
             control:buy,
-            normal_domain:replacePump({[feeI]:normal,[feeAtaI]:normalAta}),
-            arbitrary_user:replacePump({[feeI]:USER,[feeAtaI]:userAta}),
+            normal_domain:replacePump({[reservedIndex]:normal,[feeAtaI]:normalAta}),
+            arbitrary_user:replacePump({[reservedIndex]:USER,[feeAtaI]:userAta}),
             reserved_wrong_ata:replacePump({[feeAtaI]:userAta}),
-            normal_recipient_reserved_ata:replacePump({[feeI]:normal})
+            normal_recipient_reserved_ata:replacePump({[reservedIndex]:normal})
           };
           function caseIxs(mut){return all.map((ix,i)=>i===pumpIndex?mut:ix)}
           function tok(a){if(!a)return null;const b=Buffer.from(a.data[0],'base64');return b.length>=72?AccountLayout.decode(b).amount.toString():null}
-          async function sim(name,mut){const bh=(await call('getLatestBlockhash',[{commitment:'processed'}])).value.blockhash;const tx=new Transaction({feePayer:USER,recentBlockhash:bh}).add(ComputeBudgetProgram.setComputeUnitLimit({units:900000}),...caseIxs(mut));let bytes;try{bytes=tx.serialize({requireAllSignatures:false,verifySignatures:false})}catch(e){console.log('CASE',name,JSON.stringify({serializeError:String(e)}));return}const watch=[p.poolBaseTokenAccount,p.poolQuoteTokenAccount,state.userBaseTokenAccount,state.userQuoteTokenAccount,keys[feeAtaI].pubkey,normalAta];let val=null;for(const u of RPCS){try{val=(await raw(u,'simulateTransaction',[bytes.toString('base64'),{encoding:'base64',sigVerify:false,replaceRecentBlockhash:true,commitment:'processed',accounts:{encoding:'base64',addresses:watch.map(x=>x.toBase58())}}],3)).value;console.log('SIM_RPC',name,u);break}catch(e){console.log('SIM_FAIL',name,u,String(e).slice(0,200))}}if(!val){console.log('CASE',name,JSON.stringify({noSim:true}));return}console.log('CASE',name,JSON.stringify({err:val.err,units:val.unitsConsumed,accounts:(val.accounts??[]).map(tok),instructions:(val.logs??[]).filter(l=>l.includes('Instruction:')),anchor:(val.logs??[]).filter(l=>l.includes('AnchorError')||l.includes('Error Code:')),failed:(val.logs??[]).filter(l=>l.includes('failed:'))},null,2));if(val.err)for(const l of val.logs??[])if(/AnchorError|Error Code|failed:|Invalid|fee recipient|FeeRecipient/i.test(l))console.log('ERRLOG',name,l)}
+          async function sim(name,mut){const bh=(await call('getLatestBlockhash',[{commitment:'processed'}])).value.blockhash;const tx=new Transaction({feePayer:USER,recentBlockhash:bh}).add(ComputeBudgetProgram.setComputeUnitLimit({units:900000}),...caseIxs(mut));let bytes;try{bytes=tx.serialize({requireAllSignatures:false,verifySignatures:false})}catch(e){console.log('CASE',name,JSON.stringify({serializeError:String(e)}));return}const watch=uniq([p.poolBaseTokenAccount,p.poolQuoteTokenAccount,state.userBaseTokenAccount,state.userQuoteTokenAccount,keys[feeAtaI].pubkey,normalAta]);let val=null;for(const u of RPCS){try{val=(await raw(u,'simulateTransaction',[bytes.toString('base64'),{encoding:'base64',sigVerify:false,replaceRecentBlockhash:true,commitment:'processed',accounts:{encoding:'base64',addresses:watch.map(x=>x.toBase58())}}],3)).value;console.log('SIM_RPC',name,u);break}catch(e){console.log('SIM_FAIL',name,u,String(e).slice(0,200))}}if(!val){console.log('CASE',name,JSON.stringify({noSim:true}));return}console.log('CASE',name,JSON.stringify({err:val.err,units:val.unitsConsumed,accounts:(val.accounts??[]).map(tok),instructions:(val.logs??[]).filter(l=>l.includes('Instruction:')),anchor:(val.logs??[]).filter(l=>l.includes('AnchorError')||l.includes('Error Code:')),failed:(val.logs??[]).filter(l=>l.includes('failed:'))},null,2));if(val.err)for(const l of val.logs??[])if(/AnchorError|Error Code|failed:|Invalid|fee recipient|FeeRecipient/i.test(l))console.log('ERRLOG',name,l)}
           for(const [n,ix] of Object.entries(cases))await sim(n,ix);
           NODE
           node mayhem_probe.mjs
