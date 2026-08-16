@@ -1,0 +1,35 @@
+name: mayhem-burn-map-active
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/mayhem-burn-map-active.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @solana/web3.js @solana/spl-token @pump-fun/pump-sdk@1.36.0
+      - name: Simulation-only active BurnTokens parser and state guard
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import {PublicKey,TransactionInstruction,TransactionMessage,VersionedTransaction,Keypair} from '@solana/web3.js';
+          import {TOKEN_PROGRAM_ID,TOKEN_2022_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID} from '@solana/spl-token';
+          import {getGlobalParamsPda,getMayhemStatePda,getTokenVaultPda,getSolVaultPda,MAYHEM_PROGRAM_ID,PUMP_PROGRAM_ID,PUMP_EVENT_AUTHORITY_PDA,GLOBAL_PDA,bondingCurvePda} from '@pump-fun/pump-sdk';
+          import crypto from 'node:crypto';
+          const P=MAYHEM_PROGRAM_ID,MINT=new PublicKey('5wGtQmhiJ3Gb8VBBbXno9byUzVmyeZ9dFuRt8EcQpump'),G=getGlobalParamsPda(),STATE=getMayhemStatePda(MINT),VAULT=getTokenVaultPda(MINT),SOLV=getSolVaultPda(),TRADER=new PublicKey('Gygj9QQby4j2jryqyqBHvLP7ctv2SaANgh4sCb69BUpA'),ADMIN=new PublicKey('FFWtrEQ4B4PKQoVuHYzZq8FabGkVatYzDpEVHsK5rrhF'),SYS=new PublicKey('11111111111111111111111111111111'),[EV]=PublicKey.findProgramAddressSync([Buffer.from('__event_authority')],P),BC=bondingCurvePda(MINT);
+          console.log('DERIVED',JSON.stringify({program:P.toBase58(),globalParams:G.toBase58(),mint:MINT.toBase58(),mayhemState:STATE.toBase58(),tokenVault:VAULT.toBase58(),solVault:SOLV.toBase58(),eventAuthority:EV.toBase58(),pumpProgram:PUMP_PROGRAM_ID.toBase58(),pumpEvent:PUMP_EVENT_AUTHORITY_PDA.toBase58(),pumpGlobal:GLOBAL_PDA.toBase58(),bondingCurve:BC.toBase58()},null,2));
+          const RPCS=['https://api.mainnet-beta.solana.com','https://rpc.solanatracker.io/public'];let id=1;const sleep=ms=>new Promise(r=>setTimeout(r,ms));async function rpc(method,params){let last;for(const url of RPCS){try{const r=await fetch(url,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-simulation-only-burn-map/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method,params})});if(!r.ok)throw Error('HTTP '+r.status);const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));return {url,result:j.result}}catch(e){last=e;console.log('RPCFAIL',url,String(e).slice(0,160));await sleep(250)}}throw last}
+          const infos=(await rpc('getMultipleAccounts',[[G,STATE,VAULT,SOLV,MINT,BC].map(x=>x.toBase58()),{encoding:'base64',commitment:'confirmed'}])).result.value;console.log('ACCOUNT_META',JSON.stringify([G,STATE,VAULT,SOLV,MINT,BC].map((x,i)=>({pk:x.toBase58(),exists:!!infos[i],owner:infos[i]?.owner??null,len:infos[i]?.data?.[0]?Buffer.from(infos[i].data[0],'base64').length:null,lamports:infos[i]?.lamports??null})),null,2));
+          const disc=crypto.createHash('sha256').update('global:burn_tokens').digest().subarray(0,8),dataVars=[disc,Buffer.concat([disc,Buffer.alloc(8)]),Buffer.concat([disc,Buffer.from([1,0,0,0,0,0,0,0])])],m=(p,s=false,w=false)=>({pubkey:p,isSigner:s,isWritable:w});
+          const roles={global_params:m(G,false,true),mayhem_state:m(STATE,false,true),mint:m(MINT,false,true),mayhem_token_vault:m(VAULT,false,true),token_vault:m(VAULT,false,true),token_program:m(TOKEN_2022_PROGRAM_ID),base_token_program:m(TOKEN_2022_PROGRAM_ID),system_program:m(SYS),associated_token_program:m(ASSOCIATED_TOKEN_PROGRAM_ID),event_authority:m(EV),program:m(P),sol_vault:m(SOLV,false,true),trader:m(TRADER,true,true),admin:m(ADMIN,true,true),global:m(GLOBAL_PDA),pump_program:m(PUMP_PROGRAM_ID),pump_event_authority:m(PUMP_EVENT_AUTHORITY_PDA),bonding_curve:m(BC,false,true)};
+          const bh=(await rpc('getLatestBlockhash',[{commitment:'processed'}])).result.value.blockhash;function parse(v){const logs=v?.logs??[],text=logs.join('\n');return {logs,text,account:text.match(/AnchorError caused by account: ([A-Za-z0-9_\-]+)/)?.[1]??null,code:text.match(/Error Code: ([A-Za-z0-9_]+)/)?.[1]??null,num:Number(text.match(/Error Number: (\d+)/)?.[1]??0)||null}}
+          async function sim(label,keys,data,full=false){const ix=new TransactionInstruction({programId:P,keys,data});const msg=new TransactionMessage({payerKey:TRADER,recentBlockhash:bh,instructions:[ix]}).compileToV0Message();const tx=new VersionedTransaction(msg);const {url,result}=await rpc('simulateTransaction',[Buffer.from(tx.serialize()).toString('base64'),{encoding:'base64',sigVerify:false,replaceRecentBlockhash:true,commitment:'processed'}]);const v=result.value,e=parse(v);console.log('SIM',label,JSON.stringify({rpc:url,err:v.err??null,units:v.unitsConsumed,account:e.account,code:e.code,num:e.num,interesting:e.logs.filter(x=>/Instruction:|AnchorError|Error Code|Error Number|Left:|Right:|failed|Mayhem|Permission|burn/i.test(x)).slice(-30)},null,2));if(full)for(const l of e.logs)console.log('FULLLOG',l);return {v,e}}
+          let data=null;for(let i=0;i<dataVars.length;i++){const fillers=Array.from({length:18},()=>m(Keypair.generate().publicKey));const r=await sim('data_'+i,fillers,dataVars[i]);if(r.e.code!=='InstructionDidNotDeserialize'){data=dataVars[i];console.log('DATA_OK',i,data.length);break}}if(!data)throw Error('no data shape');
+          let prefix=[];for(let step=0;step<20;step++){const fillers=Array.from({length:18},()=>m(Keypair.generate().publicKey));const r=await sim('map_'+step,[...prefix,...fillers],data);if(r.v.err==null||!r.e.account){console.log('HANDLER_REACHED',JSON.stringify({step,prefixLen:prefix.length,err:r.v.err??null,code:r.e.code,num:r.e.num}));break}const n=r.e.account;if(!roles[n]){console.log('UNKNOWN_ROLE',n);break}console.log('NEXT_ROLE',prefix.length,n,roles[n].pubkey.toBase58());prefix.push({...roles[n]});await sleep(100)}
+          console.log('PREFIX',JSON.stringify(prefix.map((x,i)=>({i,pk:x.pubkey.toBase58(),signer:x.isSigner,writable:x.isWritable})),null,2));await sim('exact_active_control',prefix,data,true);
+          NODE
