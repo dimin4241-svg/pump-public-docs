@@ -1,0 +1,29 @@
+name: mayhem-buy-sdk-discovery
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/mayhem-buy-sdk-discovery.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-sdk@1.36.0
+      - name: Inspect SDK buy/create surface
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import * as sdk from '@pump-fun/pump-sdk';
+          console.log('EXPORTS', Object.keys(sdk).filter(x=>/buy|create|mayhem|fee|bonding|global/i.test(x)).sort());
+          console.log('PUMP_SDK_PROTO', Object.getOwnPropertyNames(Object.getPrototypeOf(sdk.PUMP_SDK)).sort());
+          console.log('PUMP_SDK_KEYS', Object.keys(sdk.PUMP_SDK).sort());
+          NODE
+          echo '=== PACKAGE FILES ==='
+          find node_modules/@pump-fun/pump-sdk -maxdepth 3 -type f | sort | head -200
+          echo '=== BUY/CREATE GREP ==='
+          grep -RniE 'getBuyV2InstructionRaw|buyV2|buyInstructions|createV2Instruction|create.*buy|mayhemMode' node_modules/@pump-fun/pump-sdk --exclude='*.map' | head -500 || true
