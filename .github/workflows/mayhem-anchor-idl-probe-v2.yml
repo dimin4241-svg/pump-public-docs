@@ -1,0 +1,49 @@
+name: mayhem-anchor-idl-probe-v2
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm install --no-save @coral-xyz/anchor @solana/web3.js
+      - name: Read-only Anchor IDL discovery v2
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import {PublicKey,Connection} from '@solana/web3.js';
+          import {idlAddress,decodeIdlAccount} from '@coral-xyz/anchor/dist/esm/idl.js';
+          import {inflateSync,inflateRawSync,gunzipSync} from 'node:zlib';
+          const P=new PublicKey('MAyhSmzXzV1pTf7LsNkrNwkWKTo4ougAJ1PPg47MD4e');
+          const conn=new Connection('https://api.mainnet-beta.solana.com','confirmed');
+          const addr=await idlAddress(P);
+          console.log('IDL_ADDRESS',addr.toBase58());
+          const a=await conn.getAccountInfo(addr,'confirmed');
+          console.log('ACCOUNT',JSON.stringify({exists:!!a,owner:a?.owner?.toBase58(),lamports:a?.lamports,dataLen:a?.data?.length,head:a?.data?.subarray(0,80).toString('hex')}));
+          if(!a)process.exit(0);
+          let dec=null;
+          for(const cut of [8,0]){
+            try{dec=decodeIdlAccount(a.data.subarray(cut));console.log('DECODE_OK_CUT',cut);break}catch(e){console.log('DECODE_FAIL_CUT',cut,String(e).slice(0,300))}
+          }
+          if(!dec)process.exit(0);
+          console.log('META',JSON.stringify({authority:dec.authority?.toBase58?.()??String(dec.authority),compressedLen:dec.data?.length}));
+          let raw=null;
+          for(const [name,fn] of [['inflate',inflateSync],['inflateRaw',inflateRawSync],['gunzip',gunzipSync]]){
+            try{raw=fn(Buffer.from(dec.data));console.log('DECOMP_OK',name,'LEN',raw.length);break}catch(e){console.log('DECOMP_FAIL',name,String(e).slice(0,160))}
+          }
+          if(!raw)process.exit(0);
+          const txt=raw.toString('utf8');
+          console.log('IDL_HEAD',txt.slice(0,1000));
+          const idl=JSON.parse(txt);
+          console.log('IDL_META',JSON.stringify({name:idl.name,version:idl.version,address:idl.address,instructions:idl.instructions?.length,accounts:idl.accounts?.length,types:idl.types?.length,errors:idl.errors?.length}));
+          const wanted=/admin|withdraw|sweep|burn|trader|reset|trading|global_params|max_sol|max_stable|fee_recipient/i;
+          const picked=(idl.instructions??[]).filter(ix=>wanted.test(ix.name)||JSON.stringify(ix).match(wanted)).map(ix=>({name:ix.name,discriminator:ix.discriminator,accounts:ix.accounts,args:ix.args,docs:ix.docs}));
+          console.log('PICKED',JSON.stringify(picked,null,2));
+          const gp=(idl.types??[]).find(t=>/global.?params/i.test(t.name));
+          console.log('GLOBAL_PARAMS_TYPE',JSON.stringify(gp,null,2));
+          NODE
