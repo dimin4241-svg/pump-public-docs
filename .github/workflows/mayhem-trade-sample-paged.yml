@@ -17,7 +17,7 @@ jobs:
         run: |
           node --input-type=module <<'NODE'
           import bs58pkg from 'bs58';const bs58=bs58pkg.default??bs58pkg;
-          const P='MAyhSmzXzV1pTf7LsNkrNwkWKTo4ougAJ1PPg47MD4e', WANT={c2951c220e7467d6:'buy_v2',ae123813f63bd1bc:'sell_v2',66063d1201daebea:'buy',33e685a4017f83ad:'sell'};
+          const P='MAyhSmzXzV1pTf7LsNkrNwkWKTo4ougAJ1PPg47MD4e', WANT={'c2951c220e7467d6':'buy_v2','ae123813f63bd1bc':'sell_v2','66063d1201daebea':'buy','33e685a4017f83ad':'sell'};
           const RPCS=['https://rpc.solanatracker.io/public','https://api.mainnet-beta.solana.com','https://solana-rpc.publicnode.com'];let id=1;const sl=m=>new Promise(r=>setTimeout(r,m));
           async function post(u,b){const r=await fetch(u,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-bounty-readonly-paged-sample/1.0'},body:JSON.stringify(b)});if(!r.ok)throw Error('HTTP '+r.status);return await r.json()}
           async function single(method,params){let e;for(const u of RPCS){try{const j=await post(u,{jsonrpc:'2.0',id:id++,method,params});if(j.error)throw Error(JSON.stringify(j.error));return j.result}catch(x){e=x;console.log('FAIL',method,u,String(x).slice(0,120));await sl(200)}}throw e}
