@@ -1,0 +1,23 @@
+name: mayhem-core-math-surface
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/mayhem-core-math-surface.yml']
+  workflow_dispatch:
+permissions: {contents: read}
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 7
+    steps:
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-sdk@1.36.0
+      - shell: bash
+        run: |
+          echo '=== MAYHEM CALLS ==='
+          grep -Rni -B20 -A45 -E 'isMayhemMode|is_mayhem_mode|ONE_BILLION|mintSupply|mint_supply' node_modules/@pump-fun/pump-sdk/src --include='*.ts' 2>/dev/null | head -n 2200
+          echo '=== BUY V2 ==='
+          grep -Rni -B25 -A90 -E 'buyV2|buy_v2|getBuyV2|BuyV2' node_modules/@pump-fun/pump-sdk/src --include='*.ts' 2>/dev/null | head -n 1800
+          echo '=== QUOTE MATH ==='
+          grep -Rni -B20 -A70 -E 'virtualSolReserves|virtualQuoteReserves|quoteMint|quoteDecimals|decimals' node_modules/@pump-fun/pump-sdk/src --include='*.ts' 2>/dev/null | head -n 2200
