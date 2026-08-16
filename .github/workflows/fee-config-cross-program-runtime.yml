@@ -1,0 +1,56 @@
+name: fee-config-cross-program-runtime
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/fee-config-cross-program-runtime.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: audit/boost-runtime-probe-20260815}
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-swap-sdk@1.19.0 @solana/web3.js @solana/spl-token bn.js
+      - shell: bash
+        run: |
+          cat > fee_cross.mjs <<'NODE'
+          import BN from 'bn.js';
+          import {Connection,PublicKey,Transaction,TransactionInstruction,ComputeBudgetProgram,SystemProgram} from '@solana/web3.js';
+          import {AccountLayout,getAssociatedTokenAddressSync,createAssociatedTokenAccountIdempotentInstruction,createSyncNativeInstruction,TOKEN_PROGRAM_ID} from '@solana/spl-token';
+          import {OnlinePumpAmmSdk,PUMP_AMM_SDK,pumpAmmJson} from '@pump-fun/pump-swap-sdk';
+          const AMM=new PublicKey('pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA');
+          const PUMP=new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P');
+          const FEE_PROGRAM=new PublicKey('pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ');
+          const POOL=new PublicKey('3EUUwdSpEXap46NB6n5Mmt3U8XM8vW8HPCLtJDoGzw33');
+          const USER=new PublicKey('39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg');
+          const [FOREIGN]=PublicKey.findProgramAddressSync([Buffer.from('fee_config'),PUMP.toBuffer()],FEE_PROGRAM);
+          const [EXPECTED_AMM]=PublicKey.findProgramAddressSync([Buffer.from('fee_config'),AMM.toBuffer()],FEE_PROGRAM);
+          const RANDOM=USER;
+          console.log('PDAS',JSON.stringify({foreignPump:FOREIGN.toBase58(),expectedAmm:EXPECTED_AMM.toBase58(),knownCanonical:'5PHirr8joyTMp9JMm6nW7hNDVyEYdkzDqazxPD7RaTjx',matchesKnown:EXPECTED_AMM.toBase58()==='5PHirr8joyTMp9JMm6nW7hNDVyEYdkzDqazxPD7RaTjx'}));
+          const RPCS=['https://rpc.solanatracker.io/public','https://api.mainnet-beta.solana.com','https://solana-rpc.publicnode.com'];let id=1;const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          async function raw(u,m,p,n=4){let e;for(let a=0;a<n;a++){try{const r=await fetch(u,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-simulation-only/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method:m,params:p})});if(r.status===429||r.status>=500){e=Error('HTTP '+r.status);await sleep(300+450*a);continue}const x=await r.json();if(x.error){e=Error(JSON.stringify(x.error));if(/429|No response|Too many/i.test(String(e))){await sleep(300+450*a);continue}throw e}return x.result}catch(x){e=x;await sleep(200)}}throw e}
+          async function call(m,p){let e;for(const u of RPCS){try{const x=await raw(u,m,p);console.log('RPC_OK',m,u);return x}catch(x){e=x;console.log('RPC_FAIL',m,u,String(x).slice(0,180))}}throw e}
+          function clone(ix,keys=ix.keys){return new TransactionInstruction({programId:ix.programId,data:Buffer.from(ix.data),keys:keys.map(k=>({...k}))})}
+          function tok(a){if(!a)return null;const b=Buffer.from(a.data[0],'base64');if(b.length<72)return null;try{return AccountLayout.decode(b).amount.toString()}catch{return null}}
+          const cfgInfos=(await call('getMultipleAccounts',[[FOREIGN.toBase58(),EXPECTED_AMM.toBase58(),RANDOM.toBase58()],{encoding:'base64',commitment:'confirmed'}])).value;
+          for(let i=0;i<cfgInfos.length;i++){const a=cfgInfos[i];console.log('CFG_INFO',i,JSON.stringify({address:[FOREIGN,EXPECTED_AMM,RANDOM][i].toBase58(),exists:!!a,owner:a?.owner??null,lamports:a?.lamports??0,len:a?Buffer.from(a.data[0],'base64').length:null,prefix:a?Buffer.from(a.data[0],'base64').subarray(0,16).toString('hex'):null}));}
+          if(!cfgInfos[0])throw Error('foreign Pump FeeConfig missing');
+          let conn=null;for(const u of RPCS){try{const c=new Connection(u,'confirmed');await c.getLatestBlockhash('confirmed');conn=c;console.log('SDK_RPC',u);break}catch(e){console.log('SDK_RPC_FAIL',u,String(e).slice(0,150))}}if(!conn)throw Error('no SDK rpc');
+          const sdk=new OnlinePumpAmmSdk(conn),state=await sdk.swapSolanaState(POOL,USER);
+          const userBase=getAssociatedTokenAddressSync(state.pool.baseMint,USER,false,state.baseTokenProgram),userQuote=getAssociatedTokenAddressSync(state.pool.quoteMint,USER,false,state.quoteTokenProgram);
+          const built=await PUMP_AMM_SDK.buyQuoteInput(state,new BN('1000000'),5);const def=pumpAmmJson.instructions.find(i=>i.name==='buy'),disc=Buffer.from(def.discriminator),bi=built.findIndex(ix=>ix.programId.equals(AMM)&&ix.data.length>=8&&Buffer.from(ix.data.subarray(0,8)).equals(disc));if(bi<0)throw Error('buy missing');const buy=built[bi],names=def.accounts.map(a=>a.name),fi=names.indexOf('fee_config'),fpi=names.indexOf('fee_program');if(fi<0||fpi<0)throw Error('fee accounts not found');
+          const canonical=buy.keys[fi].pubkey,feeProgram=buy.keys[fpi].pubkey;console.log('BUY_META',JSON.stringify({bi,builtCount:built.length,keyCount:buy.keys.length,fi,fpi,canonical:canonical.toBase58(),expectedAmm:EXPECTED_AMM.toBase58(),canonicalMatchesExpected:canonical.equals(EXPECTED_AMM),feeProgram:feeProgram.toBase58(),feeProgramMatches:feeProgram.equals(FEE_PROGRAM),names,keys:buy.keys.map((k,i)=>({i,name:names[i],p:k.pubkey.toBase58(),s:k.isSigner,w:k.isWritable}))},null,2));
+          if(!canonical.equals(EXPECTED_AMM))throw Error('canonical FeeConfig differs from derived AMM PDA');
+          // Locate fee destinations so fee deltas are directly observable.
+          const pri=names.indexOf('protocol_fee_recipient_token_account'),cci=names.indexOf('coin_creator_vault_ata');const protocolAta=pri>=0?buy.keys[pri].pubkey:null,creatorAta=cci>=0?buy.keys[cci].pubkey:null;
+          const mutate=pk=>clone(buy,buy.keys.map((k,i)=>i===fi?{...k,pubkey:pk}:k));const cases={control:clone(buy),foreign_pump:mutate(FOREIGN),random_user:mutate(RANDOM)};
+          const prefix=built.slice(0,bi),suffix=built.slice(bi+1),bh=(await call('getLatestBlockhash',[{commitment:'confirmed'}])).value.blockhash;
+          async function sim(name,ix){const setup=[createAssociatedTokenAccountIdempotentInstruction(USER,userBase,USER,state.pool.baseMint,state.baseTokenProgram),createAssociatedTokenAccountIdempotentInstruction(USER,userQuote,USER,state.pool.quoteMint,state.quoteTokenProgram),SystemProgram.transfer({fromPubkey:USER,toPubkey:userQuote,lamports:20_000_000}),createSyncNativeInstruction(userQuote,TOKEN_PROGRAM_ID)];const tx=new Transaction({feePayer:USER,recentBlockhash:bh}).add(ComputeBudgetProgram.setComputeUnitLimit({units:1_400_000}),...setup,...prefix,ix,...suffix);let bytes;try{bytes=tx.serialize({requireAllSignatures:false,verifySignatures:false})}catch(e){return {serialize:String(e)}}const watch=[state.pool.poolBaseTokenAccount,state.pool.poolQuoteTokenAccount,userBase,userQuote,...[protocolAta,creatorAta].filter(Boolean)];let v=null,rpc=null;for(const u of RPCS){try{v=(await raw(u,'simulateTransaction',[bytes.toString('base64'),{encoding:'base64',sigVerify:false,replaceRecentBlockhash:true,commitment:'confirmed',accounts:{encoding:'base64',addresses:watch.map(x=>x.toBase58())}}],3)).value;rpc=u;break}catch(e){console.log('SIM_FAIL',name,u,String(e).slice(0,190))}}if(!v)return {rpc:'fail'};const l=v.logs??[],a=v.accounts??[];const amounts={poolBase:tok(a[0]),poolQuote:tok(a[1]),userBase:tok(a[2]),userQuote:tok(a[3])};let x=4;if(protocolAta)amounts.protocolFee=tok(a[x++]);if(creatorAta)amounts.creatorFee=tok(a[x++]);const out={rpc,bytes:bytes.length,err:v.err,units:v.unitsConsumed,amounts,instructions:l.filter(s=>s.includes('Instruction:')),pumpFeesLogs:l.filter(s=>s.includes('pfeeUx')||s.includes('GetFees')||s.includes('get_fees')||s.includes('Instruction: GetFees')),anchor:l.filter(s=>s.includes('AnchorError')||s.includes('Error Code:')||s.includes('Error Number:')),failed:l.filter(s=>s.includes('failed:')),events:l.filter(s=>s.includes('Program data:')).slice(-8)};console.log('CASE',name,JSON.stringify(out,null,2));if(v.err)for(const s of l)console.log('ERRLOG',name,s);return out}
+          const out={};for(const [n,ix] of Object.entries(cases))out[n]=await sim(n,ix);console.log('DECISIVE',JSON.stringify(Object.fromEntries(Object.entries(out).map(([n,x])=>[n,{err:x.err??x.rpc??x.serialize??null,amounts:x.amounts??null,anchor:x.anchor??[],failed:x.failed??[],pumpFeesLogs:x.pumpFeesLogs??[]}])) ,null,2));
+          NODE
+          node fee_cross.mjs
