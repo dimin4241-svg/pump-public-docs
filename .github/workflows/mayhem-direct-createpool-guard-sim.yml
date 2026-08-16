@@ -1,0 +1,79 @@
+name: mayhem-direct-createpool-guard-sim
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/mayhem-direct-createpool-guard-sim.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  simulate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: audit/boost-runtime-probe-20260815}
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-swap-sdk@1.19.0 @solana/web3.js @solana/spl-token bn.js
+      - name: Simulation-only direct create_pool mayhem differential
+        shell: bash
+        run: |
+          cat > mayhem_createpool.mjs <<'NODE'
+          import BN from 'bn.js';
+          import {PublicKey,Keypair,SystemProgram,Transaction} from '@solana/web3.js';
+          import {
+            TOKEN_PROGRAM_ID,NATIVE_MINT,ASSOCIATED_TOKEN_PROGRAM_ID,MINT_SIZE,
+            getAssociatedTokenAddressSync,createAssociatedTokenAccountIdempotentInstruction,
+            createInitializeMintInstruction,createMintToInstruction,createSyncNativeInstruction,
+          } from '@solana/spl-token';
+          import {OFFLINE_PUMP_AMM_PROGRAM,GLOBAL_CONFIG_PDA,poolPda} from '@pump-fun/pump-swap-sdk';
+
+          const RPCS=['https://rpc.solanatracker.io/public','https://api.mainnet-beta.solana.com','https://solana-rpc.publicnode.com'];
+          const creator=new PublicKey('HTVZVEQMBsNanubDPTs3CxDAEGNFQHJY8c1441iy2S5r');
+          let rid=1;const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          async function one(u,m,p,n=5){let e;for(let i=0;i<n;i++){try{const r=await fetch(u,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-simulation-only/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:rid++,method:m,params:p})});if(r.status===429||r.status>=500){e=Error('HTTP '+r.status);await sleep(250+350*i);continue}const j=await r.json();if(j.error){e=Error(JSON.stringify(j.error));if(/429|No response|Too many/i.test(String(e))){await sleep(250+350*i);continue}throw e}return j.result}catch(x){e=x;await sleep(180)}}throw e}
+          async function rpc(m,p){let e;for(const u of RPCS){try{return await one(u,m,p)}catch(x){e=x;console.log('RPC_FAIL',m,u,String(x).slice(0,180))}}throw e}
+          async function ai(pk){return (await rpc('getAccountInfo',[pk.toBase58(),{encoding:'base64',commitment:'processed'}])).value}
+          function amount(row){if(!row)return 0n;const b=Buffer.from(row.data[0],'base64');return b.length>=72?b.readBigUInt64LE(64):0n}
+          const creatorInfo=await ai(creator);if(!creatorInfo||creatorInfo.owner!==SystemProgram.programId.toBase58())throw Error('creator not funded system account');
+          const quoteAta=getAssociatedTokenAddressSync(NATIVE_MINT,creator,false,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID);
+          const quoteInfo=await ai(quoteAta);const quoteHave=amount(quoteInfo);console.log('CREATOR',JSON.stringify({address:creator.toBase58(),lamports:creatorInfo.lamports,quoteAta:quoteAta.toBase58(),quoteExists:!!quoteInfo,quoteHave:String(quoteHave)}));
+          const rent=await rpc('getMinimumBalanceForRentExemption',[MINT_SIZE,{commitment:'processed'}]);
+          const baseIn=100_000_000n,quoteIn=1_000_000n,mintSupply=1_000_000_000n;
+
+          async function buildAndSim(label,isMayhem){
+            const base=Keypair.generate();const index=isMayhem?32101:32100;
+            const pool=poolPda(index,creator,base.publicKey,NATIVE_MINT);
+            const userBase=getAssociatedTokenAddressSync(base.publicKey,creator,false,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID);
+            const poolBase=getAssociatedTokenAddressSync(base.publicKey,pool,true,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID);
+            const poolQuote=getAssociatedTokenAddressSync(NATIVE_MINT,pool,true,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID);
+            const ixs=[
+              SystemProgram.createAccount({fromPubkey:creator,newAccountPubkey:base.publicKey,lamports:rent,space:MINT_SIZE,programId:TOKEN_PROGRAM_ID}),
+              createInitializeMintInstruction(base.publicKey,6,creator,null,TOKEN_PROGRAM_ID),
+              createAssociatedTokenAccountIdempotentInstruction(creator,userBase,creator,base.publicKey,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID),
+              createMintToInstruction(base.publicKey,userBase,creator,mintSupply,[],TOKEN_PROGRAM_ID),
+            ];
+            if(!quoteInfo)ixs.push(createAssociatedTokenAccountIdempotentInstruction(creator,quoteAta,creator,NATIVE_MINT,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID));
+            if(quoteHave<quoteIn){ixs.push(SystemProgram.transfer({fromPubkey:creator,toPubkey:quoteAta,lamports:Number(quoteIn-quoteHave)}));ixs.push(createSyncNativeInstruction(quoteAta,TOKEN_PROGRAM_ID));}
+            ixs.push(createAssociatedTokenAccountIdempotentInstruction(creator,poolBase,pool,base.publicKey,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID));
+            ixs.push(createAssociatedTokenAccountIdempotentInstruction(creator,poolQuote,pool,NATIVE_MINT,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID));
+            const cp=await OFFLINE_PUMP_AMM_PROGRAM.methods
+              .createPool(index,new BN(baseIn.toString()),new BN(quoteIn.toString()),SystemProgram.programId,isMayhem,{0:false})
+              .accountsPartial({globalConfig:GLOBAL_CONFIG_PDA,baseMint:base.publicKey,quoteMint:NATIVE_MINT,creator,userBaseTokenAccount:userBase,userQuoteTokenAccount:quoteAta,baseTokenProgram:TOKEN_PROGRAM_ID,quoteTokenProgram:TOKEN_PROGRAM_ID})
+              .instruction();
+            ixs.push(cp);
+            const bh=(await rpc('getLatestBlockhash',[{commitment:'processed'}])).value.blockhash;
+            const tx=new Transaction({feePayer:creator,recentBlockhash:bh}).add(...ixs);const raw=tx.serialize({requireAllSignatures:false,verifySignatures:false});
+            console.log('CASE_META',label,JSON.stringify({isMayhem,index,base:base.publicKey.toBase58(),pool:pool.toBase58(),ixCount:ixs.length,txBytes:raw.length,createPoolKeys:cp.keys.length,createPoolData:cp.data.toString('hex')}));
+            const addrs=[pool,poolBase,poolQuote].map(x=>x.toBase58());let v=null,used=null;
+            for(const u of RPCS){try{v=(await one(u,'simulateTransaction',[raw.toString('base64'),{encoding:'base64',sigVerify:false,replaceRecentBlockhash:true,commitment:'processed',accounts:{encoding:'base64',addresses:addrs}}],3)).value;used=u;break}catch(e){console.log('SIM_FAIL',label,u,String(e).slice(0,220))}}
+            if(!v)throw Error('no sim '+label);
+            const logs=v.logs??[];const out={label,isMayhem,rpc:used,err:v.err,units:v.unitsConsumed,poolExists:!!v.accounts?.[0],instructions:logs.filter(x=>x.includes('Instruction:')),anchor:logs.filter(x=>x.includes('AnchorError')||x.includes('Error Code:')),failed:logs.filter(x=>x.includes('failed:')),mayhem:logs.filter(x=>/Mayhem|mayhem|PumpPools/i.test(x))};
+            console.log('RESULT',label,JSON.stringify(out,null,2));if(v.err)for(const l of logs)if(/AnchorError|Error Code|failed:|Mayhem|PumpPools/i.test(l))console.log('ERRLOG',label,l);
+            return out;
+          }
+          const control=await buildAndSim('control_false',false);const test=await buildAndSim('test_true',true);
+          console.log('DECISIVE',JSON.stringify({simulationOnly:true,broadcast:false,control:{err:control.err,poolExists:control.poolExists},mayhem:{err:test.err,poolExists:test.poolExists,anchor:test.anchor,mayhem:test.mayhem}},null,2));
+          NODE
+          node mayhem_createpool.mjs
