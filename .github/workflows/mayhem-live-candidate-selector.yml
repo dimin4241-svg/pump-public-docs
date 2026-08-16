@@ -1,0 +1,53 @@
+name: mayhem-live-candidate-selector
+on:
+  push:
+    paths:
+      - '.github/workflows/mayhem-live-candidate-selector.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: audit/boost-runtime-probe-20260815
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm install --no-save @solana/web3.js bs58
+      - name: Select liquid live Mayhem pools
+        shell: bash
+        run: |
+          cat > mayhem_select.mjs <<'NODE'
+          import bs58pkg from 'bs58';
+          import {PublicKey} from '@solana/web3.js';
+          const bs58=bs58pkg.default??bs58pkg;
+          const PROGRAM='pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA';
+          const WSOL='So11111111111111111111111111111111111111112';
+          const DISC=Buffer.from([241,154,109,4,17,177,109,188]);
+          const RPCS=['https://api.mainnet-beta.solana.com','https://solana-rpc.publicnode.com','https://rpc.solanatracker.io/public'];
+          let id=1; const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          async function req(u,m,p,n=6){let e;for(let a=0;a<n;a++){try{const r=await fetch(u,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-readonly/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method:m,params:p})});if(r.status===429||r.status>=500){e=Error('HTTP '+r.status);await sleep(300+a*500);continue}const x=await r.json();if(x.error){e=Error(JSON.stringify(x.error));if(/429|Too many|No response/i.test(String(e))){await sleep(300+a*500);continue}throw e}return x.result}catch(x){e=x;await sleep(250+a*250)}}throw e}
+          async function call(m,p){let e;for(const u of RPCS){try{const x=await req(u,m,p);console.log('RPC_OK',m,u);return x}catch(x){e=x;console.log('RPC_FAIL',m,u,String(x).slice(0,180))}}throw e}
+          const filters=[{dataSize:301},{memcmp:{offset:0,bytes:bs58.encode(DISC)}},{memcmp:{offset:75,bytes:WSOL}},{memcmp:{offset:243,bytes:bs58.encode(Buffer.from([1]))}}];
+          const rows=await call('getProgramAccounts',[PROGRAM,{encoding:'base64',commitment:'confirmed',filters,dataSlice:{offset:171,length:32}}]);
+          console.log('MAYHEM_301_WSOL_COUNT',rows.length);
+          const vaults=rows.map(r=>bs58.encode(Buffer.from(r.account.data[0],'base64')));
+          const infos=[];
+          for(let i=0;i<vaults.length;i+=100){const ch=vaults.slice(i,i+100);const r=await call('getMultipleAccounts',[ch,{encoding:'base64',commitment:'confirmed'}]);infos.push(...r.value);if((i/100)%20===0)console.log('PROGRESS',i,'/',vaults.length);await sleep(70)}
+          const amt=a=>{if(!a)return 0n;const d=Buffer.from(a.data[0],'base64');return d.length>=72?d.readBigUInt64LE(64):0n};
+          const ranked=rows.map((r,i)=>({pool:r.pubkey,poolQuote:vaults[i],quoteAmount:amt(infos[i])})).filter(x=>x.quoteAmount>0n).sort((a,b)=>a.quoteAmount>b.quoteAmount?-1:a.quoteAmount<b.quoteAmount?1:0);
+          console.log('NONZERO_QUOTE_COUNT',ranked.length);
+          const top=ranked.slice(0,30);
+          const full=(await call('getMultipleAccounts',[top.map(x=>x.pool),{encoding:'base64',commitment:'confirmed'}])).value;
+          const pk=(b,a,z)=>new PublicKey(b.subarray(a,z)).toBase58();
+          const i128=(b,o)=>{let u=0n;for(let i=15;i>=0;i--)u=(u<<8n)+BigInt(b[o+i]);return u&(1n<<127n)?u-(1n<<128n):u};
+          const out=[];
+          for(let i=0;i<top.length;i++){const a=full[i];if(!a)continue;const b=Buffer.from(a.data[0],'base64');out.push({...top[i],quoteAmount:top[i].quoteAmount.toString(),creator:pk(b,11,43),baseMint:pk(b,43,75),quoteMint:pk(b,75,107),lpMint:pk(b,107,139),poolBase:pk(b,139,171),poolQuoteStored:pk(b,171,203),lpSupply:b.readBigUInt64LE(203).toString(),coinCreator:pk(b,211,243),isMayhem:b[243],isCashback:b[244],virtualQuoteReserves:i128(b,245).toString(),size:b.length});}
+          console.log('TOP_MAYHEM_LIQUID',JSON.stringify(out,null,2));
+          console.log('SELECTED_MAYHEM',JSON.stringify(out[0]??null));
+          NODE
+          node mayhem_select.mjs
