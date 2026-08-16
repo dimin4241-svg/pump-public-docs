@@ -1,0 +1,22 @@
+name: boost-attacker-funder-select
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/boost-attacker-funder-select.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: audit/boost-runtime-probe-20260815}
+      - shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          const xs=['7VtfL8fvgNfhz17qKRMjzQEXgbdpnHHHQRh54R9jP2RJ','HTVZVEQMBsNanubDPTs3CxDAEGNFQHJY8c1441iy2S5r','HJgWoojkvu5SqbYT6zh3zDP4uGg7rDdWnm1ZgLXGies2','39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg'];
+          const RPC='https://rpc.solanatracker.io/public';let id=1;async function rpc(m,p){const r=await fetch(RPC,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method:m,params:p})});const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));return j.result}
+          const v=(await rpc('getMultipleAccounts',[xs,{encoding:'base64',commitment:'confirmed'}])).value;for(let i=0;i<xs.length;i++){const a=v[i];console.log('CANDIDATE',JSON.stringify({address:xs[i],exists:!!a,lamports:a?.lamports??0,sol:(a?.lamports??0)/1e9,owner:a?.owner,dataLen:a?Buffer.from(a.data[0],'base64').length:null}));}
+          NODE
