@@ -1,0 +1,32 @@
+name: collect-user-volume-concise
+on:
+  push:
+    paths:
+      - '.github/workflows/collect-user-volume-concise.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-sdk@1.36.0 @pump-fun/pump-swap-sdk@1.19.0
+      - name: Exact IDL and source references
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          for(const f of ['node_modules/@pump-fun/pump-sdk/src/idl/pump.json','node_modules/@pump-fun/pump-swap-sdk/src/idl/pump_amm.json']){
+            const j=JSON.parse(fs.readFileSync(f,'utf8'));console.log('\n===',f,'===');
+            for(const n of ['collect_user_volume_accumulator','sync_user_volume_accumulator','init_user_volume_accumulator','close_user_volume_accumulator','claim_token_incentives','claim_cashback']){const ix=j.instructions?.find(x=>x.name===n);if(ix)console.log('IDL',n,JSON.stringify(ix))}
+            for(const e of j.errors??[])if(/volume|accumulator|claim|incentive/i.test((e.name??'')+' '+(e.msg??'')))console.log('ERR',e.code,e.name,e.msg)
+          }
+          NODE
+          echo 'GREP'
+          grep -RniE 'collectUserVolumeAccumulator|collect_user_volume_accumulator|syncUserVolumeAccumulator|sync_user_volume_accumulator' node_modules/@pump-fun/pump-sdk node_modules/@pump-fun/pump-swap-sdk --exclude='*.map' | head -500 || true
+          node --input-type=module <<'NODE'
+          import * as a from '@pump-fun/pump-sdk'; import * as b from '@pump-fun/pump-swap-sdk';
+          for(const [mod,label] of [[a,'pump'],[b,'amm']])for(const Cn of ['PumpSdk','OnlinePumpSdk','PumpAmmSdk','OnlinePumpAmmSdk']){const C=mod[Cn];if(!C?.prototype)continue;for(const n of Object.getOwnPropertyNames(C.prototype))if(/collect.*volume|sync.*volume|volume.*accumulator/i.test(n))console.log('METHOD',label,Cn,n,'arity',C.prototype[n].length,'SRC',String(C.prototype[n]).slice(0,12000))}
+          NODE
