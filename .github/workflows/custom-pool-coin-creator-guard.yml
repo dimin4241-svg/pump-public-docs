@@ -1,0 +1,40 @@
+name: custom-pool-coin-creator-guard
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/custom-pool-coin-creator-guard.yml']
+  workflow_dispatch:
+jobs:
+  simulate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: audit/boost-runtime-probe-20260815}
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-swap-sdk@1.19.0 @solana/web3.js @solana/spl-token bn.js
+      - shell: bash
+        run: |
+          cat > probe.mjs <<'NODE'
+          import BN from 'bn.js';
+          import {PublicKey,Keypair,SystemProgram,Transaction} from '@solana/web3.js';
+          import {TOKEN_PROGRAM_ID,NATIVE_MINT,ASSOCIATED_TOKEN_PROGRAM_ID,MINT_SIZE,getAssociatedTokenAddressSync,createAssociatedTokenAccountIdempotentInstruction,createInitializeMintInstruction,createMintToInstruction,createSyncNativeInstruction} from '@solana/spl-token';
+          import {OFFLINE_PUMP_AMM_PROGRAM,GLOBAL_CONFIG_PDA,poolPda} from '@pump-fun/pump-swap-sdk';
+          const USER=new PublicKey('HTVZVEQMBsNanubDPTs3CxDAEGNFQHJY8c1441iy2S5r');
+          const ZERO=SystemProgram.programId;
+          const RPCS=['https://rpc.solanatracker.io/public','https://api.mainnet-beta.solana.com','https://solana-rpc.publicnode.com'];let rid=1;const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          async function one(u,m,p,n=4){let e;for(let i=0;i<n;i++){try{const r=await fetch(u,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:rid++,method:m,params:p})});if(r.status===429||r.status>=500){e=Error('HTTP '+r.status);await sleep(250+300*i);continue}const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));return j.result}catch(x){e=x;await sleep(180)}}throw e}
+          async function rpc(m,p){let e;for(const u of RPCS){try{return await one(u,m,p)}catch(x){e=x;console.log('RPC_FAIL',m,u,String(x).slice(0,180))}}throw e}
+          const rent=await rpc('getMinimumBalanceForRentExemption',[MINT_SIZE,{commitment:'processed'}]);
+          const quoteAta=getAssociatedTokenAddressSync(NATIVE_MINT,USER,false,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID);
+          const qai=(await rpc('getAccountInfo',[quoteAta.toBase58(),{encoding:'base64',commitment:'processed'}])).value;const quoteHave=qai?Buffer.from(qai.data[0],'base64').readBigUInt64LE(64):0n;
+          async function run(label,coinCreator,index){const mint=Keypair.generate();const pool=poolPda(index,USER,mint.publicKey,NATIVE_MINT);const userBase=getAssociatedTokenAddressSync(mint.publicKey,USER,false,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID);const poolBase=getAssociatedTokenAddressSync(mint.publicKey,pool,true,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID);const poolQuote=getAssociatedTokenAddressSync(NATIVE_MINT,pool,true,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID);const baseIn=100000000n,quoteIn=1000000n;
+            const ixs=[SystemProgram.createAccount({fromPubkey:USER,newAccountPubkey:mint.publicKey,lamports:rent,space:MINT_SIZE,programId:TOKEN_PROGRAM_ID}),createInitializeMintInstruction(mint.publicKey,6,USER,null,TOKEN_PROGRAM_ID),createAssociatedTokenAccountIdempotentInstruction(USER,userBase,USER,mint.publicKey,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID),createMintToInstruction(mint.publicKey,userBase,USER,1000000000n,[],TOKEN_PROGRAM_ID)];
+            if(!qai)ixs.push(createAssociatedTokenAccountIdempotentInstruction(USER,quoteAta,USER,NATIVE_MINT,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID));if(quoteHave<quoteIn){ixs.push(SystemProgram.transfer({fromPubkey:USER,toPubkey:quoteAta,lamports:Number(quoteIn-quoteHave)}));ixs.push(createSyncNativeInstruction(quoteAta,TOKEN_PROGRAM_ID));}
+            ixs.push(createAssociatedTokenAccountIdempotentInstruction(USER,poolBase,pool,mint.publicKey,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID),createAssociatedTokenAccountIdempotentInstruction(USER,poolQuote,pool,NATIVE_MINT,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID));
+            const cp=await OFFLINE_PUMP_AMM_PROGRAM.methods.createPool(index,new BN(baseIn.toString()),new BN(quoteIn.toString()),coinCreator,false,{0:false}).accountsPartial({globalConfig:GLOBAL_CONFIG_PDA,baseMint:mint.publicKey,quoteMint:NATIVE_MINT,creator:USER,userBaseTokenAccount:userBase,userQuoteTokenAccount:quoteAta,baseTokenProgram:TOKEN_PROGRAM_ID,quoteTokenProgram:TOKEN_PROGRAM_ID}).instruction();ixs.push(cp);
+            const bh=(await rpc('getLatestBlockhash',[{commitment:'processed'}])).value.blockhash;const tx=new Transaction({feePayer:USER,recentBlockhash:bh}).add(...ixs);const raw=tx.serialize({requireAllSignatures:false,verifySignatures:false});let v=null,used=null;for(const u of RPCS){try{v=(await one(u,'simulateTransaction',[raw.toString('base64'),{encoding:'base64',sigVerify:false,replaceRecentBlockhash:true,commitment:'processed',accounts:{encoding:'base64',addresses:[pool.toBase58()]}}],3)).value;used=u;break}catch(e){console.log('SIM_FAIL',label,u,String(e).slice(0,180))}}if(!v)throw Error('no sim '+label);const logs=v.logs??[];const out={label,index,coinCreator:coinCreator.toBase58(),pool:pool.toBase58(),rpc:used,err:v.err,poolExists:!!v.accounts?.[0],anchor:logs.filter(x=>x.includes('AnchorError')||x.includes('Error Code:')),failed:logs.filter(x=>x.includes('failed:')),instructions:logs.filter(x=>x.includes('Instruction:'))};console.log('RESULT',JSON.stringify(out,null,2));return out;}
+          const control=await run('default_creator',ZERO,41000);const attacker=await run('attacker_creator',USER,41001);console.log('DECISIVE',JSON.stringify({control:{err:control.err,poolExists:control.poolExists},attacker:{err:attacker.err,poolExists:attacker.poolExists,anchor:attacker.anchor}},null,2));
+          NODE
+          node probe.mjs
