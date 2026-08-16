@@ -1,0 +1,35 @@
+name: distribute-creator-fees-surface
+on:
+  push:
+    paths:
+      - '.github/workflows/distribute-creator-fees-surface.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-sdk@1.36.0 @solana/web3.js @solana/spl-token bs58 bn.js
+      - name: Static source and live sharing config inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '=== source refs ==='
+          grep -RniE 'distributeCreatorFees|distribute_creator_fees|SharingConfig|shareholder|creatorVault' node_modules/@pump-fun/pump-sdk/src --exclude='*.map' | head -1000 || true
+          echo '=== fee sharing source files ==='
+          find node_modules/@pump-fun/pump-sdk/src -maxdepth 3 -type f | grep -Ei 'shar|creator|fee' | sort | while read f; do echo "--- $f"; sed -n '1,360p' "$f"; done
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs'; import {Connection,PublicKey} from '@solana/web3.js'; import * as pump from '@pump-fun/pump-sdk';
+          const j=JSON.parse(fs.readFileSync('node_modules/@pump-fun/pump-sdk/src/idl/pump.json','utf8'));
+          for(const n of ['distribute_creator_fees','distribute_creator_fees_v2','get_minimum_distributable_fee','migrate_bonding_curve_creator']){const ix=j.instructions.find(x=>x.name===n);console.log('\nIDL',n,JSON.stringify(ix,null,2))}
+          for(const t of j.types??[])if(/sharing|shareholder|distribut/i.test(t.name))console.log('\nTYPE',t.name,JSON.stringify(t,null,2));
+          for(const a of j.accounts??[])if(/sharing|shareholder/i.test(a.name))console.log('\nACCOUNT',a.name,JSON.stringify(a,null,2));
+          const c=new Connection('https://api.mainnet-beta.solana.com','confirmed');
+          console.log('EXPORTS',Object.keys(pump).filter(x=>/shar|distribut|creator|fee/i.test(x)).sort());
+          for(const n of ['distributeCreatorFees','getMinimumDistributableFee','feeSharingConfigPda','creatorVaultPda'])if(typeof pump[n]==='function')console.log('\nFUNC',n,String(pump[n]).slice(0,14000));
+          for(const Cn of ['PumpSdk','OnlinePumpSdk']){const C=pump[Cn];if(C?.prototype)for(const n of Object.getOwnPropertyNames(C.prototype))if(/shar|distribut|creator|fee/i.test(n))console.log('METHOD',Cn,n,String(C.prototype[n]).slice(0,14000))}
+          NODE
