@@ -1,0 +1,38 @@
+name: mayhem-static-surface
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/mayhem-static-surface.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: audit/boost-runtime-probe-20260815}
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-swap-sdk@1.19.0 @pump-fun/pump-sdk
+      - shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          function scan(path,label){if(!fs.existsSync(path)){console.log('MISSING',path);return}const j=JSON.parse(fs.readFileSync(path,'utf8'));console.log('IDL_META',label,j.address??j.metadata?.name??null);
+            for(const i of j.instructions??[]){const s=JSON.stringify(i).toLowerCase();if(s.includes('mayhem')||s.includes('fee_recipient')||s.includes('migrate'))console.log('INSTR',label,i.name,JSON.stringify(i));}
+            for(const t of j.types??[]){const s=JSON.stringify(t).toLowerCase();if(s.includes('mayhem')||s.includes('fee_recipient'))console.log('TYPE',label,t.name,JSON.stringify(t));}
+            for(const e of j.events??[]){const s=JSON.stringify(e).toLowerCase();if(s.includes('mayhem')||s.includes('fee_recipient')||s.includes('migrate'))console.log('EVENT',label,e.name,JSON.stringify(e));}
+            for(const e of j.errors??[]){const s=JSON.stringify(e).toLowerCase();if(s.includes('mayhem')||s.includes('fee')||s.includes('migrat'))console.log('ERROR',label,JSON.stringify(e));}
+          }
+          scan('idl/pump.json','repo-pump');scan('idl/pump_amm.json','repo-amm');
+          scan('node_modules/@pump-fun/pump-swap-sdk/src/idl/pump_amm.json','npm-amm');
+          const candidates=['node_modules/@pump-fun/pump-sdk/src/idl/pump.json','node_modules/@pump-fun/pump-sdk/dist/idl/pump.json','node_modules/@pump-fun/pump-sdk/idl/pump.json'];for(const p of candidates)scan(p,'npm-pump');
+          NODE
+          echo '=== SWAP SDK MAYHEM ==='
+          grep -Rni -B8 -A30 -E 'mayhem|reservedFee|feeRecipients|fee_recipient' node_modules/@pump-fun/pump-swap-sdk/src 2>/dev/null | head -n 1000 || true
+          echo '=== PUMP SDK MAYHEM ==='
+          grep -Rni -B8 -A35 -E 'mayhem|reservedFee|feeRecipients|fee_recipient' node_modules/@pump-fun/pump-sdk/src node_modules/@pump-fun/pump-sdk/dist 2>/dev/null | head -n 1200 || true
+          echo '=== REPO DOC/IDL MAYHEM ==='
+          grep -Rni -B8 -A35 -E 'mayhem|reserved fee|reserved_fee|fee_recipient' docs idl 2>/dev/null | head -n 1600 || true
