@@ -1,0 +1,25 @@
+name: mayhem-sdk-source-focus
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/mayhem-sdk-source-focus.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-sdk@1.36.0
+      - name: Print focused source
+        shell: bash
+        run: |
+          echo '=== bondingCurve.ts ==='
+          cat node_modules/@pump-fun/pump-sdk/src/bondingCurve.ts
+          echo '=== fees.ts ==='
+          cat node_modules/@pump-fun/pump-sdk/src/fees.ts
+          echo '=== createV2AndBuyV2/buyV2 source ==='
+          sed -n '1125,1395p' node_modules/@pump-fun/pump-sdk/src/sdk.ts
