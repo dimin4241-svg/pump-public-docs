@@ -1,0 +1,42 @@
+name: mayhem-sharing-migrate-live
+on:
+  push:
+    paths:
+      - '.github/workflows/mayhem-sharing-migrate-live.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-swap-sdk@1.19.0 @solana/web3.js bs58
+      - name: Read-only sharing-config scan plus simulation-only migration
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import bs58pkg from 'bs58';const bs58=bs58pkg.default??bs58pkg;
+          import {Connection,PublicKey,TransactionInstruction,TransactionMessage,VersionedTransaction,Keypair} from '@solana/web3.js';
+          import {OnlinePumpAmmSdk,PUMP_AMM_SDK,getPumpAmmProgram} from '@pump-fun/pump-swap-sdk';
+          const RPC='https://api.mainnet-beta.solana.com',PROGRAM='pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA',SHARE_PROG=new PublicKey('pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ');
+          let id=1;const sleep=ms=>new Promise(r=>setTimeout(r,ms));async function rpc(method,params,n=5){let last;for(let a=0;a<n;a++){try{const r=await fetch(RPC,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-readonly-sharing-scan/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method,params})});if(r.status===429||r.status>=500){last=Error('HTTP '+r.status);await sleep(250+250*a);continue}const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));return j.result}catch(e){last=e;await sleep(250+250*a)}}throw last}
+          const rows=await rpc('getProgramAccounts',[PROGRAM,{encoding:'base64',commitment:'confirmed',filters:[{dataSize:301},{memcmp:{offset:243,bytes:'2'}}],dataSlice:{offset:0,length:245}}],3);console.log('MAYHEM_ROWS',rows.length);
+          const pools=rows.map(r=>{const b=Buffer.from(r.account.data[0],'base64');const baseMint=new PublicKey(b.subarray(43,75));const [sharing]=PublicKey.findProgramAddressSync([Buffer.from('sharing-config'),baseMint.toBuffer()],SHARE_PROG);return {pool:r.pubkey,baseMint:baseMint.toBase58(),poolQuote:bs58.encode(b.subarray(171,203)),coinCreator:bs58.encode(b.subarray(211,243)),sharing:sharing.toBase58()}});
+          const hits=[];for(let off=0;off<pools.length;off+=100){const batch=pools.slice(off,off+100),vals=(await rpc('getMultipleAccounts',[batch.map(x=>x.sharing),{encoding:'base64',commitment:'confirmed'}],4)).value;for(let i=0;i<batch.length;i++)if(vals[i])hits.push({...batch[i],sharingOwner:vals[i].owner,sharingLen:Buffer.from(vals[i].data[0],'base64').length});if(off%2000===0)console.log('SHARING_PROGRESS',off,'hits',hits.length);await sleep(70)}
+          console.log('SHARING_SUMMARY',JSON.stringify({totalMayhem:pools.length,withSharing:hits.length},null,2));
+          if(!hits.length)process.exit(0);
+          for(let off=0;off<hits.length;off+=100){const batch=hits.slice(off,off+100),vals=(await rpc('getMultipleAccounts',[batch.map(x=>x.poolQuote),{encoding:'base64',commitment:'confirmed'}],4)).value;for(let i=0;i<batch.length;i++){const a=vals[i],d=a?.data?.[0]?Buffer.from(a.data[0],'base64'):null;batch[i].quoteAmount=d?.length>=72?d.readBigUInt64LE(64).toString():'0';batch[i].quoteOwner=a?.owner??null}await sleep(70)}
+          hits.sort((a,b)=>BigInt(a.quoteAmount)>BigInt(b.quoteAmount)?-1:BigInt(a.quoteAmount)<BigInt(b.quoteAmount)?1:0);console.log('TOP_SHARING_MAYHEM',JSON.stringify(hits.slice(0,40),null,2));
+          const target=hits[0],POOL=new PublicKey(target.pool),SHARING=new PublicKey(target.sharing),PAYER=new PublicKey('Gygj9QQby4j2jryqyqBHvLP7ctv2SaANgh4sCb69BUpA');
+          const c=new Connection(RPC,'confirmed'),online=new OnlinePumpAmmSdk(c),prog=getPumpAmmProgram(c),pre=await online.fetchPool(POOL);console.log('TARGET_PRE',JSON.stringify({pool:target.pool,quoteAmount:target.quoteAmount,creator:pre.creator.toBase58(),coinCreator:pre.coinCreator.toBase58(),baseMint:pre.baseMint.toBase58(),isMayhem:pre.isMayhemMode,isCashback:pre.isCashbackCoin,sharing:SHARING.toBase58()},null,2));
+          const ix=await prog.methods.migratePoolCoinCreator().accountsPartial({pool:POOL,sharingConfig:SHARING}).instruction();console.log('MIGRATE_KEYS',JSON.stringify(ix.keys.map((k,i)=>({i,pk:k.pubkey.toBase58(),s:k.isSigner,w:k.isWritable})),null,2));
+          function parse(logs){const t=(logs??[]).join('\n');return {account:t.match(/AnchorError caused by account: ([A-Za-z0-9_\-]+)/)?.[1]??null,code:t.match(/Error Code: ([A-Za-z0-9_]+)/)?.[1]??null,num:Number(t.match(/Error Number: (\d+)/)?.[1]??0)||null,interesting:(logs??[]).filter(x=>/Instruction:|AnchorError|Error Code|Error Number|Left:|Right:|failed|success|creator|sharing/i.test(x)).slice(-80)}}
+          async function sim(label,inst){const bh=(await rpc('getLatestBlockhash',[{commitment:'processed'}])).value.blockhash;const tx=new VersionedTransaction(new TransactionMessage({payerKey:PAYER,recentBlockhash:bh,instructions:[inst]}).compileToV0Message());const raw=Buffer.from(tx.serialize()).toString('base64');const v=(await rpc('simulateTransaction',[raw,{encoding:'base64',sigVerify:false,replaceRecentBlockhash:true,commitment:'processed',accounts:{encoding:'base64',addresses:[POOL.toBase58()]}}],3)).value,e=parse(v.logs);let post=null,decodeErr=null;try{const a=v.accounts?.[0];if(a?.data?.[0])post=PUMP_AMM_SDK.decodePool(Buffer.from(a.data[0],'base64'))}catch(x){decodeErr=String(x)}console.log('\nSIM',label,JSON.stringify({err:v.err,units:v.unitsConsumed,account:e.account,code:e.code,num:e.num,preCoinCreator:pre.coinCreator.toBase58(),postCoinCreator:post?.coinCreator?.toBase58?.()??null,postCreator:post?.creator?.toBase58?.()??null,decodeErr,interesting:e.interesting},null,2));return {v,e,post}}
+          await sim('migrate_control',ix);
+          const si=ix.keys.findIndex(k=>k.pubkey.equals(SHARING));if(si>=0){const keys=ix.keys.map(k=>({...k}));keys[si]={...keys[si],pubkey:Keypair.generate().publicKey};await sim('migrate_random_sharing',new TransactionInstruction({programId:ix.programId,keys,data:Buffer.from(ix.data)}))}
+          // Substitute another VALID sharing config, if available, to prove cross-mint relation enforcement rather than only initialization.
+          if(hits.length>1){const other=new PublicKey(hits[1].sharing),keys=ix.keys.map(k=>({...k}));keys[si]={...keys[si],pubkey:other};await sim('migrate_other_valid_sharing',new TransactionInstruction({programId:ix.programId,keys,data:Buffer.from(ix.data)}))}
+          NODE
