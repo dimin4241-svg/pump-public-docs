@@ -1,0 +1,78 @@
+name: mayhem-usdc-create-domain-sim
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/mayhem-usdc-create-domain-sim.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  simulate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-sdk@1.36.0 @solana/web3.js @solana/spl-token
+      - name: Simulation-only Mayhem USDC matrix
+        shell: bash
+        run: |
+          cat > probe.mjs <<'NODE'
+          import {PublicKey,Keypair,Transaction,TransactionInstruction,ComputeBudgetProgram,SystemProgram} from '@solana/web3.js';
+          import {getAssociatedTokenAddressSync,TOKEN_PROGRAM_ID,TOKEN_2022_PROGRAM_ID,NATIVE_MINT} from '@solana/spl-token';
+          import {PUMP_SDK} from '@pump-fun/pump-sdk';
+
+          const USER=new PublicKey('39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg');
+          const USDC=new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');
+          const RPCS=['https://rpc.solanatracker.io/public','https://api.mainnet-beta.solana.com','https://solana-rpc.publicnode.com'];
+          let rid=1;const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          async function raw(u,m,p,n=4){let e;for(let i=0;i<n;i++){try{const r=await fetch(u,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-simulation-only/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:rid++,method:m,params:p})});if(r.status===429||r.status>=500){e=Error('HTTP '+r.status);await sleep(250+350*i);continue}const j=await r.json();if(j.error){e=Error(JSON.stringify(j.error));if(/429|No response|Too many/i.test(String(e))){await sleep(250+350*i);continue}throw e}return j.result}catch(x){e=x;await sleep(180)}}throw e}
+          async function call(m,p){let e;for(const u of RPCS){try{return await raw(u,m,p)}catch(x){e=x;console.log('RPC_FAIL',m,u,String(x).slice(0,180))}}throw e}
+          const [userInfo,usdcInfo]=await Promise.all([
+            call('getAccountInfo',[USER.toBase58(),{encoding:'base64',commitment:'confirmed'}]),
+            call('getAccountInfo',[USDC.toBase58(),{encoding:'base64',commitment:'confirmed'}])
+          ]);
+          console.log('PRE',JSON.stringify({user:{owner:userInfo.value?.owner,lamports:userInfo.value?.lamports},usdc:{owner:usdcInfo.value?.owner,dataLen:usdcInfo.value?Buffer.from(usdcInfo.value.data[0],'base64').length:null}}));
+          if(!userInfo.value||userInfo.value.owner!==SystemProgram.programId.toBase58())throw Error('bad user');
+          if(usdcInfo.value?.owner!==TOKEN_PROGRAM_ID.toBase58())throw Error('USDC program changed');
+
+          function tokenAmount(a){if(!a)return null;const b=Buffer.from(a.data[0],'base64');return b.length>=72?b.readBigUInt64LE(64).toString():null}
+          function mintMeta(a){if(!a)return null;const b=Buffer.from(a.data[0],'base64');return b.length>=45?{supply:b.readBigUInt64LE(36).toString(),decimals:b[44],len:b.length}:null}
+          function rawHead(a,n=160){if(!a)return null;return Buffer.from(a.data[0],'base64').subarray(0,n).toString('hex')}
+          function clone(ix,repls={}){return new TransactionInstruction({programId:ix.programId,data:Buffer.from(ix.data),keys:ix.keys.map((k,i)=>repls[i]?{...k,...repls[i]}:{...k})})}
+
+          async function build(label,mayhem){
+            const mint=Keypair.generate();
+            const ix=await PUMP_SDK.createV2Instruction({mint:mint.publicKey,name:'USDC '+label,symbol:mayhem?'MYUSDC':'PLUSDC',uri:'https://example.invalid/'+label,creator:USER,user:USER,mayhemMode:mayhem,cashback:false,quoteMint:USDC});
+            console.log('BUILT',label,JSON.stringify({mayhem,mint:mint.publicKey.toBase58(),keyCount:ix.keys.length,keys:ix.keys.map((k,i)=>({i,p:k.pubkey.toBase58(),w:k.isWritable,s:k.isSigner}))},null,2));
+            return {label,mayhem,mint,ix};
+          }
+          const may=await build('mayhem',true);const plain=await build('plain',false);
+          if(may.ix.keys.length!==19||plain.ix.keys.length!==19)throw Error('expected 19 create_v2 accounts with quote mint');
+          const mayCurve=may.ix.keys[2].pubkey,mayBaseAta=may.ix.keys[3].pubkey,mayState=may.ix.keys[12].pubkey,mayVault=may.ix.keys[13].pubkey,mayQuoteAta=may.ix.keys[17].pubkey;
+          const plainCurve=plain.ix.keys[2].pubkey,plainBaseAta=plain.ix.keys[3].pubkey,plainState=plain.ix.keys[12].pubkey,plainVault=plain.ix.keys[13].pubkey,plainQuoteAta=plain.ix.keys[17].pubkey;
+          const userUsdc=getAssociatedTokenAddressSync(USDC,USER,false,TOKEN_PROGRAM_ID);
+          const random=Keypair.generate();
+          const wrongQuoteAta=getAssociatedTokenAddressSync(NATIVE_MINT,mayCurve,true,TOKEN_PROGRAM_ID);
+          const cases={
+            mayhem_usdc_control:{obj:may,ix:may.ix,watch:[may.mint.publicKey,mayCurve,mayBaseAta,mayState,mayVault,mayQuoteAta,may.ix.keys[11].pubkey]},
+            plain_usdc_control:{obj:plain,ix:plain.ix,watch:[plain.mint.publicKey,plainCurve,plainBaseAta,plainState,plainVault,plainQuoteAta,plain.ix.keys[11].pubkey]},
+            mayhem_quote_ata_user:{obj:may,ix:clone(may.ix,{17:{pubkey:userUsdc,isWritable:true,isSigner:false}}),watch:[may.mint.publicKey,mayCurve,mayBaseAta,mayState,mayVault,userUsdc,may.ix.keys[11].pubkey]},
+            mayhem_quote_ata_random:{obj:may,ix:clone(may.ix,{17:{pubkey:random.publicKey,isWritable:true,isSigner:false}}),watch:[may.mint.publicKey,mayCurve,mayBaseAta,mayState,mayVault,random.publicKey,may.ix.keys[11].pubkey]},
+            mayhem_quote_program_2022:{obj:may,ix:clone(may.ix,{18:{pubkey:TOKEN_2022_PROGRAM_ID,isWritable:false,isSigner:false}}),watch:[may.mint.publicKey,mayCurve,mayBaseAta,mayState,mayVault,mayQuoteAta,may.ix.keys[11].pubkey]},
+            mayhem_quote_wsol_wrong_ata:{obj:may,ix:clone(may.ix,{16:{pubkey:NATIVE_MINT,isWritable:false,isSigner:false},17:{pubkey:wrongQuoteAta,isWritable:true,isSigner:false}}),watch:[may.mint.publicKey,mayCurve,mayBaseAta,mayState,mayVault,wrongQuoteAta,may.ix.keys[11].pubkey]}
+          };
+          async function sim(name,c){
+            const bh=(await call('getLatestBlockhash',[{commitment:'confirmed'}])).value.blockhash;
+            const tx=new Transaction({feePayer:USER,recentBlockhash:bh}).add(ComputeBudgetProgram.setComputeUnitLimit({units:1_400_000}),c.ix);
+            const bytes=tx.serialize({requireAllSignatures:false,verifySignatures:false});let v=null,used=null;
+            for(const u of RPCS){try{v=(await raw(u,'simulateTransaction',[bytes.toString('base64'),{encoding:'base64',sigVerify:false,replaceRecentBlockhash:true,commitment:'confirmed',accounts:{encoding:'base64',addresses:c.watch.map(x=>x.toBase58())}}],3)).value;used=u;break}catch(e){console.log('SIM_FAIL',name,u,String(e).slice(0,180))}}
+            if(!v){console.log('RESULT',name,JSON.stringify({noSim:true}));return;}
+            const logs=v.logs??[];const aa=v.accounts??[];
+            const snapshot=aa.map((a,i)=>({i,address:c.watch[i].toBase58(),exists:!!a,owner:a?.owner??null,lamports:a?.lamports??null,tokenAmount:tokenAmount(a),mint:mintMeta(a),head:rawHead(a)}));
+            console.log('RESULT',name,JSON.stringify({simulationOnly:true,broadcast:false,rpc:used,err:v.err,units:v.unitsConsumed,snapshot,instructions:logs.filter(l=>l.includes('Instruction:')),anchor:logs.filter(l=>l.includes('AnchorError')||l.includes('Error Code:')||l.includes('Error Number:')),failed:logs.filter(l=>l.includes('failed:')),interesting:logs.filter(l=>/quote|Mayhem|mayhem|Cpitialize|InvalidAssociated|InvalidQuote/i.test(l))},null,2));
+            for(const l of logs)if(/AnchorError|Error Code:|failed:|quote|Mayhem|mayhem|InvalidAssociated|InvalidQuote/i.test(l))console.log('ERRLOG',name,l);
+          }
+          for(const [n,c] of Object.entries(cases))await sim(n,c);
+          NODE
+          node probe.mjs
