@@ -1,0 +1,41 @@
+name: mayhem-usdc-live-buy-discovery
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/mayhem-usdc-live-buy-discovery.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  discover:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save bs58 @solana/web3.js
+      - name: Read-only live BuyV2 discovery
+        shell: bash
+        run: |
+          cat > x.mjs <<'NODE'
+          import bs58pkg from 'bs58';const bs58=bs58pkg.default??bs58pkg;
+          import {PublicKey} from '@solana/web3.js';
+          const PUMP='6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P',USDC='EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+          const BUY=Buffer.from('b817ee6167c5d33d','hex');
+          const FEE_ATAS=['41xY1DU1zzo893bEg2HzTFxPVVM84UvDCNsQm6aKRq8Z','GYahGz4ts13NYJBJfwFfMsN7aWv6mcT5D5Jd9znx18QW','Gzc5K38syMVA8V7Q7czVJqQGxBiWhJ3iUqZdGGdSvqEP','AupmCV3PGYcm5efdXS7Yd9TvvzfUP4wKabvmFoDe9LAf','EQkDDtyzVwY3RCBNJSd68F8c1WQP6njSbcPLpnYFoMxU','A9KuWNQUZBT5ZTp3HB5tKxCkSwxjUrW5fFqvk6JcKyo6','D3ANwvaijotpP2BZJTxHs7mdhKaNDZ8JgWAZRAGX5wva','8i5djNGuUXSAqang3mcQMPfAg7ynPdLLyecDx1D393od'];
+          const RPCS=['https://rpc.solanatracker.io/public','https://api.mainnet-beta.solana.com'];let id=1;const sl=m=>new Promise(r=>setTimeout(r,m));
+          async function one(u,m,p){const r=await fetch(u,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-readonly/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method:m,params:p})});if(!r.ok)throw Error('HTTP '+r.status);const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));return j.result}
+          async function call(m,p){let e;for(const u of RPCS){for(let n=0;n<3;n++)try{return await one(u,m,p)}catch(x){e=x;await sl(250+300*n)}console.log('RPC_FAIL',m,u,String(e).slice(0,140))}throw e}
+          const sigMap=new Map();for(const a of FEE_ATAS){try{const s=await call('getSignaturesForAddress',[a,{limit:40}]);console.log('SIGSRC',a,s.length);for(const x of s)if(!x.err)sigMap.set(x.signature,x)}catch(e){console.log('SIGSRC_FAIL',a,String(e).slice(0,150))}}
+          const sigs=[...sigMap.values()].sort((a,b)=>b.slot-a.slot).slice(0,160);console.log('UNIQUE_SIGS',sigs.length);
+          function key(x){return typeof x==='string'?x:x?.pubkey??String(x)}
+          function keys(tx){const a=(tx.transaction.message.accountKeys??[]).map(key),l=tx.meta?.loadedAddresses??{};return [...a,...(l.writable??[]).map(key),...(l.readonly??[]).map(key)]}
+          function dec(ix,ks){try{return {pid:ks[ix.programIdIndex],data:Buffer.from(bs58.decode(ix.data??'')),accounts:(ix.accounts??[]).map(i=>ks[i])}}catch{return null}}
+          async function tx(sig){return await call('getTransaction',[sig,{encoding:'json',maxSupportedTransactionVersion:0,commitment:'confirmed'}])}
+          const found=[];
+          for(let i=0;i<sigs.length&&found.length<12;i++){
+            let t;try{t=await tx(sigs[i].signature)}catch(e){console.log('TX_FAIL',i,String(e).slice(0,120));await sl(100);continue}if(!t)continue;const ks=keys(t);for(let oi=0;oi<(t.transaction.message.instructions??[]).length;oi++){const d=dec(t.transaction.message.instructions[oi],ks);if(!d||d.pid!==PUMP||d.data.length<8||!d.data.subarray(0,8).equals(BUY))continue;if(d.accounts[2]!==USDC)continue;const row={signature:sigs[i].signature,slot:sigs[i].slot,blockTime:sigs[i].blockTime,outerIndex:oi,baseMint:d.accounts[1],quoteMint:d.accounts[2],bondingCurve:d.accounts[10],user:d.accounts[13],feeRecipient:d.accounts[6],feeAta:d.accounts[7],creatorVault:d.accounts[16],sharingConfig:d.accounts[18],feeConfig:d.accounts[22],dataHex:d.data.toString('hex'),accounts:d.accounts};found.push(row);console.log('FOUND',JSON.stringify(row,null,2))}await sl(70)}
+          for(const r of found){try{const [c,m]=await Promise.all([call('getAccountInfo',[r.bondingCurve,{encoding:'base64',commitment:'confirmed'}]),call('getAccountInfo',[r.baseMint,{encoding:'base64',commitment:'confirmed'}])]);const b=c.value?Buffer.from(c.value.data[0],'base64'):null,mb=m.value?Buffer.from(m.value.data[0],'base64'):null;r.current=b&&b.length>=115?{virtualToken:b.readBigUInt64LE(8).toString(),virtualQuote:b.readBigUInt64LE(16).toString(),realToken:b.readBigUInt64LE(24).toString(),realQuote:b.readBigUInt64LE(32).toString(),bondingSupply:b.readBigUInt64LE(40).toString(),complete:b[48],isMayhem:b[81],quote:new PublicKey(b.subarray(83,115)).toBase58()}:null;r.mintSupply=mb&&mb.length>=45?mb.readBigUInt64LE(36).toString():null}catch(e){r.enrichError=String(e).slice(0,160)}}
+          console.log('SUMMARY',JSON.stringify(found,null,2));
+          NODE
+          node x.mjs
