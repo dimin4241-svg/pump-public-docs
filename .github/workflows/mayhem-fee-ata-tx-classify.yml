@@ -1,0 +1,26 @@
+name: mayhem-fee-ata-tx-classify
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/mayhem-fee-ata-tx-classify.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  classify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save bs58
+      - name: Read-only transaction classifier
+        shell: bash
+        run: |
+          cat > x.mjs <<'NODE'
+          import bs58pkg from 'bs58';const bs58=bs58pkg.default??bs58pkg;
+          const ATA='41xY1DU1zzo893bEg2HzTFxPVVM84UvDCNsQm6aKRq8Z';const RPCS=['https://api.mainnet-beta.solana.com','https://rpc.solanatracker.io/public'];let id=1;const sl=m=>new Promise(r=>setTimeout(r,m));async function q(u,m,p){const r=await fetch(u,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method:m,params:p})});if(!r.ok)throw Error('HTTP '+r.status);const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));return j.result}async function call(m,p){let e;for(const u of RPCS){for(let n=0;n<5;n++)try{return await q(u,m,p)}catch(x){e=x;await sl(350+500*n)}}throw e}
+          const ss=await call('getSignaturesForAddress',[ATA,{limit:8}]);console.log('SIGS',JSON.stringify(ss,null,2));const key=x=>typeof x==='string'?x:x?.pubkey??String(x);function keys(t){const a=(t.transaction.message.accountKeys??[]).map(key),l=t.meta?.loadedAddresses??{};return [...a,...(l.writable??[]).map(key),...(l.readonly??[]).map(key)]}function d(ix,k){let b=null;try{b=Buffer.from(bs58.decode(ix.data??''))}catch{}return {program:k[ix.programIdIndex],disc:b?.subarray(0,8).toString('hex')??null,dataLen:b?.length??null,accounts:(ix.accounts??[]).map(i=>k[i])}}
+          for(let i=0;i<ss.length;i++){let t;try{t=await call('getTransaction',[ss[i].signature,{encoding:'json',maxSupportedTransactionVersion:0,commitment:'confirmed'}])}catch(e){console.log('FAIL',i,String(e));continue}if(!t)continue;const k=keys(t),outer=(t.transaction.message.instructions??[]).map(ix=>d(ix,k)),inner=(t.meta?.innerInstructions??[]).map(g=>({outer:g.index,instructions:(g.instructions??[]).map(ix=>d(ix,k))}));console.log('TX',JSON.stringify({signature:ss[i].signature,slot:ss[i].slot,outer,inner,logs:(t.meta?.logMessages??[]).filter(x=>/Instruction:|Program log:/.test(x)).slice(0,100)},null,2));await sl(300)}
+          NODE
+          node x.mjs
