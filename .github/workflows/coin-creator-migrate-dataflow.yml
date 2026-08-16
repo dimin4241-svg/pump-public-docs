@@ -1,0 +1,28 @@
+name: coin-creator-migrate-dataflow
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/coin-creator-migrate-dataflow.yml']
+  workflow_dispatch:
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: audit/boost-runtime-probe-20260815}
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const pump=JSON.parse(fs.readFileSync('idl/pump.json','utf8'));
+          const amm=JSON.parse(fs.readFileSync('idl/pump_amm.json','utf8'));
+          for(const n of ['migrate','migrate_v2','migrate_bonding_curve_creator']){
+            const ix=pump.instructions.find(x=>x.name===n);console.log('PUMP_IX_'+n.toUpperCase(),JSON.stringify(ix,null,2));
+          }
+          const bc=(pump.types??[]).find(x=>x.name==='BondingCurve');console.log('BONDING_CURVE_TYPE',JSON.stringify(bc,null,2));
+          const sc=(pump.types??[]).find(x=>/SharingConfig/i.test(x.name));console.log('PUMP_SHARING_TYPE',JSON.stringify(sc,null,2));
+          for(const e of pump.errors??[]){if(/creator|migrat|sharing|mayhem/i.test(e.name)||/creator|migrat|sharing|mayhem/i.test(e.msg??''))console.log('PUMP_ERR',JSON.stringify(e));}
+          const cp=amm.instructions.find(x=>x.name==='create_pool');console.log('AMM_CREATE_POOL',JSON.stringify(cp,null,2));
+          const adm=amm.instructions.find(x=>x.name==='admin_set_coin_creator');console.log('AMM_ADMIN_SET',JSON.stringify(adm,null,2));
+          NODE
