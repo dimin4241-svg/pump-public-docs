@@ -1,0 +1,46 @@
+name: inspect-closest-boost-lp-accounting
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/inspect-closest-boost-lp-accounting.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: audit/boost-runtime-probe-20260815}
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-swap-sdk@1.19.0 @solana/web3.js @coral-xyz/anchor @solana/spl-token
+      - shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          import {PublicKey} from '@solana/web3.js';
+          import {BorshAccountsCoder} from '@coral-xyz/anchor';
+          const idl=JSON.parse(fs.readFileSync('node_modules/@pump-fun/pump-swap-sdk/src/idl/pump_amm.json','utf8'));
+          const poolKey='FpvoV2tqRxDW156CvATS6xFNuGewiHRX5JZneau1uFgF';
+          const lpMint='28EQ4ZxYemsyWyffL1R2fpQi3q86aUjDnVxFViwuf7H1';
+          const acct=idl.accounts.find(a=>a.name.toLowerCase()==='pool');
+          const typ=idl.types.find(t=>t.name.toLowerCase()==='pool');
+          console.log('IDL_POOL_ACCOUNT',JSON.stringify(acct));
+          console.log('IDL_POOL_TYPE',JSON.stringify(typ,null,2));
+          const RPCS=['https://rpc.solanatracker.io/public','https://api.mainnet-beta.solana.com','https://solana-rpc.publicnode.com'];let id=1;
+          async function req(u,m,p){const r=await fetch(u,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method:m,params:p})});if(!r.ok)throw Error('HTTP '+r.status);const x=await r.json();if(x.error)throw Error(JSON.stringify(x.error));return x.result}
+          async function call(m,p){let e;for(const u of RPCS){try{const x=await req(u,m,p);console.log('RPC_OK',m,u);return x}catch(x){e=x;console.log('RPC_FAIL',m,u,String(x).slice(0,180))}}throw e}
+          const ai=(await call('getAccountInfo',[poolKey,{encoding:'base64',commitment:'confirmed'}])).value;
+          const data=Buffer.from(ai.data[0],'base64');
+          const coder=new BorshAccountsCoder(idl);
+          let dec=null;for(const n of ['pool','Pool']){try{dec=coder.decode(n,data);console.log('DECODE_NAME',n);break}catch(e){console.log('DECODE_FAIL',n,String(e).slice(0,180))}}
+          const clean=o=>JSON.parse(JSON.stringify(o,(k,v)=>typeof v==='bigint'?v.toString():v?.toString&&v.constructor?.name==='BN'?v.toString():v));
+          if(dec) console.log('DECODED_POOL',JSON.stringify(clean(dec),null,2));
+          const ts=await call('getTokenSupply',[lpMint,{commitment:'confirmed'}]);
+          const mi=(await call('getAccountInfo',[lpMint,{encoding:'base64',commitment:'confirmed'}])).value;
+          console.log('LP_MINT_SUPPLY',JSON.stringify(ts.value));
+          console.log('LP_MINT_INFO',JSON.stringify({owner:mi?.owner,lamports:mi?.lamports,dataLen:mi?Buffer.from(mi.data[0],'base64').length:null}));
+          console.log('RAW_OFFSETS',JSON.stringify({len:data.length,u64_203:data.readBigUInt64LE(203).toString(),u64_204:data.readBigUInt64LE(204).toString(),u64_211:data.length>=219?data.readBigUInt64LE(211).toString():null}));
+          NODE
