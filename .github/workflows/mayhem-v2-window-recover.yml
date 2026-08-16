@@ -1,0 +1,73 @@
+name: mayhem-v2-window-recover
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+permissions:
+  contents: read
+jobs:
+  recover:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm install --no-save bs58
+      - name: Read-only recover v2 trade signatures around known active window
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import bs58pkg from 'bs58'; const bs58=bs58pkg.default??bs58pkg;
+          const P='MAyhSmzXzV1pTf7LsNkrNwkWKTo4ougAJ1PPg47MD4e';
+          const START='4ed43uMUCqNjMcrqcLuMCsjYy2qCdzRVQ7d5HyyBZ2MdQ8Rcs58YxcPfoTMjRwWAnEJLvzdT9Yjwwo17C8wotVQE';
+          const WANTED={
+            'c2951c220e7467d6':'buy_v2',
+            'ae123813f63bd1bc':'sell_v2',
+            '2970bf2b24c10c3b':'buy_pump_swap',
+            '2d66bf1478bb681f':'sell_pump_swap'
+          };
+          const ALL={...WANTED,
+            '66063d1201daebea':'buy','33e685a4017f83ad':'sell',
+            '9dbd5e485545cc2d':'initialize_mayhem_state'
+          };
+          const RPCS=['https://rpc.solanatracker.io/public','https://api.mainnet-beta.solana.com','https://solana-rpc.publicnode.com'];
+          let id=1; const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          async function post(url,body){const r=await fetch(url,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-read-only-v2-window/1.0'},body:JSON.stringify(body)});if(!r.ok)throw Error('HTTP '+r.status);const j=await r.json();return j}
+          async function one(method,params){let e;for(const u of RPCS){try{const j=await post(u,{jsonrpc:'2.0',id:id++,method,params});if(j.error)throw Error(JSON.stringify(j.error));return j.result}catch(x){e=x;console.log('RPCFAIL',method,u,String(x).slice(0,160));await sleep(220)}}throw e}
+          async function batchTx(sigs){let e;for(const u of RPCS){try{const req=sigs.map(sig=>({jsonrpc:'2.0',id:id++,method:'getTransaction',params:[sig,{encoding:'json',commitment:'confirmed',maxSupportedTransactionVersion:0}]}));const out=await post(u,req);if(!Array.isArray(out))throw Error('non-array response');const by=new Map(out.map(x=>[x.id,x.result]));return req.map(x=>by.get(x.id)??null)}catch(x){e=x;console.log('BATCHFAIL',u,String(x).slice(0,170));await sleep(350)}}throw e}
+          let before=START, sigrows=[];
+          for(let page=0;page<5;page++){
+            const rows=await one('getSignaturesForAddress',[P,{limit:100,before,commitment:'confirmed'}]);
+            if(!rows?.length)break;
+            console.log('SIGPAGE',page,'FIRST_SLOT',rows[0].slot,'LAST_SLOT',rows.at(-1).slot,'COUNT',rows.length);
+            sigrows.push(...rows.filter(x=>x.err==null)); before=rows.at(-1).signature; await sleep(170);
+          }
+          const found={}; const counts={};
+          for(let off=0;off<sigrows.length;off+=8){
+            let txs;try{txs=await batchTx(sigrows.slice(off,off+8).map(x=>x.signature))}catch(e){console.log('SKIP_CHUNK',off,String(e).slice(0,180));continue}
+            for(let j=0;j<txs.length;j++){
+              const tx=txs[j]; if(!tx||tx.meta?.err)continue;
+              const msg=tx.transaction.message;
+              const flat=[...msg.accountKeys,...(tx.meta.loadedAddresses?.writable??[]),...(tx.meta.loadedAddresses?.readonly??[])];
+              for(const [ixIndex,ix] of msg.instructions.entries()){
+                if(flat[ix.programIdIndex]!==P||!ix.data)continue;
+                let raw;try{raw=Buffer.from(bs58.decode(ix.data))}catch{continue}
+                const disc=raw.subarray(0,8).toString('hex'),name=ALL[disc]??('unknown:'+disc);counts[name]=(counts[name]??0)+1;
+                if(WANTED[disc]&&!found[WANTED[disc]]){
+                  const h=msg.header,nStatic=msg.accountKeys.length,nw=(tx.meta.loadedAddresses?.writable??[]).length;
+                  const meta=i=>{const signer=i<h.numRequiredSignatures;let writable=false,source='lookup-readonly';if(i<nStatic){source='transaction';const sw=h.numRequiredSignatures-h.numReadonlySignedAccounts,uw=nStatic-h.numReadonlyUnsignedAccounts;writable=signer?i<sw:i<uw}else if(i<nStatic+nw){source='lookup-writable';writable=true}return {i,pk:flat[i],signer,writable,source}};
+                  const accounts=ix.accounts.map(meta);
+                  const info=await one('getMultipleAccounts',[accounts.map(a=>a.pk),{encoding:'base64',commitment:'confirmed'}]);
+                  const detailed=accounts.map((a,k)=>({...a,owner:info.value[k]?.owner??null,lamports:info.value[k]?.lamports??null,dataLen:info.value[k]?.data?.[0]?Buffer.from(info.value[k].data[0],'base64').length:null,executable:info.value[k]?.executable??null}));
+                  const inner=(tx.meta.innerInstructions??[]).find(g=>g.index===ixIndex)?.instructions??[];
+                  const result={name:WANTED[disc],disc,signature:sigrows[off+j].signature,slot:tx.slot,blockTime:tx.blockTime,ixIndex,dataHex:raw.toString('hex'),header:h,accounts:detailed,inner:inner.map(x=>({stackHeight:x.stackHeight,programId:flat[x.programIdIndex],accounts:(x.accounts??[]).map(meta),dataHex:x.data?Buffer.from(bs58.decode(x.data)).toString('hex'):null})),logs:tx.meta.logMessages??[]};
+                  found[WANTED[disc]]=result;console.log('FOUND',WANTED[disc],JSON.stringify(result,null,2));
+                }
+              }
+            }
+            if(off%40===0)console.log('PROGRESS',off,'COUNTS',JSON.stringify(counts),'FOUND',Object.keys(found));
+            if(found.buy_v2&&found.sell_v2&&found.buy_pump_swap&&found.sell_pump_swap)break;
+            await sleep(130);
+          }
+          console.log('FINAL_COUNTS',JSON.stringify(counts,null,2));
+          console.log('FINAL_FOUND',JSON.stringify(found,null,2));
+          NODE
