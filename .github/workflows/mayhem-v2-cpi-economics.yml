@@ -1,0 +1,37 @@
+name: mayhem-v2-cpi-economics
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/mayhem-v2-cpi-economics.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save bs58
+      - name: Read-only V2 CPI economics trace
+        shell: bash
+        run: |
+          cat > x.mjs <<'NODE'
+          import bs58pkg from 'bs58';const bs58=bs58pkg.default??bs58pkg;
+          const MAY='MAyhSmzXzV1pTf7LsNkrNwkWKTo4ougAJ1PPg47MD4e',PUMP='6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P',USDC='EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+          const DISC={BuyV2:'b817ee6167c5d33d',SellV2:'5df6823ce7e940b2'};
+          const RPCS=['https://rpc.solanatracker.io/public','https://api.mainnet-beta.solana.com'];let id=1;const sl=m=>new Promise(r=>setTimeout(r,m));
+          async function q(u,m,p){const r=await fetch(u,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-readonly/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method:m,params:p})});if(!r.ok)throw Error('HTTP '+r.status);const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));return j.result}
+          async function call(m,p){let e;for(const u of RPCS){for(let n=0;n<5;n++)try{return await q(u,m,p)}catch(x){e=x;await sl(250+450*n)}console.log('RPC_FAIL',m,u,String(e).slice(0,140))}throw e}
+          const key=x=>typeof x==='string'?x:x?.pubkey??String(x);function keys(t){const a=(t.transaction.message.accountKeys??[]).map(key),l=t.meta?.loadedAddresses??{};return [...a,...(l.writable??[]).map(key),...(l.readonly??[]).map(key)]}function dec(ix,k){let d=Buffer.alloc(0);try{d=Buffer.from(bs58.decode(ix.data??''))}catch{}return {pid:k[ix.programIdIndex],data:d,idx:ix.accounts??[],accounts:(ix.accounts??[]).map(i=>k[i])}}
+          const sigs=[];let before;for(let p=0;p<2;p++){const o={limit:100};if(before)o.before=before;const a=await call('getSignaturesForAddress',[MAY,o]);sigs.push(...a.filter(x=>!x.err));if(a.length<100)break;before=a.at(-1).signature;await sl(100)}
+          const rows=[];let buys=0,sells=0;
+          for(let i=0;i<sigs.length&&(buys<6||sells<6);i++){let t;try{t=await call('getTransaction',[sigs[i].signature,{encoding:'json',maxSupportedTransactionVersion:0,commitment:'confirmed'}])}catch(e){continue}if(!t)continue;const k=keys(t),outs=(t.transaction.message.instructions??[]).map(ix=>dec(ix,k));for(let oi=0;oi<outs.length;oi++){const o=outs[oi];if(o.pid!==MAY||o.data.length<8)continue;const hex=o.data.subarray(0,8).toString('hex'),name=hex===DISC.BuyV2?'BuyV2':hex===DISC.SellV2?'SellV2':null;if(!name)continue;if(o.accounts[4]!==USDC)continue;if(name==='BuyV2'&&buys>=6||name==='SellV2'&&sells>=6)continue;const inn=(t.meta?.innerInstructions??[]).find(g=>g.index===oi)?.instructions??[];const pumps=inn.map(ix=>dec(ix,k)).filter(x=>x.pid===PUMP);const pre=new Map((t.meta?.preTokenBalances??[]).map(x=>[x.accountIndex,BigInt(x.uiTokenAmount.amount)])),post=new Map((t.meta?.postTokenBalances??[]).map(x=>[x.accountIndex,BigInt(x.uiTokenAmount.amount)]));const changes=[];for(const [gi,v] of pre){if(!post.has(gi))continue;const d=post.get(gi)-v;if(d!==0n)changes.push({globalIndex:gi,address:k[gi],delta:d.toString(),pre:v.toString(),post:post.get(gi).toString(),mint:(t.meta.preTokenBalances??[]).find(x=>x.accountIndex===gi)?.mint})}
+            const parseArgs=b=>({len:b.length,disc:b.subarray(0,8).toString('hex'),u64_8:b.length>=16?b.readBigUInt64LE(8).toString():null,u64_16:b.length>=24?b.readBigUInt64LE(16).toString():null,tail:b.subarray(24).toString('hex')});
+            const row={name,signature:sigs[i].signature,slot:sigs[i].slot,blockTime:sigs[i].blockTime,outer:parseArgs(o.data),outerAccounts:o.accounts,pumpInner:pumps.map(x=>({args:parseArgs(x.data),accounts:x.accounts})),tokenChanges:changes,logs:(t.meta?.logMessages??[]).filter(x=>/Instruction: BuyV2|Instruction: SellV2|PumpCpi|slippage|Mayhem|mayhem/.test(x))};rows.push(row);console.log('ROW',JSON.stringify(row,null,2));if(name==='BuyV2')buys++;else sells++}
+            await sl(70)
+          }
+          console.log('SUMMARY',JSON.stringify({buys,sells,rows},null,2));
+          NODE
+          node x.mjs
