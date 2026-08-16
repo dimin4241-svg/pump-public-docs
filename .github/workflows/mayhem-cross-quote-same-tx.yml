@@ -13,43 +13,29 @@ jobs:
     steps:
       - uses: actions/setup-node@v4
         with: {node-version: 24}
-      - run: npm install --no-save @pump-fun/pump-sdk@1.36.0 @solana/web3.js @solana/spl-token bs58
+      - run: npm install --no-save @pump-fun/pump-sdk@1.36.0 @solana/web3.js @solana/spl-token
       - name: Same-bank SOL vs USDC Mayhem initialization
         shell: bash
         run: |
           cat > probe.mjs <<'NODE'
-          import {PublicKey,Keypair,Transaction,ComputeBudgetProgram,SystemProgram} from '@solana/web3.js';
+          import {PublicKey,Keypair,Transaction,SystemProgram} from '@solana/web3.js';
           import {PUMP_SDK,getGlobalParamsPda,getSolVaultPda} from '@pump-fun/pump-sdk';
-          const USER=new PublicKey('39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg');
-          const USDC=new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');
-          const GP=getGlobalParamsPda(), SOLVAULT=getSolVaultPda();
-          const RPCS=['https://rpc.solanatracker.io/public','https://api.mainnet-beta.solana.com'];
-          let id=1;const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          const USER=new PublicKey('39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg'),USDC=new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'),GP=getGlobalParamsPda(),SOLVAULT=getSolVaultPda();
+          const RPCS=['https://rpc.solanatracker.io/public','https://api.mainnet-beta.solana.com'];let id=1;const sleep=ms=>new Promise(r=>setTimeout(r,ms));
           async function raw(u,m,p,n=4){let e;for(let a=0;a<n;a++){try{const r=await fetch(u,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-simulation-only/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method:m,params:p})});if(r.status===429||r.status>=500){e=Error('HTTP '+r.status);await sleep(250+400*a);continue}const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));return j.result}catch(x){e=x;await sleep(180)}}throw e}
           async function call(m,p){let e;for(const u of RPCS){try{return await raw(u,m,p)}catch(x){e=x;console.log('RPC_FAIL',m,u,String(x).slice(0,160))}}throw e}
-          function bytes(a){return a?Buffer.from(a.data[0],'base64'):null}
-          function token(a){const b=bytes(a);return b&&b.length>=72?b.readBigUInt64LE(64).toString():null}
-          function mint(a){const b=bytes(a);return b&&b.length>=45?{supply:b.readBigUInt64LE(36).toString(),decimals:b[44],len:b.length}:null}
-          function u64view(b){const out=[];if(!b)return out;for(let o=8;o+8<=b.length;o+=8)out.push({o,u64:b.readBigUInt64LE(o).toString(),hex:b.subarray(o,o+8).toString('hex')});return out}
-          const [gp0,sv0]=await Promise.all([call('getAccountInfo',[GP.toBase58(),{encoding:'base64',commitment:'confirmed'}]),call('getAccountInfo',[SOLVAULT.toBase58(),{encoding:'base64',commitment:'confirmed'}])]);
-          const gpb=bytes(gp0.value);
-          console.log('GLOBAL_PARAMS',JSON.stringify({address:GP.toBase58(),owner:gp0.value?.owner,len:gpb?.length,lamports:gp0.value?.lamports,raw:gpb?.toString('hex'),disc:gpb?.subarray(0,8).toString('hex'),u64:u64view(gpb)},null,2));
-          console.log('SOL_VAULT_PRE',JSON.stringify({address:SOLVAULT.toBase58(),owner:sv0.value?.owner,lamports:sv0.value?.lamports,dataLen:bytes(sv0.value)?.length}));
-          if((await call('getAccountInfo',[USER.toBase58(),{encoding:'base64',commitment:'confirmed'}])).value?.owner!==SystemProgram.programId.toBase58())throw Error('user unavailable');
-          const sm=Keypair.generate(), um=Keypair.generate();
-          const six=await PUMP_SDK.createV2Instruction({mint:sm.publicKey,name:'SameTx SOL',symbol:'STSOL',uri:'https://example.invalid/st-sol',creator:USER,user:USER,mayhemMode:true,cashback:false});
-          const uix=await PUMP_SDK.createV2Instruction({mint:um.publicKey,name:'SameTx USDC',symbol:'STUSDC',uri:'https://example.invalid/st-usdc',creator:USER,user:USER,mayhemMode:true,cashback:false,quoteMint:USDC});
+          const bytes=a=>a?Buffer.from(a.data[0],'base64'):null, token=a=>{const b=bytes(a);return b&&b.length>=72?b.readBigUInt64LE(64).toString():null}, mint=a=>{const b=bytes(a);return b&&b.length>=45?{supply:b.readBigUInt64LE(36).toString(),decimals:b[44],len:b.length}:null};
+          const [gp0,sv0,user0]=await Promise.all([call('getAccountInfo',[GP.toBase58(),{encoding:'base64',commitment:'confirmed'}]),call('getAccountInfo',[SOLVAULT.toBase58(),{encoding:'base64',commitment:'confirmed'}]),call('getAccountInfo',[USER.toBase58(),{encoding:'base64',commitment:'confirmed'}])]);
+          const gpb=bytes(gp0.value);console.log('GLOBAL_PARAMS_HEAD',JSON.stringify({address:GP.toBase58(),owner:gp0.value?.owner,len:gpb?.length,lamports:gp0.value?.lamports,raw:gpb?.toString('hex'),firstNumeric:[8,16,24,32,40].map(o=>({o,u64:gpb?.readBigUInt64LE(o).toString()}))},null,2));console.log('SOL_VAULT_PRE',JSON.stringify({owner:sv0.value?.owner,lamports:sv0.value?.lamports,dataLen:bytes(sv0.value)?.length}));if(user0.value?.owner!==SystemProgram.programId.toBase58())throw Error('user unavailable');
+          const sm=Keypair.generate(),um=Keypair.generate();
+          const six=await PUMP_SDK.createV2Instruction({mint:sm.publicKey,name:'a',symbol:'a',uri:'x',creator:USER,user:USER,mayhemMode:true,cashback:false});
+          const uix=await PUMP_SDK.createV2Instruction({mint:um.publicKey,name:'b',symbol:'b',uri:'y',creator:USER,user:USER,mayhemMode:true,cashback:false,quoteMint:USDC});
           const watch=[sm.publicKey,six.keys[2].pubkey,six.keys[3].pubkey,six.keys[12].pubkey,six.keys[13].pubkey,um.publicKey,uix.keys[2].pubkey,uix.keys[3].pubkey,uix.keys[12].pubkey,uix.keys[13].pubkey,uix.keys[17].pubkey,SOLVAULT];
-          const bh=(await call('getLatestBlockhash',[{commitment:'confirmed'}])).value.blockhash;
-          let rawtx,mode='same_tx';
-          try{rawtx=new Transaction({feePayer:USER,recentBlockhash:bh}).add(ComputeBudgetProgram.setComputeUnitLimit({units:1_400_000}),six,uix).serialize({requireAllSignatures:false,verifySignatures:false});console.log('TX_BYTES',rawtx.length)}catch(e){console.log('SAME_TX_SERIALIZE_FAIL',String(e));throw e}
-          let v=null,used=null;for(const u of RPCS){try{v=(await raw(u,'simulateTransaction',[rawtx.toString('base64'),{encoding:'base64',sigVerify:false,replaceRecentBlockhash:true,commitment:'confirmed',accounts:{encoding:'base64',addresses:watch.map(x=>x.toBase58())}}],3)).value;used=u;break}catch(e){console.log('SIM_FAIL',u,String(e).slice(0,180))}}
-          if(!v)throw Error('no simulation');
-          const labels=['sol_mint','sol_curve','sol_curve_base','sol_mayhem_state','sol_mayhem_vault','usdc_mint','usdc_curve','usdc_curve_base','usdc_mayhem_state','usdc_mayhem_vault','usdc_curve_quote','shared_sol_vault'];
-          const snap=(v.accounts??[]).map((a,i)=>{const b=bytes(a);return {label:labels[i],address:watch[i].toBase58(),exists:!!a,owner:a?.owner??null,lamports:a?.lamports??null,len:b?.length??null,tokenAmount:(labels[i].includes('base')||labels[i].includes('vault')||labels[i].includes('quote'))?token(a):null,mint:labels[i].includes('_mint')?mint(a):null,raw:b?.toString('hex')??null};});
-          const solState=snap[3]?.raw,usdcState=snap[8]?.raw;
-          function normalizeState(hex){if(!hex)return null;const b=Buffer.from(hex,'hex');if(b.length>=56)b.fill(0,24,56);return b.toString('hex')}
-          const logs=v.logs??[];
-          console.log('RESULT',JSON.stringify({simulationOnly:true,broadcast:false,mode,rpc:used,err:v.err,units:v.unitsConsumed,snapshot:snap,stateCompare:{sameLength:solState?.length===usdcState?.length,solState,usdcState,normalizedSol:normalizeState(solState),normalizedUsdc:normalizeState(usdcState),normalizedEqual:normalizeState(solState)===normalizeState(usdcState)},instructions:logs.filter(l=>l.includes('Instruction:')),anchor:logs.filter(l=>l.includes('AnchorError')||l.includes('Error Code:')),failed:logs.filter(l=>l.includes('failed:'))},null,2));
+          const bh=(await call('getLatestBlockhash',[{commitment:'confirmed'}])).value.blockhash;const tx=new Transaction({feePayer:USER,recentBlockhash:bh}).add(six,uix);const rawtx=tx.serialize({requireAllSignatures:false,verifySignatures:false});console.log('TX_BYTES',rawtx.length);
+          let v=null,used=null;for(const u of RPCS){try{v=(await raw(u,'simulateTransaction',[rawtx.toString('base64'),{encoding:'base64',sigVerify:false,replaceRecentBlockhash:true,commitment:'confirmed',accounts:{encoding:'base64',addresses:watch.map(x=>x.toBase58())}}],3)).value;used=u;break}catch(e){console.log('SIM_FAIL',u,String(e).slice(0,180))}}if(!v)throw Error('no sim');
+          const labels=['sol_mint','sol_curve','sol_curve_base','sol_state','sol_vault_token','usdc_mint','usdc_curve','usdc_curve_base','usdc_state','usdc_vault_token','usdc_curve_quote','shared_sol_vault'];
+          const snap=(v.accounts??[]).map((a,i)=>{const b=bytes(a);return {label:labels[i],address:watch[i].toBase58(),exists:!!a,owner:a?.owner??null,lamports:a?.lamports??null,len:b?.length??null,tokenAmount:/base|vault_token|curve_quote/.test(labels[i])?token(a):null,mint:/_mint$/.test(labels[i])?mint(a):null,raw:b?.toString('hex')??null}});
+          const s=bytes(v.accounts?.[3]),u=bytes(v.accounts?.[8]);function diff(a,b){const x=[];if(!a||!b)return x;for(let i=0;i<Math.min(a.length,b.length);i++)if(a[i]!==b[i])x.push({i,a:a[i],b:b[i]});return x}
+          const logs=v.logs??[];console.log('RESULT',JSON.stringify({simulationOnly:true,broadcast:false,rpc:used,err:v.err,units:v.unitsConsumed,snapshot:snap,stateCompare:{sameLength:s?.length===u?.length,diffs:diff(s,u),sol:s?.toString('hex'),usdc:u?.toString('hex')},instructions:logs.filter(l=>l.includes('Instruction:')),anchor:logs.filter(l=>l.includes('AnchorError')||l.includes('Error Code:')),failed:logs.filter(l=>l.includes('failed:'))},null,2));
           NODE
           node probe.mjs
