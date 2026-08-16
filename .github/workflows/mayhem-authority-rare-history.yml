@@ -1,0 +1,41 @@
+name: mayhem-authority-rare-history
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/mayhem-authority-rare-history.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  scan:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm install --no-save bs58
+      - name: Read-only authority history scan
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import crypto from 'node:crypto';
+          import bs58pkg from 'bs58'; const bs58=bs58pkg.default??bs58pkg;
+          const MAYHEM='MAyhSmzXzV1pTf7LsNkrNwkWKTo4ougAJ1PPg47MD4e';
+          const ADDRS={pump_global_authority:'FFWtrEQ4B4PKQoVuHYzZq8FabGkVatYzDpEVHsK5rrhF',mayhem_operator_candidate:'Gygj9QQby4j2jryqyqBHvLP7ctv2SaANgh4sCb69BUpA'};
+          const knownNames=['burn_tokens','sweep_fees','sweep_fees_admin','withdraw_quote_admin','withdraw_admin','reset_state','reset_sol_deployed','reset_stable_deployed','resume_trading','stop_trading','set_admin','set_authority','update_admin','buy','sell','buy_v2','sell_v2','buy_pump_swap','sell_pump_swap','initialize_mayhem_state'];
+          const namesByDisc=new Map(knownNames.map(n=>[crypto.createHash('sha256').update('global:'+n).digest().subarray(0,8).toString('hex'),n]));
+          console.log('WANTED',JSON.stringify(Object.fromEntries([...namesByDisc].map(([d,n])=>[n,d])),null,2));
+          const RPCS=['https://rpc.solanatracker.io/public','https://api.mainnet-beta.solana.com','https://solana-rpc.publicnode.com']; let id=1; const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          async function post(url,body){const r=await fetch(url,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-read-only-authority-history/1.0'},body:JSON.stringify(body)});if(!r.ok)throw Error('HTTP '+r.status);return await r.json()}
+          async function one(method,params){let last;for(const url of RPCS){try{const j=await post(url,{jsonrpc:'2.0',id:id++,method,params});if(j.error)throw Error(JSON.stringify(j.error));return j.result}catch(e){last=e;console.log('RPCFAIL',method,url,String(e).slice(0,150));await sleep(280)}}throw last}
+          async function batchTx(sigs){let last;for(const url of RPCS){try{const req=sigs.map(sig=>({jsonrpc:'2.0',id:id++,method:'getTransaction',params:[sig,{encoding:'json',commitment:'confirmed',maxSupportedTransactionVersion:0}]}));const arr=await post(url,req);if(!Array.isArray(arr))throw Error('non-array');const by=new Map(arr.map(x=>[x.id,x.result]));return req.map(x=>by.get(x.id)??null)}catch(e){last=e;console.log('BATCHFAIL',url,String(e).slice(0,150));await sleep(380)}}throw last}
+          function allMayhemIxs(tx){if(!tx)return[];const msg=tx.transaction?.message;if(!msg)return[];const flat=[...(msg.accountKeys??[]),...(tx.meta?.loadedAddresses?.writable??[]),...(tx.meta?.loadedAddresses?.readonly??[])];const out=[];const add=(ix,where)=>{if(flat[ix.programIdIndex]!==MAYHEM||!ix.data)return;let raw;try{raw=Buffer.from(bs58.decode(ix.data))}catch{return}const disc=raw.subarray(0,8).toString('hex');out.push({where,disc,name:namesByDisc.get(disc)??null,dataHex:raw.toString('hex'),accounts:(ix.accounts??[]).map(i=>flat[i])})};(msg.instructions??[]).forEach((ix,i)=>add(ix,'top:'+i));for(const g of (tx.meta?.innerInstructions??[]))for(const [i,ix] of (g.instructions??[]).entries())add(ix,'inner:'+g.index+':'+i);return out}
+          for(const [label,addr] of Object.entries(ADDRS)){
+            console.log('\n=== ADDRESS',label,addr,'===');
+            let before,rows=[];const pages=label==='pump_global_authority'?3:1;
+            for(let p=0;p<pages;p++){const opts={limit:1000,commitment:'confirmed'};if(before)opts.before=before;let r;try{r=await one('getSignaturesForAddress',[addr,opts])}catch(e){console.log('SIGPAGE_FAIL',p,String(e));break}if(!r?.length)break;console.log('SIGPAGE',p,'count',r.length,'firstSlot',r[0].slot,'lastSlot',r.at(-1).slot);rows.push(...r.filter(x=>x.err==null));before=r.at(-1).signature;await sleep(250)}
+            const counts={},matches=[];let processed=0;
+            for(let off=0;off<rows.length;off+=6){const chunk=rows.slice(off,off+6);let txs;try{txs=await batchTx(chunk.map(x=>x.signature))}catch(e){console.log('SKIP_CHUNK',off,String(e));continue}for(let j=0;j<txs.length;j++){const tx=txs[j];if(!tx)continue;processed++;for(const ix of allMayhemIxs(tx)){const key=ix.name??('unknown:'+ix.disc);counts[key]=(counts[key]??0)+1;if(ix.name && !['buy','sell','buy_v2','sell_v2','buy_pump_swap','sell_pump_swap','initialize_mayhem_state'].includes(ix.name)){matches.push({signature:chunk[j].signature,slot:tx.slot,blockTime:tx.blockTime,err:tx.meta?.err??null,...ix});console.log('RARE_MATCH',JSON.stringify(matches.at(-1),null,2))}}}if(off%120===0)console.log('PROGRESS',off,'processed',processed,'counts',JSON.stringify(counts));await sleep(120)}
+            console.log('FINAL_ADDRESS',label,JSON.stringify({signatureRows:rows.length,processed,counts,rareMatches:matches},null,2));
+          }
+          NODE
