@@ -1,0 +1,33 @@
+name: mayhem-usdc-live-inventory
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/mayhem-usdc-live-inventory.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  scan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @solana/web3.js @solana/spl-token bs58
+      - name: Read-only curve scan
+        shell: bash
+        run: |
+          cat > scan.mjs <<'NODE'
+          import bs58pkg from 'bs58';const bs58=bs58pkg.default??bs58pkg;
+          import {PublicKey} from '@solana/web3.js';
+          import {getAssociatedTokenAddressSync,TOKEN_PROGRAM_ID} from '@solana/spl-token';
+          const PROGRAM='6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P',USDC=new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');
+          const RPCS=['https://api.mainnet-beta.solana.com','https://rpc.solanatracker.io/public'];let id=1;const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          async function req(u,m,p,n=4){let e;for(let a=0;a<n;a++){try{const r=await fetch(u,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-readonly/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method:m,params:p})});if(r.status===429||r.status>=500){e=Error('HTTP '+r.status);await sleep(300+500*a);continue}const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));return j.result}catch(x){e=x;await sleep(180)}}throw e}
+          async function gpa(mayhem){const filters=[{dataSize:115},{memcmp:{offset:48,bytes:'1'}},{memcmp:{offset:81,bytes:mayhem?'2':'1'}},{memcmp:{offset:83,bytes:USDC.toBase58()}}];let e;for(const u of RPCS){try{const x=await req(u,'getProgramAccounts',[PROGRAM,{encoding:'base64',commitment:'confirmed',filters}],2);console.log('GPA_OK',mayhem,u,x.length);return x}catch(x){e=x;console.log('GPA_FAIL',mayhem,u,String(x).slice(0,200))}}throw e}
+          function parse(r){const b=Buffer.from(r.account.data[0],'base64');return {curve:r.pubkey,virtualToken:b.readBigUInt64LE(8),virtualQuote:b.readBigUInt64LE(16),realToken:b.readBigUInt64LE(24),realQuote:b.readBigUInt64LE(32),supply:b.readBigUInt64LE(40),complete:b[48],creator:bs58.encode(b.subarray(49,81)),isMayhem:b[81],isCashback:b[82],quote:bs58.encode(b.subarray(83,115))}}
+          const [may,plain]=await Promise.all([gpa(true),gpa(false)]);const mr=may.map(parse),pr=plain.map(parse);
+          async function enrich(rows){const top=rows.sort((a,b)=>a.realQuote>b.realQuote?-1:a.realQuote<b.realQuote?1:0).slice(0,20);for(let i=0;i<top.length;i+=20){const batch=top.slice(i,i+20);const atas=batch.map(x=>getAssociatedTokenAddressSync(USDC,new PublicKey(x.curve),true,TOKEN_PROGRAM_ID));let vals=null;for(const u of RPCS){try{vals=(await req(u,'getMultipleAccounts',[atas.map(x=>x.toBase58()),{encoding:'base64',commitment:'confirmed'}],3)).value;break}catch(e){console.log('GMA_FAIL',u,String(e).slice(0,150))}}for(let j=0;j<batch.length;j++){const a=vals?.[j],b=a?Buffer.from(a.data[0],'base64'):null;batch[j].quoteAta=atas[j].toBase58();batch[j].actualQuote=b&&b.length>=72?b.readBigUInt64LE(64).toString():null;batch[j].realQuote=batch[j].realQuote.toString();batch[j].realToken=batch[j].realToken.toString();batch[j].virtualQuote=batch[j].virtualQuote.toString();batch[j].virtualToken=batch[j].virtualToken.toString();batch[j].supply=batch[j].supply.toString();}}return top}
+          console.log('COUNTS',JSON.stringify({activeMayhemUsdc:mr.length,activePlainUsdc:pr.length}));console.log('TOP_MAYHEM_USDC',JSON.stringify(await enrich(mr),null,2));console.log('TOP_PLAIN_USDC',JSON.stringify(await enrich(pr),null,2));
+          NODE
+          node scan.mjs
