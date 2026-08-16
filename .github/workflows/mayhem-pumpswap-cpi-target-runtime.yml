@@ -1,0 +1,62 @@
+name: mayhem-pumpswap-cpi-target-runtime
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/mayhem-pumpswap-cpi-target-runtime.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm install --no-save @solana/web3.js bs58
+      - name: Simulation-only PumpSwap CPI target differential
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import {Connection,PublicKey,TransactionInstruction,TransactionMessage,VersionedTransaction} from '@solana/web3.js';
+          const RPCS=['https://rpc.solanatracker.io/public','https://api.mainnet-beta.solana.com','https://solana-rpc.publicnode.com'];
+          const MAYHEM=new PublicKey('MAyhSmzXzV1pTf7LsNkrNwkWKTo4ougAJ1PPg47MD4e');
+          const P_AMM='pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA';
+          const EVENT='GS4CU59F31iL7aR2Q8zVS8DRrcRnXX1yjQ66TqNVQnaR';
+          const GLOBAL='ADyA8hdefvWN2dbGGWFotbzWxrAvLW83WG6QCVXvJKqw';
+          const FEE='pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ';
+          const TOKEN='TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
+          const TOKEN22='TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb';
+          const ATA='ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL';
+          const SYSTEM='11111111111111111111111111111111';
+          const ALT_POOL='DSV2CUbhfEWRPRn9QRZWkYohRi47WEeauz8s89ekKBdN';
+          const BUY_DISC='de939d076c089151';
+          const FIXED='61qkbBm6puhZQ4omL17Ui2VE1E9Mzs3CvkWh18ZBB5JD8HyFRryNSkW667JNr19KmCPCRqfttgzvAxKNuVsFw8eL';
+          let rid=1; const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          async function rpc(method,params){let last;for(const url of RPCS){try{const r=await fetch(url,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-simulation-only/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:rid++,method,params})});if(!r.ok)throw Error('HTTP '+r.status);const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));return {url,result:j.result}}catch(e){last=e;console.log('RPCFAIL',method,url,String(e).slice(0,180));await sleep(250)}}throw last}
+          async function getRaw(sig){const {result}=await rpc('getTransaction',[sig,{encoding:'base64',commitment:'confirmed',maxSupportedTransactionVersion:0}]);if(!result)throw Error('missing tx '+sig);return {slot:result.slot,blockTime:result.blockTime,buf:Buffer.from(result.transaction[0],'base64')}}
+          async function loadAlts(vtx,conn){const out=[];for(const x of (vtx.message.addressTableLookups??[])){const r=await conn.getAddressLookupTable(x.accountKey);if(!r.value)throw Error('missing ALT '+x.accountKey.toBase58());out.push(r.value)}return out}
+          function cloneIxs(ixs){return ixs.map(ix=>new TransactionInstruction({programId:ix.programId,keys:ix.keys.map(k=>({pubkey:k.pubkey,isSigner:k.isSigner,isWritable:k.isWritable})),data:Buffer.from(ix.data)}))}
+          function targetIx(ixs){const hits=ixs.map((ix,i)=>({ix,i})).filter(x=>x.ix.programId.equals(MAYHEM)&&Buffer.from(x.ix.data).subarray(0,8).toString('hex')===BUY_DISC);if(hits.length!==1)throw Error('target count '+hits.length);return hits[0]}
+          async function sim(dec,alts,mutate,label){const ixs=cloneIxs(dec.instructions);const t=targetIx(ixs);if(mutate)mutate(t.ix);const msg=new TransactionMessage({payerKey:dec.payerKey,recentBlockhash:dec.recentBlockhash,instructions:ixs}).compileToV0Message(alts);const tx=new VersionedTransaction(msg);const b64=Buffer.from(tx.serialize()).toString('base64');const {url,result}=await rpc('simulateTransaction',[b64,{encoding:'base64',sigVerify:false,replaceRecentBlockhash:true,commitment:'processed'}]);const logs=result?.value?.logs??[];console.log('RESULT',label,JSON.stringify({rpc:url,err:result?.value?.err??null,units:result?.value?.unitsConsumed??null,returnData:result?.value?.returnData??null,interesting:logs.filter(x=>/AnchorError|Error Code|Error Number|Instruction:|failed|Program log:|Program return:/.test(x)).slice(-30)},null,2));return result?.value}
+          function replaceKey(ix,from,to){let n=0;ix.keys=ix.keys.map(k=>{if(k.pubkey.toBase58()===from){n++;return {...k,pubkey:new PublicKey(to)}}return k});console.log('MUTATE',from,'=>',to,'count',n);if(n===0)throw Error('key not present '+from)}
+          const raw=await getRaw(FIXED);console.log('SOURCE_TX',FIXED,'slot',raw.slot,'blockTime',raw.blockTime);
+          const vtx=VersionedTransaction.deserialize(raw.buf);
+          const conn=new Connection(RPCS[0],'confirmed');
+          const alts=await loadAlts(vtx,conn);
+          const dec=TransactionMessage.decompile(vtx.message,{addressLookupTableAccounts:alts});
+          const t=targetIx(dec.instructions);
+          console.log('TARGET_ACCOUNT_MAP',JSON.stringify(t.ix.keys.map((k,pos)=>({pos,pubkey:k.pubkey.toBase58(),signer:k.isSigner,writable:k.isWritable})),null,2));
+          const control=await sim(dec,alts,null,'control_replay');
+          console.log('CONTROL_OK',control?.err==null);
+          const variants=[
+            ['pump_amm_program_to_system',ix=>replaceKey(ix,P_AMM,SYSTEM)],
+            ['pumpswap_event_authority_to_system',ix=>replaceKey(ix,EVENT,SYSTEM)],
+            ['pumpswap_global_config_to_pool',ix=>replaceKey(ix,GLOBAL,ALT_POOL)],
+            ['fee_program_to_system',ix=>replaceKey(ix,FEE,SYSTEM)],
+            ['token_program_to_system',ix=>replaceKey(ix,TOKEN,SYSTEM)],
+            ['token2022_program_to_system',ix=>replaceKey(ix,TOKEN22,SYSTEM)],
+            ['ata_program_to_system',ix=>replaceKey(ix,ATA,SYSTEM)]
+          ];
+          for(const [label,fn] of variants){try{await sim(dec,alts,fn,label)}catch(e){console.log('VARIANT_BUILD_FAIL',label,String(e))}}
+          NODE
