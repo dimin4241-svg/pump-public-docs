@@ -1,0 +1,41 @@
+name: mayhem-creator-vault-balance-scan
+on:
+  push:
+    paths:
+      - '.github/workflows/mayhem-creator-vault-balance-scan.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  scan:
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-swap-sdk@1.19.0 @solana/web3.js @solana/spl-token bs58
+      - name: Read-only creator vault balance scan
+        env:
+          SHARD: ${{ matrix.shard }}
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import bs58pkg from 'bs58';const bs58=bs58pkg.default??bs58pkg;
+          import {PublicKey} from '@solana/web3.js';
+          import {AccountLayout,ASSOCIATED_TOKEN_PROGRAM_ID,getAssociatedTokenAddressSync} from '@solana/spl-token';
+          import {coinCreatorVaultAuthorityPda,coinCreatorVaultAtaPda} from '@pump-fun/pump-swap-sdk';
+          const shard=Number(process.env.SHARD),START=shard*5000,END=START+5000,PROGRAM='pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA',SHARE_PROG=new PublicKey('pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ');
+          const RPCS=['https://api.mainnet-beta.solana.com','https://rpc.solanatracker.io/public','https://solana-rpc.publicnode.com'];let id=1;const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          async function one(url,method,params,n=3){let last;for(let a=0;a<n;a++){try{const r=await fetch(url,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-readonly-creator-vault-scan/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method,params})});if(r.status===429||r.status>=500){last=Error('HTTP '+r.status);await sleep(450+650*a);continue}if(!r.ok)throw Error('HTTP '+r.status);const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));return j.result}catch(e){last=e;await sleep(350+500*a)}}throw last}
+          async function rpc(method,params){let last;for(const u of RPCS){try{return await one(u,method,params,3)}catch(e){last=e;console.log('RPC_FAIL',method,u,String(e).slice(0,160))}}throw last}
+          const rows=await rpc('getProgramAccounts',[PROGRAM,{encoding:'base64',commitment:'confirmed',filters:[{dataSize:301},{memcmp:{offset:243,bytes:'2'}}],dataSlice:{offset:0,length:245}}]);const slice=rows.slice(START,Math.min(END,rows.length));console.log('META',JSON.stringify({shard,totalMayhem:rows.length,start:START,rows:slice.length}));
+          const pools=slice.map(r=>{const b=Buffer.from(r.account.data[0],'base64');return {pool:r.pubkey,creator:bs58.encode(b.subarray(11,43)),baseMint:bs58.encode(b.subarray(43,75)),quoteMint:bs58.encode(b.subarray(75,107)),poolQuote:bs58.encode(b.subarray(171,203)),coinCreator:bs58.encode(b.subarray(211,243)),isCashback:b[244]}});
+          const uniqQuotes=[...new Set(pools.map(x=>x.quoteMint))];const quoteProgram=new Map();for(let off=0;off<uniqQuotes.length;off+=100){const batch=uniqQuotes.slice(off,off+100),vals=(await rpc('getMultipleAccounts',[batch,{encoding:'base64',commitment:'confirmed'}])).value;for(let i=0;i<batch.length;i++)if(vals[i])quoteProgram.set(batch[i],vals[i].owner);await sleep(120)}console.log('QUOTE_MINTS',JSON.stringify(Object.fromEntries([...quoteProgram]),null,2));
+          const entries=[];for(const x of pools){const qp=quoteProgram.get(x.quoteMint);if(!qp)continue;const coin=new PublicKey(x.coinCreator),qm=new PublicKey(x.quoteMint),tp=new PublicKey(qp),auth=coinCreatorVaultAuthorityPda(coin),ata=coinCreatorVaultAtaPda(auth,qm,tp);const [sharing]=PublicKey.findProgramAddressSync([Buffer.from('sharing-config'),new PublicKey(x.baseMint).toBuffer()],SHARE_PROG);entries.push({...x,quoteProgram:qp,vaultAuthority:auth.toBase58(),vaultAta:ata.toBase58(),sharing:sharing.toBase58(),migrated:x.coinCreator===sharing.toBase58()})}
+          const positive=[];for(let off=0;off<entries.length;off+=100){const batch=entries.slice(off,off+100);let vals;try{vals=(await rpc('getMultipleAccounts',[batch.map(x=>x.vaultAta),{encoding:'base64',commitment:'confirmed'}])).value}catch(e){console.log('SKIP_VAULT_BATCH',off,String(e).slice(0,180));continue}for(let i=0;i<batch.length;i++){const a=vals[i];if(!a?.data?.[0])continue;const d=Buffer.from(a.data[0],'base64');if(d.length<165)continue;let amount='0';try{amount=AccountLayout.decode(d).amount.toString()}catch{}if(BigInt(amount)>0n)positive.push({...batch[i],vaultAmount:amount,vaultOwner:a.owner})}if(off%1000===0)console.log('PROGRESS',off,'positive',positive.length);await sleep(160)}
+          positive.sort((a,b)=>BigInt(a.vaultAmount)>BigInt(b.vaultAmount)?-1:BigInt(a.vaultAmount)<BigInt(b.vaultAmount)?1:0);const nonMigrated=positive.filter(x=>!x.migrated),migrated=positive.filter(x=>x.migrated);console.log('SUMMARY',JSON.stringify({shard,scanned:entries.length,positive:positive.length,positiveNonMigrated:nonMigrated.length,positiveMigrated:migrated.length},null,2));console.log('TOP_NONMIGRATED',JSON.stringify(nonMigrated.slice(0,50),null,2));console.log('TOP_MIGRATED',JSON.stringify(migrated.slice(0,20),null,2));for(const x of nonMigrated.slice(0,10))console.log('TARGET_HIT',JSON.stringify(x));
+          NODE
