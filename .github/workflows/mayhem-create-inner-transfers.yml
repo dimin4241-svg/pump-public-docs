@@ -1,0 +1,29 @@
+name: mayhem-create-inner-transfers
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/mayhem-create-inner-transfers.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-sdk@1.36.0 @solana/web3.js bs58
+      - name: Simulation-only inner transfer trace
+        shell: bash
+        run: |
+          cat > x.mjs <<'NODE'
+          import {PublicKey,Keypair,Transaction,SystemProgram} from '@solana/web3.js';import bs58pkg from 'bs58';const bs58=bs58pkg.default??bs58pkg;import {PUMP_SDK,getSolVaultPda} from '@pump-fun/pump-sdk';
+          const USER=new PublicKey('39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg'),USDC=new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'),SV=getSolVaultPda();const RPCS=['https://rpc.solanatracker.io/public','https://api.mainnet-beta.solana.com'];let id=1;const sl=m=>new Promise(r=>setTimeout(r,m));
+          async function q(u,m,p,n=4){let e;for(let i=0;i<n;i++){try{let r=await fetch(u,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method:m,params:p})});if(r.status===429||r.status>=500){await sl(300+400*i);continue}let j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));return j.result}catch(x){e=x;await sl(150)}}throw e}async function call(m,p){let e;for(const u of RPCS)try{return await q(u,m,p)}catch(x){e=x}throw e}
+          const sm=Keypair.generate(),um=Keypair.generate();const a=await PUMP_SDK.createV2Instruction({mint:sm.publicKey,name:'a',symbol:'a',uri:'x',creator:USER,user:USER,mayhemMode:true,cashback:false});const b=await PUMP_SDK.createV2Instruction({mint:um.publicKey,name:'b',symbol:'b',uri:'y',creator:USER,user:USER,mayhemMode:true,cashback:false,quoteMint:USDC});const bh=(await call('getLatestBlockhash',[{commitment:'confirmed'}])).value.blockhash;const tx=new Transaction({feePayer:USER,recentBlockhash:bh}).add(a,b);const keys=tx.compileMessage().accountKeys.map(x=>x.toBase58());const raw=tx.serialize({requireAllSignatures:false,verifySignatures:false});console.log('META',JSON.stringify({simulationOnly:true,broadcast:false,bytes:raw.length,solVault:SV.toBase58(),outer:[{i:0,domain:'SOL'},{i:1,domain:'USDC'}]}));
+          let v=null,used=null;for(const u of RPCS)try{v=(await q(u,'simulateTransaction',[raw.toString('base64'),{encoding:'base64',sigVerify:false,replaceRecentBlockhash:true,commitment:'confirmed',innerInstructions:true}],3)).value,used=u;break}catch(e){console.log('SIM_FAIL',u,String(e).slice(0,150))}if(!v)throw Error('no sim');
+          const rows=[];for(const g of v.innerInstructions??[])for(const ix of g.instructions??[]){const pid=keys[ix.programIdIndex];let d;try{d=Buffer.from(bs58.decode(ix.data??''))}catch{continue}if(pid===SystemProgram.programId.toBase58()&&d.length>=12&&d.readUInt32LE(0)===2){rows.push({outerIndex:g.index,domain:g.index===0?'SOL':g.index===1?'USDC':'other',from:keys[ix.accounts[0]],to:keys[ix.accounts[1]],lamports:d.readBigUInt64LE(4).toString(),toIsSharedSolVault:keys[ix.accounts[1]]===SV.toBase58()})}}
+          console.log('SYSTEM_TRANSFERS',JSON.stringify(rows,null,2));console.log('TO_SHARED_VAULT',JSON.stringify(rows.filter(x=>x.toIsSharedSolVault),null,2));console.log('RESULT',JSON.stringify({rpc:used,err:v.err,units:v.unitsConsumed,anchor:(v.logs??[]).filter(x=>/AnchorError|Error Code/.test(x)),failed:(v.logs??[]).filter(x=>x.includes('failed:'))},null,2));
+          NODE
+          node x.mjs
