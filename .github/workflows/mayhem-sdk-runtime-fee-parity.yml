@@ -1,0 +1,41 @@
+name: mayhem-sdk-runtime-fee-parity
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/mayhem-sdk-runtime-fee-parity.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  parity:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-swap-sdk@1.19.0 @solana/web3.js
+      - name: Static SDK fee semantics
+        shell: bash
+        run: |
+          echo '=== fee-related source ==='
+          grep -RniE 'poolFeeConfig|computeFeesBps|lpFeeBasisPointsV2|protocolFeeBasisPointsV2|coinCreatorFeeBasisPointsV2|isMayhemMode|mayhem.*fee' node_modules/@pump-fun/pump-swap-sdk/src node_modules/@pump-fun/pump-swap-sdk/dist --exclude='*.map' 2>/dev/null | head -500 || true
+          echo '=== fees.ts ==='
+          find node_modules/@pump-fun/pump-swap-sdk -type f \( -name 'fees.ts' -o -name 'fees.js' \) -print -exec sed -n '1,280p' {} \; 2>/dev/null || true
+      - name: Read-only live GlobalConfig decode and SDK method inventory
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import {Connection,PublicKey} from '@solana/web3.js';
+          import * as sdk from '@pump-fun/pump-swap-sdk';
+          const RPC='https://api.mainnet-beta.solana.com', connection=new Connection(RPC,'confirmed');
+          console.log('EXPORTS',Object.keys(sdk).sort());
+          for(const n of ['OnlinePumpAmmSdk','PumpAmmAdminSdk','PumpAmmInternalSdk','PumpAmmSdk']){const C=sdk[n];if(C?.prototype)console.log('METHODS',n,Object.getOwnPropertyNames(C.prototype))}
+          const GC=new PublicKey('ADyA8hdefvWN2dbGGWFotbzWxrAvLW83WG6QCVXvJKqw');
+          const ai=await connection.getAccountInfo(GC,'confirmed');console.log('GLOBAL_META',{owner:ai?.owner.toBase58(),len:ai?.data.length,lamports:ai?.lamports});
+          const safe=v=>typeof v==='bigint'?v.toString():v?.toBase58?.()??v?.toString?.()??v;
+          let decoded=null;
+          const constructors=[['OnlinePumpAmmSdk',[connection]],['PumpAmmAdminSdk',[connection]],['PumpAmmInternalSdk',[connection]],['PumpAmmSdk',[connection]]];
+          for(const [name,args] of constructors){const C=sdk[name];if(!C)continue;let o;try{o=new C(...args)}catch(e){console.log('CTOR_FAIL',name,String(e));continue}console.log('INSTANCE_KEYS',name,Object.keys(o));for(const method of ['fetchGlobalConfigAccount','fetchGlobalConfig','getGlobalConfigAccount','globalConfig']){if(typeof o[method]!=='function')continue;try{const x=await o[method]();console.log('CALL_OK',name,method,Object.keys(x??{}));decoded=x;break}catch(e){console.log('CALL_FAIL',name,method,String(e).slice(0,300))}}if(decoded)break}
+          if(decoded){const out={};for(const [k,v] of Object.entries(decoded)){if(/fee|mayhem|buyback|reserved|boost|cashback/i.test(k)){if(Array.isArray(v))out[k]=v.map(safe);else out[k]=safe(v)}}console.log('GLOBAL_RELEVANT_FIELDS',JSON.stringify(out,null,2));console.log('GLOBAL_ALL_KEYS',Object.keys(decoded));}
+          else console.log('NO_SDK_DECODE');
+          const runtimeB64='AgAAAAAAAABdAAAAAAAAAB4AAAAAAAAA';const b=Buffer.from(runtimeB64,'base64');console.log('RUNTIME_GET_FEES',Array.from({length:3},(_,i)=>b.readBigUInt64LE(i*8).toString()));
+          NODE
