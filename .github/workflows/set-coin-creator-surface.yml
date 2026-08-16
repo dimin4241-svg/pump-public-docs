@@ -1,0 +1,30 @@
+name: set-coin-creator-surface
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/set-coin-creator-surface.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: audit/boost-runtime-probe-20260815}
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-swap-sdk@1.19.0
+      - shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';const j=JSON.parse(fs.readFileSync('node_modules/@pump-fun/pump-swap-sdk/src/idl/pump_amm.json','utf8'));
+          for(const n of ['set_coin_creator','set_coin_creator_authority','update_coin_creator']){const x=j.instructions.find(i=>i.name===n);if(x)console.log('INSTR',n,JSON.stringify(x,null,2));}
+          for(const e of j.events??[]){if(JSON.stringify(e).toLowerCase().includes('coin_creator'))console.log('EVENT',e.name,JSON.stringify(e,null,2));}
+          for(const t of j.types??[]){if(JSON.stringify(t).toLowerCase().includes('coin_creator')||/metadata/i.test(t.name))console.log('TYPE',t.name,JSON.stringify(t,null,2));}
+          NODE
+          echo '=== SDK references ==='
+          grep -Rni -B15 -A55 -E 'setCoinCreator|set_coin_creator|coinCreator' node_modules/@pump-fun/pump-swap-sdk/src/sdk node_modules/@pump-fun/pump-swap-sdk/src 2>/dev/null | head -n 1600 || true
+          echo '=== docs references ==='
+          grep -Rni -B15 -A55 -E 'set_coin_creator|coin creator|coin_creator' docs idl 2>/dev/null | head -n 1400 || true
