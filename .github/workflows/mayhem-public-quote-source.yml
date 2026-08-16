@@ -1,0 +1,60 @@
+name: mayhem-public-quote-source
+on:
+  push:
+    paths:
+      - '.github/workflows/mayhem-public-quote-source.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm install --no-save @pump-fun/pump-swap-sdk@1.19.0 @solana/web3.js @solana/spl-token bn.js
+      - name: Inspect exact public quote/build path
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '=== onlinePumpAmm swap state source ==='
+          grep -nE 'swapSolanaState\(|swapSolanaStateNoPool\(|fetchPool\(|fetchFeeConfigAccount\(' node_modules/@pump-fun/pump-swap-sdk/src/sdk/onlinePumpAmm.ts || true
+          sed -n '1,260p' node_modules/@pump-fun/pump-swap-sdk/src/sdk/onlinePumpAmm.ts
+          echo '=== offline quote method locations ==='
+          grep -nE 'buyQuoteInput\(|buyBaseInput\(|sellQuoteInput\(|sellBaseInput\(|buyInstructions\(|swapSolanaState' node_modules/@pump-fun/pump-swap-sdk/src/sdk/offlinePumpAmm.ts || true
+          echo '=== buy.ts ==='
+          sed -n '1,260p' node_modules/@pump-fun/pump-swap-sdk/src/sdk/buy.ts
+          echo '=== sell.ts ==='
+          sed -n '1,300p' node_modules/@pump-fun/pump-swap-sdk/src/sdk/sell.ts
+          echo '=== offline relevant chunks ==='
+          sed -n '760,1180p' node_modules/@pump-fun/pump-swap-sdk/src/sdk/offlinePumpAmm.ts
+      - name: Runtime method signatures and live state keys
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import {Connection,PublicKey} from '@solana/web3.js';
+          import {OnlinePumpAmmSdk,PumpAmmSdk} from '@pump-fun/pump-swap-sdk';
+          const c=new Connection('https://api.mainnet-beta.solana.com','confirmed');
+          const online=new OnlinePumpAmmSdk(c);
+          for(const [obj,name] of [[online,'OnlinePumpAmmSdk'],[PumpAmmSdk.prototype,'PumpAmmSdk.prototype']]){
+            for(const m of ['swapSolanaState','swapSolanaStateNoPool','buyQuoteInput','buyBaseInput','buyInstructions','buyInstructionsNoPool','sellQuoteInput','sellBaseInput']){
+              if(typeof obj[m]==='function'){
+                console.log('\n=== FUNCTION',name,m,'length',obj[m].length,'===');
+                console.log(String(obj[m]).slice(0,12000));
+              }
+            }
+          }
+          const poolPk=new PublicKey('DSV2CUbhfEWRPRn9QRZWkYohRi47WEeauz8s89ekKBdN');
+          const pool=await online.fetchPool(poolPk);
+          console.log('\nLIVE_POOL_KEYS',Object.keys(pool));
+          console.log('LIVE_POOL',JSON.stringify(Object.fromEntries(Object.entries(pool).map(([k,v])=>[k,v?.toBase58?.()??v?.toString?.()??v])),null,2));
+          for(const args of [[poolPk],[poolPk,pool],[pool]]){
+            try{
+              const x=await online.swapSolanaState(...args);
+              const safe=v=>{if(v==null)return v;if(v?.toBase58)return v.toBase58();if(v?.toString && typeof v!=='object')return v.toString();if(Array.isArray(v))return v.map(safe);if(typeof v==='object'){const o={};for(const [k,z] of Object.entries(v))o[k]=safe(z);return o}return v};
+              console.log('SWAP_STATE_OK args',args.length,JSON.stringify(safe(x),null,2));
+              break;
+            }catch(e){console.log('SWAP_STATE_FAIL args',args.length,String(e).slice(0,1000));}
+          }
+          NODE
