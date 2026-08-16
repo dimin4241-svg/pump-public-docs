@@ -1,0 +1,29 @@
+name: mayhem-migration-source-focus
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/mayhem-migration-source-focus.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-sdk@1.36.0
+      - name: Focus migration and Mayhem references
+        shell: bash
+        run: |
+          echo '=== SDK migrate context ==='
+          grep -nE 'migrateV2|migrate_v2|mayhem|Mayhem' node_modules/@pump-fun/pump-sdk/src/sdk.ts | tail -120
+          echo '=== migrate method body ==='
+          L=$(grep -n 'migrateV2Instruction' node_modules/@pump-fun/pump-sdk/src/sdk.ts | head -1 | cut -d: -f1); if [ -n "$L" ]; then A=$((L-40)); B=$((L+260)); sed -n "${A},${B}p" node_modules/@pump-fun/pump-sdk/src/sdk.ts; fi
+          echo '=== all source Mayhem references ==='
+          grep -RniE 'mayhem|MAYHEM' node_modules/@pump-fun/pump-sdk/src --exclude='*.json' | head -600
+          echo '=== IDL migrate_v2 ==='
+          node --input-type=module <<'NODE'
+          import fs from 'fs';const j=JSON.parse(fs.readFileSync('node_modules/@pump-fun/pump-sdk/src/idl/pump.json','utf8'));for(const n of ['migrate_v2','create_v2','buy_v2','sell_v2','toggle_mayhem_mode','set_mayhem_virtual_params']){const x=j.instructions.find(i=>i.name===n);console.log('\nINSTRUCTION',n,JSON.stringify(x,null,2))}
+          NODE
