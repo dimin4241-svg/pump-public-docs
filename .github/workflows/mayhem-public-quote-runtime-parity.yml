@@ -1,0 +1,69 @@
+name: mayhem-public-quote-runtime-parity
+on:
+  push:
+    paths:
+      - '.github/workflows/mayhem-public-quote-runtime-parity.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  parity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm install --no-save @pump-fun/pump-swap-sdk@1.19.0 @solana/web3.js @solana/spl-token bn.js
+      - name: Exact public SDK quote/build plus simulation-only runtime differential
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import {Connection,PublicKey,TransactionMessage,VersionedTransaction} from '@solana/web3.js';
+          import BN from 'bn.js';
+          import {OnlinePumpAmmSdk,PUMP_AMM_SDK,PUMP_AMM_PROGRAM_ID,PUMP_FEE_PROGRAM_ID} from '@pump-fun/pump-swap-sdk';
+          import {computeFeesBps} from './node_modules/@pump-fun/pump-swap-sdk/dist/esm/sdk/fees.js';
+          import {buyQuoteInput as lowBuyQuoteInput,buyBaseInput as lowBuyBaseInput} from './node_modules/@pump-fun/pump-swap-sdk/dist/esm/sdk/buy.js';
+          import {sellBaseInput as lowSellBaseInput} from './node_modules/@pump-fun/pump-swap-sdk/dist/esm/sdk/sell.js';
+
+          const RPC='https://api.mainnet-beta.solana.com';
+          const connection=new Connection(RPC,'confirmed');
+          const online=new OnlinePumpAmmSdk(connection);
+          const USER=new PublicKey('Gygj9QQby4j2jryqyqBHvLP7ctv2SaANgh4sCb69BUpA');
+          const POOLS=[
+            ['known_fee_probe','3EUib8zfvYmJR5bWBXQFA9tm73NiRNcaFAZB3dGv2p8N'],
+            ['candidate_dsv2','DSV2CUbhfEWRPRn9QRZWkYohRi47WEeauz8s89ekKBdN']
+          ];
+          const safe=v=>{if(v==null)return v;if(BN.isBN(v))return v.toString();if(typeof v==='bigint')return v.toString();if(v?.toBase58)return v.toBase58();if(Array.isArray(v))return v.map(safe);if(typeof v==='object'){const o={};for(const [k,z] of Object.entries(v))o[k]=safe(z);return o}return v};
+          const feeTriple=f=>({lpFeeBps:String(f.lpFeeBps),protocolFeeBps:String(f.protocolFeeBps),creatorFeeBps:String(f.creatorFeeBps)});
+          function calcFees(state,creator){return computeFeesBps({globalConfig:state.globalConfig,feeConfig:state.feeConfig,creator,baseMintSupply:new BN(state.baseMintAccount.supply.toString()),baseMint:state.baseMint,baseReserve:state.poolBaseAmount,quoteReserve:state.poolQuoteAmount.add(state.pool.virtualQuoteReserves??new BN(0)),tradeSize:new BN('1000000')})}
+          function lowQuote(state,quote,slippage,creatorOverride=null){const p=state.pool;return lowBuyQuoteInput({quote,slippage,baseReserve:state.poolBaseAmount,quoteReserve:state.poolQuoteAmount,virtualQuoteReserves:p.virtualQuoteReserves,globalConfig:state.globalConfig,baseMintAccount:state.baseMintAccount,baseMint:state.baseMint,coinCreator:p.coinCreator,creator:creatorOverride??p.creator,feeConfig:state.feeConfig})}
+          function lowBuyBase(state,base,slippage,creatorOverride=null){const p=state.pool;return lowBuyBaseInput({base,slippage,baseReserve:state.poolBaseAmount,quoteReserve:state.poolQuoteAmount,virtualQuoteReserves:p.virtualQuoteReserves,globalConfig:state.globalConfig,baseMintAccount:state.baseMintAccount,baseMint:state.baseMint,coinCreator:p.coinCreator,creator:creatorOverride??p.creator,feeConfig:state.feeConfig})}
+          function lowSell(state,base,slippage,creatorOverride=null){const p=state.pool;return lowSellBaseInput({base,slippage,baseReserve:state.poolBaseAmount,quoteReserve:state.poolQuoteAmount,virtualQuoteReserves:p.virtualQuoteReserves,globalConfig:state.globalConfig,baseMintAccount:state.baseMintAccount,baseMint:state.baseMint,coinCreator:p.coinCreator,creator:creatorOverride??p.creator,feeConfig:state.feeConfig})}
+          function decodeBuyIx(ix){const b=Buffer.from(ix.data);if(b.length<24)return {len:b.length,hex:b.toString('hex')};return {len:b.length,disc:b.subarray(0,8).toString('hex'),baseOut:b.readBigUInt64LE(8).toString(),maxQuoteIn:b.readBigUInt64LE(16).toString(),tail:b.subarray(24).toString('hex')};}
+          function parseFeeReturns(logs){const out=[];for(const l of logs??[]){const m=l.match(/^Program return: ([1-9A-HJ-NP-Za-km-z]+) ([A-Za-z0-9+/=]+)$/);if(!m)continue;if(m[1]!==PUMP_FEE_PROGRAM_ID.toBase58())continue;const b=Buffer.from(m[2],'base64');if(b.length>=24)out.push({program:m[1],b64:m[2],fees:[0,1,2].map(i=>b.readBigUInt64LE(i*8).toString())});else out.push({program:m[1],b64:m[2],len:b.length});}return out}
+          async function simulate(label,ixs){const {blockhash}=await connection.getLatestBlockhash('processed');const msg=new TransactionMessage({payerKey:USER,recentBlockhash:blockhash,instructions:ixs}).compileToV0Message();const tx=new VersionedTransaction(msg);const sim=await connection.simulateTransaction(tx,{sigVerify:false,replaceRecentBlockhash:true,commitment:'processed'});const v=sim.value;console.log('SIM_RESULT',label,JSON.stringify({err:v.err,units:v.unitsConsumed,feeReturns:parseFeeReturns(v.logs),interesting:(v.logs??[]).filter(x=>/Instruction: (Buy|GetFees)|Program return: pfee|AnchorError|Error Code|failed|success/i.test(x)).slice(-80)},null,2));return v}
+
+          for(const [label,poolStr] of POOLS){
+            console.log('\n================',label,poolStr,'================');
+            const poolPk=new PublicKey(poolStr);
+            let state;
+            try{state=await online.swapSolanaState(poolPk,USER)}catch(e){console.log('STATE_FAIL',String(e));continue}
+            console.log('STATE',JSON.stringify({pool:safe(state.pool),poolBaseAmount:state.poolBaseAmount.toString(),poolQuoteAmount:state.poolQuoteAmount.toString(),userBaseExists:!!state.userBaseAccountInfo,userQuoteExists:!!state.userQuoteAccountInfo,userBase:state.userBaseTokenAccount.toBase58(),userQuote:state.userQuoteTokenAccount.toBase58(),baseSupply:state.baseMintAccount.supply.toString()},null,2));
+            const fCreator=calcFees(state,state.pool.creator), fCoinCreator=calcFees(state,state.pool.coinCreator);
+            console.log('FEE_CLASSIFICATION',JSON.stringify({usingPoolCreator:feeTriple(fCreator),usingCoinCreator:feeTriple(fCoinCreator)},null,2));
+            const quote=new BN('1000000');
+            const lowCreator=lowQuote(state,quote,0,state.pool.creator), lowCoin=lowQuote(state,quote,0,state.pool.coinCreator);
+            console.log('LOW_BUY_QUOTE',JSON.stringify({poolCreator:safe(lowCreator),coinCreator:safe(lowCoin)},null,2));
+            const sellBase=new BN('1000000');
+            try{console.log('LOW_SELL_BASE',JSON.stringify({poolCreator:safe(lowSell(state,sellBase,0,state.pool.creator)),coinCreator:safe(lowSell(state,sellBase,0,state.pool.coinCreator))},null,2));}catch(e){console.log('LOW_SELL_FAIL',String(e))}
+            let ixs;
+            try{ixs=await PUMP_AMM_SDK.buyQuoteInput(state,quote,0)}catch(e){console.log('PUBLIC_BUILD_FAIL',String(e));continue}
+            const pumpIxs=ixs.filter(ix=>ix.programId.equals(PUMP_AMM_PROGRAM_ID));
+            console.log('PUBLIC_BUILD',JSON.stringify({ixCount:ixs.length,pumpIxCount:pumpIxs.length,pumpIxs:pumpIxs.map(decodeBuyIx),matchesCreatorPath:pumpIxs.some(ix=>{const d=decodeBuyIx(ix);return d.baseOut===lowCreator.base.toString()&&d.maxQuoteIn===lowCreator.maxQuote.toString()}),matchesCoinCreatorPath:pumpIxs.some(ix=>{const d=decodeBuyIx(ix);return d.baseOut===lowCoin.base.toString()&&d.maxQuoteIn===lowCoin.maxQuote.toString()})},null,2));
+            await simulate(label+'_public_buy_quote_1unit',ixs);
+            // Also build exact-base buy from same public state so runtime fee differences cannot hide behind quote-input inversion.
+            const base=new BN('1000000');
+            const lowBaseCreator=lowBuyBase(state,base,0,state.pool.creator), lowBaseCoin=lowBuyBase(state,base,0,state.pool.coinCreator);
+            let ixs2;try{ixs2=await PUMP_AMM_SDK.buyBaseInput(state,base,0);const p2=ixs2.filter(ix=>ix.programId.equals(PUMP_AMM_PROGRAM_ID));console.log('PUBLIC_BUILD_BASE',JSON.stringify({lowCreator:safe(lowBaseCreator),lowCoin:safe(lowBaseCoin),pumpIxs:p2.map(decodeBuyIx),matchesCreatorPath:p2.some(ix=>decodeBuyIx(ix).maxQuoteIn===lowBaseCreator.maxQuote.toString()),matchesCoinCreatorPath:p2.some(ix=>decodeBuyIx(ix).maxQuoteIn===lowBaseCoin.maxQuote.toString())},null,2));await simulate(label+'_public_buy_base',ixs2)}catch(e){console.log('PUBLIC_BASE_FAIL',String(e))}
+          }
+          NODE
