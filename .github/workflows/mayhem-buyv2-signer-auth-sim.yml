@@ -1,0 +1,41 @@
+name: mayhem-buyv2-signer-auth-sim
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/mayhem-buyv2-signer-auth-sim.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  simulate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @solana/web3.js bs58
+      - name: Simulation-only signer substitution differential
+        shell: bash
+        run: |
+          cat > x.mjs <<'NODE'
+          import bs58pkg from 'bs58';const bs58=bs58pkg.default??bs58pkg;
+          import {PublicKey,Transaction,TransactionInstruction} from '@solana/web3.js';
+          const SIG='2YVbGh94B3tnxEN1DDmqvNPc3hoSEqFELovwMCy2Yxkc7SRtT5x14iQfagHxasTFu1nS6VjuoBMDwRSr1oLJikU1';
+          const MAY='MAyhSmzXzV1pTf7LsNkrNwkWKTo4ougAJ1PPg47MD4e';
+          const ALT1=new PublicKey('39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg');
+          const ALT2=new PublicKey('62qc6NSq3YCkhFsDcSCgXG7YBbiTzYF4fEVNYTn5dTci');
+          const RPCS=['https://rpc.solanatracker.io/public','https://api.mainnet-beta.solana.com','https://solana-rpc.publicnode.com'];let id=1;const sl=m=>new Promise(r=>setTimeout(r,m));
+          async function q(u,m,p,n=4){let e;for(let i=0;i<n;i++){try{const r=await fetch(u,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-simulation-only/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method:m,params:p})});if(r.status===429||r.status>=500){e=Error('HTTP '+r.status);await sl(250+400*i);continue}const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));return j.result}catch(x){e=x;await sl(150)}}throw e}
+          async function call(m,p){let e;for(const u of RPCS){try{return await q(u,m,p)}catch(x){e=x;console.log('RPC_FAIL',m,u,String(x).slice(0,150))}}throw e}
+          const t=await call('getTransaction',[SIG,{encoding:'json',maxSupportedTransactionVersion:0,commitment:'confirmed'}]);if(!t)throw Error('original tx unavailable');
+          const key=x=>typeof x==='string'?x:x?.pubkey??String(x);const stat=(t.transaction.message.accountKeys??[]).map(key),loaded=t.meta?.loadedAddresses??{},all=[...stat,...(loaded.writable??[]).map(key),...(loaded.readonly??[]).map(key)];const h=t.transaction.message.header,nreq=h.numRequiredSignatures,nros=h.numReadonlySignedAccounts,nrou=h.numReadonlyUnsignedAccounts;
+          function fl(i){if(i<stat.length){const signer=i<nreq;const writable=signer?i<nreq-nros:(i-nreq)<(stat.length-nreq-nrou);return {isSigner:signer,isWritable:writable}}const li=i-stat.length;return {isSigner:false,isWritable:li<(loaded.writable??[]).length}}
+          function dec(ix){let data=Buffer.alloc(0);try{data=Buffer.from(bs58.decode(ix.data??''))}catch{}return {program:all[ix.programIdIndex],data,idx:ix.accounts??[]}}
+          const outer=(t.transaction.message.instructions??[]).map(dec);const src=outer.find(x=>x.program===MAY&&x.data.subarray(0,8).toString('hex')==='b817ee6167c5d33d');if(!src)throw Error('BuyV2 missing');
+          const original0=new PublicKey(all[src.idx[0]]);const baseKeys=src.idx.map(i=>({pubkey:new PublicKey(all[i]),...fl(i)}));
+          console.log('SOURCE',JSON.stringify({slot:t.slot,original0:original0.toBase58(),data:src.data.toString('hex'),keyCount:baseKeys.length,signerMetas:baseKeys.map((k,i)=>k.isSigner?{i,pk:k.pubkey.toBase58()}:null).filter(Boolean)},null,2));
+          const watch=[baseKeys[2].pubkey,baseKeys[6].pubkey,baseKeys[7].pubkey,baseKeys[13].pubkey,baseKeys[14].pubkey,baseKeys[17].pubkey];
+          async function sim(label,who){const keys=baseKeys.map((k,i)=>i===0?{pubkey:who,isSigner:true,isWritable:k.isWritable}:k);const ix=new TransactionInstruction({programId:new PublicKey(MAY),keys,data:Buffer.from(src.data)});const bh=(await call('getLatestBlockhash',[{commitment:'confirmed'}])).value.blockhash;const tx=new Transaction({feePayer:who,recentBlockhash:bh}).add(ix);let bytes;try{bytes=tx.serialize({requireAllSignatures:false,verifySignatures:false})}catch(e){console.log('SERIALIZE',label,String(e));return {serializeError:String(e)}}let v=null,used=null;for(const u of RPCS){try{v=(await q(u,'simulateTransaction',[bytes.toString('base64'),{encoding:'base64',sigVerify:false,replaceRecentBlockhash:true,commitment:'confirmed',accounts:{encoding:'base64',addresses:watch.map(x=>x.toBase58())}}],3)).value;used=u;break}catch(e){console.log('SIMFAIL',label,u,String(e).slice(0,180))}}if(!v)return {noSim:true};const logs=v.logs??[];const acc=(v.accounts??[]).map((a,i)=>({address:watch[i].toBase58(),exists:!!a,owner:a?.owner??null,lamports:a?.lamports??null,dataLen:a?Buffer.from(a.data[0],'base64').length:null}));const row={label,who:who.toBase58(),rpc:used,bytes:bytes.length,err:v.err,units:v.unitsConsumed,accounts:acc,instructions:logs.filter(x=>x.includes('Instruction:')),anchor:logs.filter(x=>/AnchorError|Error Code|Error Number/.test(x)),failed:logs.filter(x=>x.includes('failed:')),interesting:logs.filter(x=>/authority|signer|unauthor|Mayhem|mayhem|slippage|expired|state|quote|balance/i.test(x))};console.log('RESULT',JSON.stringify(row,null,2));return row}
+          const a=await sim('control_original_signer',original0);const b=await sim('substitute_rich',ALT1);const c=await sim('substitute_usdc_holder',ALT2);console.log('DIFF',JSON.stringify({controlErr:a.err,alt1Err:b.err,alt2Err:c.err,controlUnits:a.units,alt1Units:b.units,alt2Units:c.units,controlAnchor:a.anchor,alt1Anchor:b.anchor,alt2Anchor:c.anchor},null,2));
+          NODE
+          node x.mjs
