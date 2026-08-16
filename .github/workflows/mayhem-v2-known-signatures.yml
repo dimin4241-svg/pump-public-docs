@@ -1,0 +1,47 @@
+name: mayhem-v2-known-signatures
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm install --no-save @solana/web3.js bs58
+      - name: Read-only classify and inspect known v2 trades
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import {PublicKey} from '@solana/web3.js';
+          import bs58pkg from 'bs58';const bs58=bs58pkg.default??bs58pkg;
+          const P='MAyhSmzXzV1pTf7LsNkrNwkWKTo4ougAJ1PPg47MD4e';
+          const SIGS=[
+          '4ed43uMUCqNjMcrqcLuMCsjYy2qCdzRVQ7d5HyyBZ2MdQ8Rcs58YxcPfoTMjRwWAnEJLvzdT9Yjwwo17C8wotVQE',
+          '47vd2keQoVa1sNCDUcZWea9oNK9fasBESdPigXrstH2Lxs12kktG2jezAveR9b1NMQe9F4qEiDM57JfNzFPExcge',
+          '4frcMBVQpK9fw4in9N3DiqDikckASrZ8Mt4rdwmngBYmesWbHq3LF3e11yC4mtDT2W3Sp4K9Po9WXkEdRtBJEgoG',
+          '3XGayTfshvJ74oxoDf6vyPrtfPMvWr7rCjmkvNW1taAUEBWxjAd3DBTCnQXS3FUTjEZWRV53L8ygMkMbLnK9FMoZ',
+          '4f525wWvRoKJSVVJBgQFdDq4Pr3oEYQez5PaDkskDu5FXfwVR9hcVFq9gkjRbGhmikawwPRvxFNEPqhCzXJxSXSm',
+          'j5SUGxx1yJu9WXmKXf814h47y3KptYLfbmsHwrqB9r6tp4htJ2jfanshzjAPs6K5jejTtL1UarKbQzTniguj7Ke',
+          '4f5Yb8N8X2SL2qNqZJ5DFux2Gy8RrmCEak6FH1BchUHNAuYpPWr5vuPxynC8iY8aBXYrQ8xHtaRRsE36kp1TPJdm',
+          '34m2fXyfr3EMBRE1ANfbEX4LfL8odxeHXNEGghaxjZokdTrBop5LnomwiGTDr9uRyXwNYH9ME56NwntVGCAqP3Qz',
+          '3DeC9Tmwi8Ffa3YBEGJD4bg5HLnmnLtbi4rpjD3m3nB3g8MH4y8oQGBWrWJk86AQ1Qi1YTDsUq5wpz2krrPgxVeu',
+          '5MkJgLBysLhST1Hq9fyunEepcb14qpyywxFZhbyCFzYy18FxHzVUDW7XFeYwYaEuUkqRXnEx7zGXsccjpiKcGT4m',
+          '2w2fWuB7rs3A6duMrmAFGqiNqJYJLWkCkjCbgsQekZdRrnsJbDLx1vPx8GRZmwD1Q5XQ7Wzq8wjbJG2m5EpAQLoo',
+          '2Gweh97zcJQfUsA6PgQjLojgCVp5v1PJg7eEKHibqtotKSASbdmJV62syn4axy4Tps8sUmNGVgM6Jw4EjMG4Kv21'
+          ];
+          const names={'c2951c220e7467d6':'buy_v2','ae123813f63bd1bc':'sell_v2','66063d1201daebea':'buy','33e685a4017f83ad':'sell'};
+          const RPCS=['https://api.mainnet-beta.solana.com','https://rpc.solanatracker.io/public','https://solana-rpc.publicnode.com'];let id=1;const sl=m=>new Promise(r=>setTimeout(r,m));
+          async function q(u,m,p){const r=await fetch(u,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-read-only-v2/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method:m,params:p})});if(!r.ok)throw Error('HTTP '+r.status);const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));return j.result}
+          async function call(m,p){let e;for(const u of RPCS){try{return await q(u,m,p)}catch(x){e=x;console.log('RPCFAIL',u,String(x).slice(0,140));await sl(180)}}throw e}
+          const found={};
+          for(const sig of SIGS){let tx;try{tx=await call('getTransaction',[sig,{encoding:'json',commitment:'confirmed',maxSupportedTransactionVersion:0}])}catch(e){continue}if(!tx||tx.meta?.err)continue;const msg=tx.transaction.message,staticKeys=msg.accountKeys,loaded=[...(tx.meta.loadedAddresses?.writable??[]),...(tx.meta.loadedAddresses?.readonly??[])],flat=[...staticKeys,...loaded],h=msg.header,nStatic=staticKeys.length,nw=(tx.meta.loadedAddresses?.writable??[]).length;
+            function meta(i){const signer=i<h.numRequiredSignatures;let writable=false,source='lookup-readonly';if(i<nStatic){source='transaction';const sw=h.numRequiredSignatures-h.numReadonlySignedAccounts,uw=nStatic-h.numReadonlyUnsignedAccounts;writable=signer?i<sw:i<uw}else if(i<nStatic+nw){source='lookup-writable';writable=true}return {i,pk:flat[i],signer,writable,source}}
+            for(const [ixIdx,ix] of msg.instructions.entries()){if(flat[ix.programIdIndex]!==P)continue;const b=Buffer.from(bs58.decode(ix.data)),d=b.subarray(0,8).toString('hex'),name=names[d]??d;console.log('CLASSIFY',sig,name,d);if((name==='buy_v2'||name==='sell_v2')&&!found[name]){const accts=ix.accounts.map(meta);const infos=await call('getMultipleAccounts',[accts.map(a=>a.pk),{encoding:'base64',commitment:'confirmed'}]);const detailed=accts.map((a,i)=>({...a,owner:infos.value[i]?.owner??null,lamports:infos.value[i]?.lamports??null,dataLen:infos.value[i]?.data?.[0]?Buffer.from(infos.value[i].data[0],'base64').length:null}));const inn=(tx.meta.innerInstructions??[]).find(g=>g.index===ixIdx)?.instructions??[];found[name]={sig,slot:tx.slot,blockTime:tx.blockTime,ixIdx,dataHex:b.toString('hex'),accounts:detailed,inner:inn.map(x=>({programId:flat[x.programIdIndex],accounts:x.accounts.map(meta),dataHex:Buffer.from(bs58.decode(x.data)).toString('hex'),stackHeight:x.stackHeight})),logs:tx.meta.logMessages??[]};console.log('FOUND',name,JSON.stringify(found[name],null,2));}}
+            if(found.buy_v2&&found.sell_v2)break;
+          }
+          console.log('FINAL',JSON.stringify(found,null,2));
+          NODE
