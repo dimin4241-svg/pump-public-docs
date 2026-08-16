@@ -1,0 +1,64 @@
+name: mayhem-init-state-deep-inspect
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm install --no-save @solana/web3.js @solana/spl-token bs58
+      - name: Read-only deep transaction and PDA inspection
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import {Connection,PublicKey} from '@solana/web3.js';
+          import {getAssociatedTokenAddressSync,TOKEN_2022_PROGRAM_ID} from '@solana/spl-token';
+          import bs58pkg from 'bs58'; const bs58=bs58pkg.default??bs58pkg;
+          const SIG='4rrx5Bugb4mnyhSNRFCAQ6Q1JTc69hs85vGLXBcsGu59hiQwzESCeU8D5jHXD6N9pCq59Uq7zvET88E68NffPXa1';
+          const MAY=new PublicKey('MAyhSmzXzV1pTf7LsNkrNwkWKTo4ougAJ1PPg47MD4e');
+          const PUMP=new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P');
+          const GP=new PublicKey('13ec7XdrjF3h3YcqBTFDSReRcUFwbCnJaAQspM4j6DDJ');
+          const SV=new PublicKey('BwWK17cbHxwWBKZkUYvzxLcNQ1YVyaFezduWbtm2de6s');
+          const MINT=new PublicKey('5wGtQmhiJ3Gb8VBBbXno9byUzVmyeZ9dFuRt8EcQpump');
+          const X=new PublicKey('TSLvdd1pWpHVjahSpsvCXUbgwsL3JAcvokwaKt1eokM');
+          const conn=new Connection('https://api.mainnet-beta.solana.com','confirmed');
+          const tx=await conn.getTransaction(SIG,{commitment:'confirmed',maxSupportedTransactionVersion:0});
+          if(!tx)throw Error('tx missing');
+          const msg=tx.transaction.message;
+          const keys=msg.getAccountKeys({accountKeysFromLookups:tx.meta?.loadedAddresses});
+          const flat=[...keys.staticAccountKeys,...(keys.accountKeysFromLookups?.writable??[]),...(keys.accountKeysFromLookups?.readonly??[])];
+          const nStatic=keys.staticAccountKeys.length;
+          const nw=(keys.accountKeysFromLookups?.writable??[]).length;
+          const header=msg.header;
+          function meta(i){
+            const pk=flat[i]?.toBase58?.()??String(flat[i]);
+            const signer=i<header.numRequiredSignatures;
+            let writable=false,source='lookup-readonly';
+            if(i<nStatic){source='transaction';const signedWritable=header.numRequiredSignatures-header.numReadonlySignedAccounts;const unsignedWritable=nStatic-header.numReadonlyUnsignedAccounts;writable=signer?i<signedWritable:i<unsignedWritable;}
+            else if(i<nStatic+nw){source='lookup-writable';writable=true;}
+            return {i,pk,signer,writable,source};
+          }
+          console.log('TX_META',JSON.stringify({slot:tx.slot,blockTime:tx.blockTime,fee:tx.meta?.fee,err:tx.meta?.err,version:tx.version,header},null,2));
+          console.log('ACCOUNT_KEYS',JSON.stringify(flat.map((_,i)=>meta(i)),null,2));
+          function decData(data){try{const b=Buffer.from(bs58.decode(data));return {len:b.length,hex:b.toString('hex'),disc:b.subarray(0,8).toString('hex')}}catch(e){return {decodeError:String(e)}}}
+          const top=msg.compiledInstructions.map((ix,idx)=>({idx,programIdIndex:ix.programIdIndex,programId:flat[ix.programIdIndex]?.toBase58(),accounts:[...ix.accountKeyIndexes].map(i=>meta(i)),data:decData(bs58.encode(ix.data))}));
+          console.log('TOP',JSON.stringify(top,null,2));
+          const inner=[];
+          for(const group of tx.meta?.innerInstructions??[]){for(const [j,ix] of (group.instructions??[]).entries()){const c=ix;inner.push({parentIndex:group.index,j,stackHeight:c.stackHeight,programIdIndex:c.programIdIndex,programId:flat[c.programIdIndex]?.toBase58(),accounts:[...(c.accounts??[])].map(i=>meta(i)),data:decData(c.data)});}}
+          console.log('INNER',JSON.stringify(inner,null,2));
+          console.log('LOGS',JSON.stringify(tx.meta?.logMessages??[],null,2));
+          const [MS,bms]=PublicKey.findProgramAddressSync([Buffer.from('mayhem-state'),MINT.toBuffer()],MAY);
+          const ATA=getAssociatedTokenAddressSync(MINT,SV,true,TOKEN_2022_PROGRAM_ID);
+          const [MAYEA,bme]=PublicKey.findProgramAddressSync([Buffer.from('__event_authority')],MAY);
+          const [PUMPEA,bpe]=PublicKey.findProgramAddressSync([Buffer.from('__event_authority')],PUMP);
+          const [PUMPBC,bbc]=PublicKey.findProgramAddressSync([Buffer.from('bonding-curve'),MINT.toBuffer()],PUMP);
+          console.log('DERIVED',JSON.stringify({mayhemState:{pk:MS.toBase58(),bump:bms},mayhemTokenVaultAta:ATA.toBase58(),mayhemEventAuthority:{pk:MAYEA.toBase58(),bump:bme},pumpEventAuthority:{pk:PUMPEA.toBase58(),bump:bpe},pumpBondingCurve:{pk:PUMPBC.toBase58(),bump:bbc}},null,2));
+          for(const [name,pk] of Object.entries({unknownX:X,globalParams:GP,solVault:SV,mint:MINT,mayhemState:MS,mayhemTokenVaultAta:ATA,pump:PUMP,mayhem:MAY,pumpEventAuthority:PUMPEA,mayhemEventAuthority:MAYEA,pumpBondingCurve:PUMPBC})){
+            const a=await conn.getAccountInfo(pk,'confirmed');console.log('ACCT',name,pk.toBase58(),JSON.stringify(a?{owner:a.owner.toBase58(),executable:a.executable,lamports:a.lamports,dataLen:a.data.length,head:a.data.subarray(0,96).toString('hex')}:null));
+          }
+          NODE
