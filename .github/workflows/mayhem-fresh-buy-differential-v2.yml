@@ -1,0 +1,64 @@
+name: mayhem-fresh-buy-differential-v2
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/mayhem-fresh-buy-differential-v2.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  differential:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-sdk@1.36.0 @solana/web3.js @solana/spl-token bn.js
+      - name: Simulation-only fresh Mayhem buy differential
+        shell: bash
+        run: |
+          cat > probe.mjs <<'NODE'
+          import BN from 'bn.js';
+          import {PublicKey,Keypair,Transaction,SystemProgram} from '@solana/web3.js';
+          import {getAssociatedTokenAddressSync,TOKEN_PROGRAM_ID,TOKEN_2022_PROGRAM_ID,NATIVE_MINT} from '@solana/spl-token';
+          import {PUMP_SDK,GLOBAL_PDA} from '@pump-fun/pump-sdk';
+          const RICH=new PublicKey('39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg');
+          const USDC=new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');
+          const RPCS=['https://rpc.solanatracker.io/public','https://api.mainnet-beta.solana.com','https://solana-rpc.publicnode.com'];
+          let id=1;const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          async function raw(u,m,p,n=4){let e;for(let i=0;i<n;i++){try{const r=await fetch(u,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-simulation-only/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method:m,params:p})});if(r.status===429||r.status>=500){e=Error('HTTP '+r.status);await sleep(250+450*i);continue}const x=await r.json();if(x.error)throw Error(JSON.stringify(x.error));return x.result}catch(z){e=z;await sleep(160)}}throw e}
+          async function call(m,p){let e;for(const u of RPCS){try{return await raw(u,m,p)}catch(x){e=x;console.log('RPC_FAIL',m,u,String(x).slice(0,160))}}throw e}
+          const buf=a=>a?Buffer.from(a.data[0],'base64'):null;
+          const tok=a=>{const b=buf(a);return b&&b.length>=72?b.readBigUInt64LE(64):null};
+          const cv=a=>{const b=buf(a);if(!b||b.length<115)return null;return {virtualToken:b.readBigUInt64LE(8),virtualQuote:b.readBigUInt64LE(16),realToken:b.readBigUInt64LE(24),realQuote:b.readBigUInt64LE(32),supply:b.readBigUInt64LE(40),complete:b[48],isMayhem:b[81],quote:new PublicKey(b.subarray(83,115)).toBase58()}};
+          const jj=x=>JSON.stringify(x,(_,v)=>typeof v==='bigint'?v.toString():BN.isBN(v)?v.toString():v,2);
+          const gi=(await call('getAccountInfo',[GLOBAL_PDA.toBase58(),{encoding:'base64',commitment:'confirmed'}])).value;if(!gi)throw Error('global missing');
+          const global=PUMP_SDK.decodeGlobal({data:Buffer.from(gi.data[0],'base64')});
+          console.log('GLOBAL',jj({initialVirtualTokenReserves:global.initialVirtualTokenReserves,initialVirtualSolReserves:global.initialVirtualSolReserves,initialVirtualQuoteReserves:global.initialVirtualQuoteReserves,initialRealTokenReserves:global.initialRealTokenReserves,tokenTotalSupply:global.tokenTotalSupply,mayhemModeEnabled:global.mayhemModeEnabled,reservedFeeRecipient:global.reservedFeeRecipient,reservedFeeRecipients:global.reservedFeeRecipients}));
+          const recipientPks=[global.reservedFeeRecipient,...global.reservedFeeRecipients,global.feeRecipient,...global.feeRecipients,RICH];
+          const seen=new Set(),cand=[];
+          for(const pk of recipientPks){const s=pk.toBase58();if(seen.has(s))continue;seen.add(s);const ata=getAssociatedTokenAddressSync(USDC,pk,true,TOKEN_PROGRAM_ID);try{const [oa,ta]=await Promise.all([call('getAccountInfo',[s,{encoding:'base64',commitment:'confirmed'}]),call('getAccountInfo',[ata.toBase58(),{encoding:'base64',commitment:'confirmed'}])]);const row={pk:s,accountOwner:oa.value?.owner??null,lamports:oa.value?.lamports??0,usdcAta:ata.toBase58(),usdc:(tok(ta.value)??0n).toString()};cand.push(row);console.log('CAND',JSON.stringify(row))}catch(e){console.log('CAND_FAIL',s,String(e).slice(0,140))}}
+          const buyerRow=cand.filter(x=>x.accountOwner===SystemProgram.programId.toBase58()&&BigInt(x.usdc)>=2_000_000n&&BigInt(x.lamports)>=20_000_000n).sort((a,b)=>BigInt(a.usdc)>BigInt(b.usdc)?-1:1)[0];
+          if(!buyerRow)throw Error('no candidate; '+JSON.stringify(cand));
+          const BUYER=new PublicKey(buyerRow.pk),BUYER_USDC=new PublicKey(buyerRow.usdcAta);console.log('BUYER',JSON.stringify(buyerRow));
+          async function sim(ixs,watch){const bh=(await call('getLatestBlockhash',[{commitment:'confirmed'}])).value.blockhash;const tx=new Transaction({feePayer:BUYER,recentBlockhash:bh});for(const ix of ixs)tx.add(ix);const bytes=tx.serialize({requireAllSignatures:false,verifySignatures:false});let v,used;for(const u of RPCS){try{v=(await raw(u,'simulateTransaction',[bytes.toString('base64'),{encoding:'base64',sigVerify:false,replaceRecentBlockhash:true,commitment:'confirmed',accounts:{encoding:'base64',addresses:watch.map(x=>x.toBase58())}}],3)).value;used=u;break}catch(e){console.log('SIM_FAIL',u,String(e).slice(0,150))}}if(!v)throw Error('no sim');return {v,used,bytes:bytes.length}}
+          const configs=[{name:'SOL',quoteMint:NATIVE_MINT,quoteTokenProgram:TOKEN_PROGRAM_ID,cap:new BN('1000000000')},{name:'USDC',quoteMint:USDC,quoteTokenProgram:TOKEN_PROGRAM_ID,cap:new BN('100000000')}];
+          const AMOUNT=new BN('100000000000');const rows=[];
+          for(const d of configs){
+            const mint=Keypair.generate();
+            const create=await PUMP_SDK.createV2Instruction({mint:mint.publicKey,name:'D',symbol:'D',uri:'x',creator:BUYER,user:BUYER,mayhemMode:true,cashback:false,quoteMint:d.quoteMint});
+            const curve=create.keys[2].pubkey,curveBase=create.keys[3].pubkey,mayState=create.keys[12].pubkey,mayVault=create.keys[13].pubkey,userBase=getAssociatedTokenAddressSync(mint.publicKey,BUYER,true,TOKEN_2022_PROGRAM_ID),quoteWatch=d.name==='USDC'?BUYER_USDC:BUYER;
+            const watch=[curve,curveBase,mayState,mayVault,userBase,quoteWatch];
+            const c=await sim([create],watch);if(c.v.err)throw Error('create failed '+d.name+' '+JSON.stringify(c.v.err));const ca=c.v.accounts??[];
+            const before=cv(ca[0]);
+            console.log('CREATE_'+d.name,jj({rpc:c.used,bytes:c.bytes,units:c.v.unitsConsumed,before,curveBase:tok(ca[1]),mayVault:tok(ca[3]),userBase:tok(ca[4]),quote:d.name==='USDC'?tok(ca[5]):ca[5]?.lamports}));
+            const ixs=await PUMP_SDK.createV2AndBuyV2Instructions({global,mint:mint.publicKey,name:'D',symbol:'D',uri:'x',creator:BUYER,user:BUYER,amount:AMOUNT,quoteAmount:d.cap,mayhemMode:true,cashback:false,quoteMint:d.quoteMint,quoteTokenProgram:d.quoteTokenProgram});
+            console.log('BUILT_'+d.name,jj(ixs.map((ix,i)=>({i,program:ix.programId.toBase58(),keys:ix.keys.length,data:ix.data.toString('hex').slice(0,24)}))));
+            const p=await sim(ixs,watch);const pa=p.v.accounts??[],after=cv(pa[0]);
+            const delta=before&&after?{virtualToken:before.virtualToken-after.virtualToken,virtualQuote:after.virtualQuote-before.virtualQuote,realToken:before.realToken-after.realToken,realQuote:after.realQuote-before.realQuote,quoteFractionPpb:(after.virtualQuote-before.virtualQuote)*1_000_000_000n/before.virtualQuote,tokenFractionPpb:(before.virtualToken-after.virtualToken)*1_000_000_000n/before.virtualToken}:null;
+            const row={domain:d.name,rpc:p.used,bytes:p.bytes,err:p.v.err,units:p.v.unitsConsumed,before,after,delta,curveBaseBefore:tok(ca[1]),curveBaseAfter:tok(pa[1]),mayVaultBefore:tok(ca[3]),mayVaultAfter:tok(pa[3]),userBaseBefore:tok(ca[4]),userBaseAfter:tok(pa[4]),buyerUsdcBefore:d.name==='USDC'?tok(ca[5]):null,buyerUsdcAfter:d.name==='USDC'?tok(pa[5]):null,buyerLamportsBefore:d.name==='SOL'?ca[5]?.lamports:null,buyerLamportsAfter:d.name==='SOL'?pa[5]?.lamports:null,anchor:(p.v.logs??[]).filter(x=>/AnchorError|Error Code/.test(x)),failed:(p.v.logs??[]).filter(x=>x.includes('failed:')),interesting:(p.v.logs??[]).filter(x=>/Instruction: BuyV2|fee|Fee|mayhem|Mayhem|quote|Quote/.test(x))};
+            console.log('RESULT_'+d.name,jj(row));rows.push(row);
+          }
+          if(rows.length===2)console.log('COMPARE',jj({sol:rows[0].delta,usdc:rows[1].delta,usdcDebit:rows[1].buyerUsdcBefore!==null&&rows[1].buyerUsdcAfter!==null?rows[1].buyerUsdcBefore-rows[1].buyerUsdcAfter:null,solDebit:rows[0].buyerLamportsBefore!==null&&rows[0].buyerLamportsAfter!==null?BigInt(rows[0].buyerLamportsBefore)-BigInt(rows[0].buyerLamportsAfter):null}));
+          NODE
+          node probe.mjs
