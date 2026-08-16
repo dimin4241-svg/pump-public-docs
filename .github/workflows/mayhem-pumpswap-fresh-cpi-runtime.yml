@@ -1,0 +1,64 @@
+name: mayhem-pumpswap-fresh-cpi-runtime
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/mayhem-pumpswap-fresh-cpi-runtime.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm install --no-save @solana/web3.js bs58
+      - name: Find a fresh successful PumpSwap route and simulate mutations only
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import {Connection,PublicKey,TransactionInstruction,TransactionMessage,VersionedTransaction} from '@solana/web3.js';
+          import bs58pkg from 'bs58'; const bs58=bs58pkg.default??bs58pkg;
+          const RPCS=['https://rpc.solanatracker.io/public','https://api.mainnet-beta.solana.com','https://solana-rpc.publicnode.com'];
+          const MAYHEM='MAyhSmzXzV1pTf7LsNkrNwkWKTo4ougAJ1PPg47MD4e';
+          const BUY='de939d076c089151', SELL='10c691f0ee6589cb';
+          const P_AMM='pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA';
+          const EVENT='GS4CU59F31iL7aR2Q8zVS8DRrcRnXX1yjQ66TqNVQnaR';
+          const GLOBAL='ADyA8hdefvWN2dbGGWFotbzWxrAvLW83WG6QCVXvJKqw';
+          const FEE='pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ';
+          const TOKEN='TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
+          const TOKEN22='TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb';
+          const ATA='ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL';
+          const SYSTEM='11111111111111111111111111111111';
+          const ALT_POOL='DSV2CUbhfEWRPRn9QRZWkYohRi47WEeauz8s89ekKBdN';
+          let rid=1; const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          async function one(method,params){let last;for(const url of RPCS){try{const r=await fetch(url,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-simulation-only-fresh/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:rid++,method,params})});if(!r.ok)throw Error('HTTP '+r.status);const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));return {url,result:j.result}}catch(e){last=e;console.log('RPCFAIL',method,url,String(e).slice(0,180));await sleep(220)}}throw last}
+          async function batchGet(sigs){let last;for(const url of RPCS){try{const req=sigs.map(sig=>({jsonrpc:'2.0',id:rid++,method:'getTransaction',params:[sig,{encoding:'json',commitment:'confirmed',maxSupportedTransactionVersion:0}]}));const r=await fetch(url,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-simulation-only-fresh/1.0'},body:JSON.stringify(req)});if(!r.ok)throw Error('HTTP '+r.status);const arr=await r.json();if(!Array.isArray(arr))throw Error('non-array');const by=new Map(arr.map(x=>[x.id,x.result]));return {url,rows:req.map(x=>by.get(x.id)??null)}}catch(e){last=e;console.log('BATCHFAIL',url,String(e).slice(0,180));await sleep(350)}}throw last}
+          function pumpSwapDisc(tx){if(!tx||tx.meta?.err)return null;const msg=tx.transaction.message;const flat=[...(msg.accountKeys??[]),...(tx.meta.loadedAddresses?.writable??[]),...(tx.meta.loadedAddresses?.readonly??[])];for(const ix of msg.instructions??[]){if(flat[ix.programIdIndex]!==MAYHEM||!ix.data)continue;let raw;try{raw=Buffer.from(bs58.decode(ix.data))}catch{continue}const d=raw.subarray(0,8).toString('hex');if(d===BUY||d===SELL)return d}return null}
+          async function getRaw(sig){const {result}=await one('getTransaction',[sig,{encoding:'base64',commitment:'confirmed',maxSupportedTransactionVersion:0}]);if(!result)throw Error('missing raw '+sig);return {slot:result.slot,blockTime:result.blockTime,b64:result.transaction[0]}}
+          async function simulateB64(b64,label){const {url,result}=await one('simulateTransaction',[b64,{encoding:'base64',sigVerify:false,replaceRecentBlockhash:true,commitment:'processed'}]);const v=result?.value;const logs=v?.logs??[];console.log('SIM',label,JSON.stringify({rpc:url,err:v?.err??null,units:v?.unitsConsumed??null,interesting:logs.filter(x=>/Instruction:|AnchorError|Error Code|Error Number|failed|Program return:|Program log: Left:|Program log: Right:/.test(x)).slice(-35)},null,2));return v}
+          async function loadAlts(vtx){const out=[];for(const l of (vtx.message.addressTableLookups??[])){let val=null,last;for(const url of RPCS){try{const c=new Connection(url,'confirmed');const r=await c.getAddressLookupTable(l.accountKey);if(r.value){val=r.value;break}}catch(e){last=e}}if(!val)throw last??Error('missing ALT '+l.accountKey.toBase58());out.push(val)}return out}
+          function cloneIxs(ixs){return ixs.map(ix=>new TransactionInstruction({programId:ix.programId,keys:ix.keys.map(k=>({pubkey:k.pubkey,isSigner:k.isSigner,isWritable:k.isWritable})),data:Buffer.from(ix.data)}))}
+          function targetIx(ixs,disc){const m=new PublicKey(MAYHEM);const hits=ixs.map((ix,i)=>({ix,i})).filter(x=>x.ix.programId.equals(m)&&Buffer.from(x.ix.data).subarray(0,8).toString('hex')===disc);if(hits.length!==1)throw Error('target count '+hits.length);return hits[0]}
+          function replaceKey(ix,from,to){let n=0;ix.keys=ix.keys.map(k=>k.pubkey.toBase58()===from?(n++,{...k,pubkey:new PublicKey(to)}):k);console.log('MUTATE',from,'=>',to,'count',n);if(n===0)throw Error('missing key '+from)}
+          async function recompiled(dec,alts,disc,label,mut){const ixs=cloneIxs(dec.instructions);const t=targetIx(ixs,disc);if(mut)mut(t.ix);const msg=new TransactionMessage({payerKey:dec.payerKey,recentBlockhash:dec.recentBlockhash,instructions:ixs}).compileToV0Message(alts);const tx=new VersionedTransaction(msg);return await simulateB64(Buffer.from(tx.serialize()).toString('base64'),label)}
+          async function probeCandidate(sig,disc){console.log('CANDIDATE',sig,disc===BUY?'BuyPumpSwap':'SellPumpSwap');const raw=await getRaw(sig);const rawSim=await simulateB64(raw.b64,'raw_control_'+sig.slice(0,8));if(rawSim?.err!=null)return false;const vtx=VersionedTransaction.deserialize(Buffer.from(raw.b64,'base64'));const alts=await loadAlts(vtx);const dec=TransactionMessage.decompile(vtx.message,{addressLookupTableAccounts:alts});const t=targetIx(dec.instructions,disc);console.log('FRESH_TARGET_ACCOUNT_MAP',JSON.stringify(t.ix.keys.map((k,pos)=>({pos,pubkey:k.pubkey.toBase58(),signer:k.isSigner,writable:k.isWritable})),null,2));const rc=await recompiled(dec,alts,disc,'recompiled_control',null);if(rc?.err!=null){console.log('RECOMPILE_CONTROL_FAILED');return false}
+            const variants=[
+              ['pump_amm_program_to_system',ix=>replaceKey(ix,P_AMM,SYSTEM)],
+              ['pumpswap_event_authority_to_system',ix=>replaceKey(ix,EVENT,SYSTEM)],
+              ['pumpswap_global_config_to_pool',ix=>replaceKey(ix,GLOBAL,ALT_POOL)],
+              ['fee_program_to_system',ix=>replaceKey(ix,FEE,SYSTEM)],
+              ['token_program_to_system',ix=>replaceKey(ix,TOKEN,SYSTEM)],
+              ['token2022_program_to_system',ix=>replaceKey(ix,TOKEN22,SYSTEM)],
+              ['ata_program_to_system',ix=>replaceKey(ix,ATA,SYSTEM)],
+              ['mayhem_program_account_to_system',ix=>replaceKey(ix,MAYHEM,SYSTEM)]
+            ];
+            for(const [label,fn] of variants){try{await recompiled(dec,alts,disc,label,fn)}catch(e){console.log('VARIANT_FAIL',label,String(e))}}
+            console.log('FRESH_PROBE_COMPLETE',sig);return true
+          }
+          const {result:sigs}=await one('getSignaturesForAddress',[MAYHEM,{limit:1000,commitment:'confirmed'}]);console.log('SIGNATURES',sigs.length,'SLOTS',sigs[0]?.slot,sigs.at(-1)?.slot);
+          let tested=0,found=0,done=false;
+          for(let off=0;off<sigs.length&&!done;off+=12){const chunk=sigs.slice(off,off+12).filter(x=>x.err==null);let b;try{b=await batchGet(chunk.map(x=>x.signature))}catch(e){console.log('SKIP_CHUNK',off,String(e));continue}for(let j=0;j<b.rows.length&&!done;j++){const d=pumpSwapDisc(b.rows[j]);if(!d)continue;found++;const sig=chunk[j].signature;console.log('FOUND_RECENT',found,sig,'slot',b.rows[j]?.slot,'disc',d);try{done=await probeCandidate(sig,d);tested++}catch(e){console.log('CANDIDATE_FAIL',sig,String(e))}if(tested>=8)done=true}if(off%120===0)console.log('SCAN_PROGRESS',off,'found',found,'tested',tested);await sleep(90)}
+          console.log('FINAL',JSON.stringify({found,tested,successfulFreshControl:done}));
+          NODE
