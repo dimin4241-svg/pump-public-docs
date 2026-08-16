@@ -1,0 +1,36 @@
+name: mayhem-set-creator-surface
+on:
+  push:
+    paths:
+      - '.github/workflows/mayhem-set-creator-surface.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-swap-sdk@1.19.0 @pump-fun/pump-sdk@1.36.0 @solana/web3.js
+      - name: Static and read-only set-creator inspection
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const p='node_modules/@pump-fun/pump-swap-sdk/src/idl/pump_amm.json',j=JSON.parse(fs.readFileSync(p,'utf8'));
+          for(const n of ['set_coin_creator','migrate_pool_coin_creator']){const ix=j.instructions.find(x=>x.name===n);console.log('IDL_IX',n,JSON.stringify(ix,null,2))}
+          NODE
+          echo '=== SDK source refs ==='
+          grep -RniE 'setCoinCreator\(|set_coin_creator|SetCoinCreator|adminSetCoinCreator' node_modules/@pump-fun/pump-swap-sdk/src --exclude='*.map' | head -200 || true
+          grep -RniE 'setCoinCreator\(|set_coin_creator|SetCoinCreator' node_modules/@pump-fun/pump-sdk/src --exclude='*.map' | head -200 || true
+          node --input-type=module <<'NODE'
+          import {Connection,PublicKey} from '@solana/web3.js';
+          import {OnlinePumpAmmSdk,PUMP_AMM_SDK} from '@pump-fun/pump-swap-sdk';
+          import {bondingCurvePda,bondingCurveV2Pda} from '@pump-fun/pump-sdk';
+          const c=new Connection('https://api.mainnet-beta.solana.com','confirmed'),online=new OnlinePumpAmmSdk(c),poolPk=new PublicKey('2AZvfjn3Hre5mM47bRv6VnKRX36wSDW6vrkC5ykK3X7T'),pool=await online.fetchPool(poolPk),base=pool.baseMint;
+          const metaProg=new PublicKey('metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s'),[metadata]=PublicKey.findProgramAddressSync([Buffer.from('metadata'),metaProg.toBuffer(),base.toBuffer()],metaProg),bc1=bondingCurvePda(base),bc2=bondingCurveV2Pda(base);
+          const infos=await c.getMultipleAccountsInfo([metadata,bc1,bc2],'confirmed');console.log('LIVE_CONTEXT',JSON.stringify({pool:poolPk.toBase58(),baseMint:base.toBase58(),creator:pool.creator.toBase58(),coinCreator:pool.coinCreator.toBase58(),isMayhem:pool.isMayhemMode,metadata:metadata.toBase58(),bc1:bc1.toBase58(),bc2:bc2.toBase58(),infos:[metadata,bc1,bc2].map((p,i)=>({pk:p.toBase58(),exists:!!infos[i],owner:infos[i]?.owner.toBase58()??null,len:infos[i]?.data.length??null}))},null,2));
+          try{const ix=await PUMP_AMM_SDK.setCoinCreator(poolPk);console.log('SDK_SET_IX',JSON.stringify({data:Buffer.from(ix.data).toString('hex'),keys:ix.keys.map((k,i)=>({i,pk:k.pubkey.toBase58(),s:k.isSigner,w:k.isWritable}))},null,2))}catch(e){console.log('SDK_SET_BUILD_FAIL',String(e))}
+          NODE
