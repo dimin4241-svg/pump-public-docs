@@ -1,0 +1,30 @@
+name: mayhem-state-surface-inventory
+on:
+  push:
+    paths:
+      - '.github/workflows/mayhem-state-surface-inventory.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inventory:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm install --no-save @pump-fun/pump-swap-sdk@1.19.0 @pump-fun/pump-sdk@1.36.0
+      - name: Parse IDL and SDK state mutation methods
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const paths=['node_modules/@pump-fun/pump-swap-sdk/src/idl/pump_amm.json','node_modules/@pump-fun/pump-sdk/src/idl/pump_amm.json'];
+          for(const p of paths){const j=JSON.parse(fs.readFileSync(p,'utf8'));console.log('\n=== IDL',p,'address',j.address,'===');for(const [i,ix] of (j.instructions??[]).entries()){const n=ix.name;const interesting=/mayhem|pool|deposit|withdraw|creator|fee|boost|disable|update|set|collect|close|extend|sync|init/i.test(n);if(!interesting)continue;console.log('\nIX',i,n,'disc',Buffer.from(ix.discriminator??[]).toString('hex'),'args',JSON.stringify(ix.args??[]));for(const [k,a] of (ix.accounts??[]).entries())console.log('  A',k,a.name,'w',!!a.writable,'s',!!a.signer,'addr',a.address??'', 'rel',JSON.stringify(a.relations??[]),'pda',JSON.stringify(a.pda??null));}console.log('\nMAYHEM_ERRORS');for(const e of (j.errors??[]))if(/mayhem|pool.*mode|mode.*pool/i.test((e.name??'')+' '+(e.msg??'')))console.log(e.code,e.name,e.msg)}
+          NODE
+          echo '=== SDK mutation methods ==='
+          grep -RniE 'PoolInMayhemMode|PoolNotInMayhemMode|MayhemModeInDesiredState|setCoinCreator|depositInstructions|withdrawInstructions|collectCoinCreatorFee|adminSetCoinCreator|isMayhemMode' node_modules/@pump-fun/pump-swap-sdk/src --exclude='*.map' | head -500 || true
+          echo '=== deposit/withdraw/setCoinCreator source ==='
+          sed -n '330,620p' node_modules/@pump-fun/pump-swap-sdk/src/sdk/offlinePumpAmm.ts
+          sed -n '990,1115p' node_modules/@pump-fun/pump-swap-sdk/src/sdk/offlinePumpAmm.ts
+          sed -n '1,260p' node_modules/@pump-fun/pump-swap-sdk/src/sdk/pumpAmmAdmin.ts
