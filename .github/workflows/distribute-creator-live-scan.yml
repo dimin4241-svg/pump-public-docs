@@ -1,0 +1,56 @@
+name: distribute-creator-live-scan
+on:
+  push:
+    paths:
+      - '.github/workflows/distribute-creator-live-scan.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  scan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-sdk@1.36.0 @solana/web3.js bs58
+      - name: Read-only sharing config and creator vault scan
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          import bs58pkg from 'bs58';const bs58=bs58pkg.default??bs58pkg;
+          import {Connection,PublicKey} from '@solana/web3.js';
+          import * as p from '@pump-fun/pump-sdk';
+          const idl=JSON.parse(fs.readFileSync('node_modules/@pump-fun/pump-sdk/src/idl/pump.json','utf8'));
+          const ix=idl.instructions.find(x=>x.name==='distribute_creator_fees');
+          const shareAcc=ix.accounts.find(x=>x.name==='sharing_config');
+          const SHARE_PROGRAM=new PublicKey(Uint8Array.from(shareAcc.pda.program.value));
+          const DISC=Buffer.from(idl.accounts.find(x=>x.name==='SharingConfig').discriminator);
+          console.log('STATIC',JSON.stringify({shareProgram:SHARE_PROGRAM.toBase58(),sharingDisc:DISC.toString('hex'),pumpProgram:p.PUMP_PROGRAM_ID.toBase58(),exports:Object.keys(p).filter(x=>/shar|distribut|creator|fee/i.test(x)).sort()},null,2));
+          for(const [owner,n] of [[p,'module'],[p.PumpSdk?.prototype,'PumpSdk'],[p.OnlinePumpSdk?.prototype,'OnlinePumpSdk']]){if(!owner)continue;for(const k of Object.keys(owner).concat(Object.getOwnPropertyNames(owner))){if(!/distribut|sharing|creator/i.test(k)||typeof owner[k]!=='function')continue;console.log('FUNC',n,k,'arity',owner[k].length,'SRC',String(owner[k]).slice(0,12000))}}
+          console.log('FIND_SOURCE_FILES');
+          const {execSync}=await import('node:child_process');
+          try{console.log(execSync("grep -RnlE 'distributeCreatorFees|distribute_creator_fees' node_modules/@pump-fun/pump-sdk --exclude='*.map' | head -40",{encoding:'utf8'}))}catch{}
+          const RPCS=['https://api.mainnet-beta.solana.com','https://rpc.solanatracker.io/public','https://solana-rpc.publicnode.com'];let rid=1;const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          async function one(url,method,params,n=3){let last;for(let a=0;a<n;a++){try{const r=await fetch(url,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-readonly-distribution-scan/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:rid++,method,params})});if(r.status===429||r.status>=500){last=Error('HTTP '+r.status);await sleep(450+600*a);continue}if(!r.ok)throw Error('HTTP '+r.status);const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));return j.result}catch(e){last=e;await sleep(350+500*a)}}throw last}
+          async function rpc(method,params){let last;for(const u of RPCS){try{return await one(u,method,params,3)}catch(e){last=e;console.log('RPCFAIL',method,u,String(e).slice(0,170))}}throw last}
+          let rows;try{rows=await rpc('getProgramAccounts',[SHARE_PROGRAM.toBase58(),{encoding:'base64',commitment:'confirmed',filters:[{memcmp:{offset:0,bytes:bs58.encode(DISC)}}]}])}catch(e){console.log('GPA_FAIL',String(e));process.exit(0)}
+          console.log('SHARING_CONFIG_COUNT',rows.length);
+          function parseConfig(r){const b=Buffer.from(r.account.data[0],'base64');let off=8;const bump=b[off++],version=b[off++],status=b[off++];const mint=bs58.encode(b.subarray(off,off+32));off+=32;const admin=bs58.encode(b.subarray(off,off+32));off+=32;const adminRevoked=b[off++]!==0;const n=b.readUInt32LE(off);off+=4;const shareholders=[];for(let i=0;i<n&&off+34<=b.length;i++){shareholders.push({address:bs58.encode(b.subarray(off,off+32)),shareBps:b.readUInt16LE(off+32)});off+=34}return {sharingConfig:r.pubkey,len:b.length,bump,version,status,mint,admin,adminRevoked,n,shareholders,tail:b.subarray(off).toString('hex')}}
+          const configs=rows.map(parseConfig);for(const x of configs.slice(0,15))console.log('CONFIG_SAMPLE',JSON.stringify(x));
+          const conn=new Connection(RPCS[0],'confirmed');
+          console.log('PUMP_SDK_METHODS',Object.getOwnPropertyNames(p.PumpSdk?.prototype??{}).filter(x=>/bond|decode|fetch|creator/i.test(x)));
+          const candidates=[];
+          for(const cfg of configs.slice(0,5000)){
+            try{
+              const mint=new PublicKey(cfg.mint),bc=p.bondingCurvePda(mint);candidates.push({...cfg,bondingCurve:bc.toBase58()});
+            }catch{}
+          }
+          for(let off=0;off<candidates.length;off+=100){const batch=candidates.slice(off,off+100);let vals;try{vals=(await rpc('getMultipleAccounts',[batch.map(x=>x.bondingCurve),{encoding:'base64',commitment:'confirmed'}])).value}catch{continue}for(let i=0;i<batch.length;i++){const a=vals[i];if(!a?.data?.[0])continue;const raw=Buffer.from(a.data[0],'base64');batch[i].bcExists=true;batch[i].bcLen=raw.length;try{const d=p.PUMP_SDK.decodeBondingCurve(raw);batch[i].bcDecoded=Object.fromEntries(Object.entries(d).map(([k,v])=>[k,v?.toBase58?.()??v?.toString?.()??v]));const creator=d.creator;batch[i].creator=creator.toBase58();batch[i].creatorVault=p.creatorVaultPda(creator).toBase58()}catch(e){batch[i].decodeErr=String(e).slice(0,180)}}if(off%1000===0)console.log('BC_PROGRESS',off);await sleep(120)}
+          const withVault=candidates.filter(x=>x.creatorVault);
+          for(let off=0;off<withVault.length;off+=100){const batch=withVault.slice(off,off+100);let vals;try{vals=(await rpc('getMultipleAccounts',[batch.map(x=>x.creatorVault),{encoding:'base64',commitment:'confirmed'}])).value}catch{continue}for(let i=0;i<batch.length;i++){const a=vals[i];batch[i].creatorVaultExists=!!a;batch[i].creatorVaultLamports=a?.lamports??0}await sleep(120)}
+          const positive=withVault.filter(x=>x.creatorVaultLamports>0).sort((a,b)=>b.creatorVaultLamports-a.creatorVaultLamports);
+          console.log('POSITIVE_SUMMARY',JSON.stringify({configs:configs.length,decodedCurves:withVault.length,positiveVaults:positive.length},null,2));
+          for(const x of positive.slice(0,50))console.log('POSITIVE',JSON.stringify(x));
+          NODE
