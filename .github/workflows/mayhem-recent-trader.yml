@@ -1,0 +1,38 @@
+name: mayhem-recent-trader
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/mayhem-recent-trader.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: audit/boost-runtime-probe-20260815}
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @solana/web3.js
+      - shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import {PublicKey,SystemProgram} from '@solana/web3.js';
+          const POOL='3EUUwdSpEXap46NB6n5Mmt3U8XM8vW8HPCLtJDoGzw33';
+          const AMM='pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA';
+          const RPCS=['https://rpc.solanatracker.io/public','https://api.mainnet-beta.solana.com','https://solana-rpc.publicnode.com'];let id=1;const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          async function req(u,m,p,n=3){let e;for(let a=0;a<n;a++){try{const r=await fetch(u,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method:m,params:p})});if(r.status===429||r.status>=500){e=Error('HTTP '+r.status);await sleep(250+350*a);continue}const x=await r.json();if(x.error)throw Error(JSON.stringify(x.error));return x.result}catch(x){e=x;await sleep(200)}}throw e}
+          async function call(m,p){let e;for(const u of RPCS){try{const x=await req(u,m,p);console.log('RPC_OK',m,u);return x}catch(x){e=x;console.log('RPC_FAIL',m,u,String(x).slice(0,160))}}throw e}
+          const sigs=await call('getSignaturesForAddress',[POOL,{limit:30,commitment:'confirmed'}]);console.log('SIG_COUNT',sigs.length);
+          const users=[];
+          for(const s of sigs){if(s.err)continue;let tx=null;for(const u of RPCS){try{tx=await req(u,'getTransaction',[s.signature,{encoding:'jsonParsed',commitment:'confirmed',maxSupportedTransactionVersion:0}]);if(tx)break}catch{}}if(!tx)continue;
+            const keys=tx.transaction.message.accountKeys;const signers=keys.filter(k=>k.signer).map(k=>k.pubkey);const logs=(tx.meta?.logMessages??[]);const buy=logs.some(l=>l.includes('Instruction: Buy')),sell=logs.some(l=>l.includes('Instruction: Sell'));if(!buy&&!sell)continue;
+            console.log('TX',JSON.stringify({sig:s.signature,slot:s.slot,buy,sell,signers,err:tx.meta?.err??null}));
+            for(const u of signers){if(u===AMM)continue;users.push(u)}
+          }
+          const uniq=[...new Set(users)];if(!uniq.length){console.log('NO_USERS');process.exit(0)}
+          const vals=(await call('getMultipleAccounts',[uniq,{encoding:'base64',commitment:'confirmed'}])).value;
+          for(let i=0;i<uniq.length;i++){const a=vals[i];const pk=new PublicKey(uniq[i]);console.log('USER',JSON.stringify({address:uniq[i],onCurve:PublicKey.isOnCurve(pk.toBytes()),exists:!!a,lamports:a?.lamports??0,sol:(a?.lamports??0)/1e9,owner:a?.owner??null,system:a?.owner===SystemProgram.programId.toBase58()}));}
+          NODE
