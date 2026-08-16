@@ -1,0 +1,44 @@
+name: mayhem-buy-cpi-target-mutation
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+permissions:
+  contents: read
+jobs:
+  simulate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm install --no-save @solana/web3.js bs58
+      - name: Simulation-only Mayhem CPI target mutation
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import {PublicKey,Transaction,TransactionInstruction} from '@solana/web3.js';
+          import bs58pkg from 'bs58';const bs58=bs58pkg.default??bs58pkg;
+          const MAY='MAyhSmzXzV1pTf7LsNkrNwkWKTo4ougAJ1PPg47MD4e';
+          const PUMP='6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P';
+          const PUMP_EA='Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1';
+          const PFEE='pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ';
+          const SYSTEM='11111111111111111111111111111111';
+          const TOKEN22='TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb';
+          const ALT='39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg';
+          const SIG='GTXVtKiHojKiKzM4kb8mMXZqCDdnzZqRXAGFvmXbCGurtk3w4x2X8kzJWg2K1cFYSDxhEdmRb3VKCaH9PooUDcQ';
+          const RPCS=['https://api.mainnet-beta.solana.com','https://rpc.solanatracker.io/public','https://solana-rpc.publicnode.com'];let id=1;const sl=m=>new Promise(r=>setTimeout(r,m));
+          async function q(u,m,p,n=4){let e;for(let i=0;i<n;i++){try{const r=await fetch(u,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-simulation-only/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method:m,params:p})});if(r.status===429||r.status>=500){e=Error('HTTP '+r.status);await sl(350+550*i);continue}const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));return j.result}catch(x){e=x;await sl(180)}}throw e}
+          async function call(m,p){let e;for(const u of RPCS){try{return await q(u,m,p)}catch(x){e=x;console.log('RPCFAIL',m,u,String(x).slice(0,160))}}throw e}
+          const tx=await call('getTransaction',[SIG,{encoding:'json',commitment:'confirmed',maxSupportedTransactionVersion:0}]);if(!tx)throw Error('source tx unavailable');
+          const msg=tx.transaction.message,staticKeys=msg.accountKeys,loaded=[...(tx.meta.loadedAddresses?.writable??[]),...(tx.meta.loadedAddresses?.readonly??[])],flat=[...staticKeys,...loaded],h=msg.header,nStatic=staticKeys.length,nLW=(tx.meta.loadedAddresses?.writable??[]).length;
+          function flags(i){const signer=i<h.numRequiredSignatures;let writable=false;if(i<nStatic){const sw=h.numRequiredSignatures-h.numReadonlySignedAccounts,uw=nStatic-h.numReadonlyUnsignedAccounts;writable=signer?i<sw:i<uw}else if(i<nStatic+nLW)writable=true;return {isSigner:signer,isWritable:writable}}
+          let sourceIx=null;for(const ix of msg.instructions){if(flat[ix.programIdIndex]!==MAY)continue;const b=Buffer.from(bs58.decode(ix.data));if(b.subarray(0,8).toString('hex')==='66063d1201daebea'){sourceIx=ix;break}}
+          if(!sourceIx)throw Error('Mayhem Buy instruction not found');
+          const base=sourceIx.accounts.map((i,pos)=>({pos,index:i,pubkey:flat[i],...flags(i)}));
+          console.log('SOURCE_ORDER',JSON.stringify(base,null,2));
+          const data=Buffer.from(bs58.decode(sourceIx.data));
+          const pk=s=>new PublicKey(s);
+          function mutated(kind){return base.map(a=>{let p=a.pubkey;if(kind==='pump_program'&&p===PUMP)p=SYSTEM;if(kind==='pump_event_authority'&&p===PUMP_EA)p=ALT;if(kind==='fee_program'&&p===PFEE)p=SYSTEM;if(kind==='token_program'&&p===TOKEN22)p=SYSTEM;return {pubkey:pk(p),isSigner:a.isSigner,isWritable:a.isWritable}})}
+          async function sim(kind){const ix=new TransactionInstruction({programId:pk(MAY),keys:mutated(kind),data});const bh=(await call('getLatestBlockhash',[{commitment:'confirmed'}])).value.blockhash;const t=new Transaction({feePayer:pk(ALT),recentBlockhash:bh}).add(ix);const raw=t.serialize({requireAllSignatures:false,verifySignatures:false}).toString('base64');let v,used;for(const u of RPCS){try{v=(await q(u,'simulateTransaction',[raw,{encoding:'base64',sigVerify:false,replaceRecentBlockhash:true,commitment:'confirmed'}],3)).value;used=u;break}catch(e){console.log('SIMFAIL',kind,u,String(e).slice(0,180))}}if(!v)return {kind,noSim:true};const logs=v.logs??[];const r={kind,rpc:used,err:v.err,units:v.unitsConsumed,instructions:logs.filter(x=>x.includes('Instruction:')),invokes:logs.filter(x=>/Program .* invoke/.test(x)),anchor:logs.filter(x=>/AnchorError|Error Code|Error Number|Left:|Right:/.test(x)),failed:logs.filter(x=>x.includes('failed:')),interesting:logs.filter(x=>/InvalidProgram|Program ID|Permission|Signer|Pump|Buy|Trade|Risk|paused|reserves/i.test(x))};console.log('RESULT',JSON.stringify(r,null,2));return r}
+          const out={};for(const kind of ['canonical','pump_program','pump_event_authority','fee_program','token_program']){out[kind]=await sim(kind);await sl(250)}console.log('SUMMARY',JSON.stringify(out,null,2));
+          NODE
