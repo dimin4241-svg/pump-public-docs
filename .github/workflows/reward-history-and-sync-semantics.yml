@@ -1,0 +1,44 @@
+name: reward-history-and-sync-semantics
+on:
+  push:
+    paths:
+      - '.github/workflows/reward-history-and-sync-semantics.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-sdk@1.36.0 @pump-fun/pump-swap-sdk@1.19.0 @solana/web3.js bs58
+      - name: Static sync semantics and read-only recent reward history
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '=== sync/claim source ==='
+          grep -RniE 'syncUserVolumeAccumulator|sync_user_volume_accumulator|totalUnclaimedTokens|currentDayTokens|cashbackEarned|totalCashbackClaimed|needsClaim' node_modules/@pump-fun/pump-sdk/src node_modules/@pump-fun/pump-swap-sdk/src --exclude='*.map' | head -800 || true
+          echo '=== pump sdk source chunks ==='
+          sed -n '1,260p' node_modules/@pump-fun/pump-sdk/src/tokenIncentives.ts || true
+          sed -n '250,470p' node_modules/@pump-fun/pump-sdk/src/sdk.ts || true
+          echo '=== amm sdk source chunks ==='
+          sed -n '1,300p' node_modules/@pump-fun/pump-swap-sdk/src/sdk/tokenIncentives.ts || true
+          sed -n '920,1110p' node_modules/@pump-fun/pump-swap-sdk/src/sdk/offlinePumpAmm.ts || true
+          node --input-type=module <<'NODE'
+          import bs58pkg from 'bs58';const bs58=bs58pkg.default??bs58pkg;
+          import crypto from 'node:crypto';
+          import * as pump from '@pump-fun/pump-sdk';import * as amm from '@pump-fun/pump-swap-sdk';
+          const RPCS=['https://api.mainnet-beta.solana.com','https://rpc.solanatracker.io/public'];let id=1;const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          async function one(url,method,params,n=3){let last;for(let a=0;a<n;a++){try{const r=await fetch(url,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-readonly-reward-history/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method,params})});if(r.status===429||r.status>=500){last=Error('HTTP '+r.status);await sleep(450+650*a);continue}if(!r.ok)throw Error('HTTP '+r.status);const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));return j.result}catch(e){last=e;await sleep(350+500*a)}}throw last}async function rpc(method,params){let last;for(const u of RPCS){try{return await one(u,method,params,3)}catch(e){last=e;console.log('RPC_FAIL',method,u,String(e).slice(0,160))}}throw last}
+          const names=['claim_cashback','claim_cashback_v2','claim_token_incentives','sync_user_volume_accumulator','close_user_volume_accumulator'];const discs=new Map(names.map(n=>[crypto.createHash('sha256').update('global:'+n).digest().subarray(0,8).toString('hex'),n]));console.log('DISCS',JSON.stringify(Object.fromEntries([...discs].map(([k,v])=>[v,k]))));
+          for(const [tag,pid,gva] of [['pump',pump.PUMP_PROGRAM_ID,pump.GLOBAL_VOLUME_ACCUMULATOR_PDA],['amm',amm.PUMP_AMM_PROGRAM_ID,amm.GLOBAL_VOLUME_ACCUMULATOR_PDA]]){
+            console.log('\n=== HISTORY',tag,'program',pid.toBase58(),'gva',gva.toBase58(),'===');let sigs;try{sigs=await rpc('getSignaturesForAddress',[gva.toBase58(),{limit:1000,commitment:'confirmed'}])}catch(e){console.log('SIG_FAIL',String(e));continue}console.log('SIG_COUNT',sigs.length);const hits=[];
+            for(let off=0;off<sigs.length;off+=8){const chunk=sigs.slice(off,off+8);let txs=[];try{for(const s of chunk)txs.push(await rpc('getTransaction',[s.signature,{encoding:'json',commitment:'confirmed',maxSupportedTransactionVersion:0}]))}catch(e){console.log('TX_BATCH_SKIP',off,String(e).slice(0,140));continue}for(let j=0;j<txs.length;j++){const tx=txs[j];if(!tx||tx.meta?.err)continue;const msg=tx.transaction.message,flat=[...(msg.accountKeys??[]),...(tx.meta?.loadedAddresses?.writable??[]),...(tx.meta?.loadedAddresses?.readonly??[])];const scan=(ix,where)=>{if(flat[ix.programIdIndex]!==pid.toBase58()||!ix.data)return;let raw;try{raw=Buffer.from(bs58.decode(ix.data))}catch{return}const name=discs.get(raw.subarray(0,8).toString('hex'));if(!name)return;const ac=(ix.accounts??[]).map(i=>flat[i]);const h={signature:chunk[j].signature,slot:tx.slot,blockTime:tx.blockTime,where,name,accounts:ac,dataHex:raw.toString('hex')};hits.push(h);console.log('HIT',JSON.stringify(h))};(msg.instructions??[]).forEach((ix,i)=>scan(ix,'top:'+i));for(const g of tx.meta?.innerInstructions??[])for(const [i,ix] of (g.instructions??[]).entries())scan(ix,'inner:'+g.index+':'+i)}if(off%80===0)console.log('PROGRESS',tag,off,'hits',hits.length);if(hits.length>=30)break;await sleep(80)}
+            console.log('FINAL_HITS',tag,JSON.stringify(hits,null,2));
+            // Inspect likely user/UVA accounts from account positions in successful history. Any 90+ byte program-owned account with the expected discriminator is useful.
+            const keys=[...new Set(hits.flatMap(h=>h.accounts))].slice(0,500);const found=[];for(let off=0;off<keys.length;off+=100){const batch=keys.slice(off,off+100);let vals;try{vals=(await rpc('getMultipleAccounts',[batch,{encoding:'base64',commitment:'confirmed'}])).value}catch{continue}for(let i=0;i<batch.length;i++){const a=vals[i];if(!a?.data?.[0]||a.owner!==pid.toBase58())continue;const b=Buffer.from(a.data[0],'base64');if(b.subarray(0,8).toString('hex')==='56ff700e66359afa')found.push({pk:batch[i],len:b.length,user:b.length>=40?bs58.encode(b.subarray(8,40)):null,hex:b.toString('hex')})}}
+            console.log('HISTORY_UVA',tag,JSON.stringify(found,null,2));
+          }
+          NODE
