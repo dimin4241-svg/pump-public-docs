@@ -1,0 +1,43 @@
+name: mayhem-v2-direct-inspect
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm install --no-save bs58
+      - name: Read-only BuyV2 and SellV2 inspection
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import bs58pkg from 'bs58';const bs58=bs58pkg.default??bs58pkg;
+          const P='MAyhSmzXzV1pTf7LsNkrNwkWKTo4ougAJ1PPg47MD4e';
+          const CASES={
+            sell_v2:'4ed43uMUCqNjMcrqcLuMCsjYy2qCdzRVQ7d5HyyBZ2MdQ8Rcs58YxcPfoTMjRwWAnEJLvzdT9Yjwwo17C8wotVQE',
+            buy_v2:'4frcMBVQpK9fw4in9N3DiqDikckASrZ8Mt4rdwmngBYmesWbHq3LF3e11yC4mtDT2W3Sp4K9Po9WXkEdRtBJEgoG'
+          };
+          const DISC={sell_v2:'5df6823ce7e940b2',buy_v2:'b817ee6167c5d33d'};
+          const RPCS=['https://api.mainnet-beta.solana.com','https://rpc.solanatracker.io/public','https://solana-rpc.publicnode.com'];let id=1;const sl=m=>new Promise(r=>setTimeout(r,m));
+          async function q(u,m,p){const r=await fetch(u,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-read-only-v2-direct/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method:m,params:p})});if(!r.ok)throw Error('HTTP '+r.status);const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));return j.result}
+          async function call(m,p){let e;for(const u of RPCS){try{return await q(u,m,p)}catch(x){e=x;console.log('RPCFAIL',m,u,String(x).slice(0,150));await sl(200)}}throw e}
+          for(const [name,sig] of Object.entries(CASES)){
+            const tx=await call('getTransaction',[sig,{encoding:'json',commitment:'confirmed',maxSupportedTransactionVersion:0}]);if(!tx)throw Error(name+' missing');
+            const msg=tx.transaction.message,staticKeys=msg.accountKeys,loaded=[...(tx.meta.loadedAddresses?.writable??[]),...(tx.meta.loadedAddresses?.readonly??[])],flat=[...staticKeys,...loaded],h=msg.header,nStatic=staticKeys.length,nw=(tx.meta.loadedAddresses?.writable??[]).length;
+            const meta=i=>{const signer=i<h.numRequiredSignatures;let writable=false,source='lookup-readonly';if(i<nStatic){source='transaction';const sw=h.numRequiredSignatures-h.numReadonlySignedAccounts,uw=nStatic-h.numReadonlyUnsignedAccounts;writable=signer?i<sw:i<uw}else if(i<nStatic+nw){source='lookup-writable';writable=true}return {i,pk:flat[i],signer,writable,source}};
+            let target=null;
+            for(const [ixIndex,ix] of msg.instructions.entries()){if(flat[ix.programIdIndex]!==P)continue;const raw=Buffer.from(bs58.decode(ix.data));if(raw.subarray(0,8).toString('hex')!==DISC[name])continue;target={ixIndex,ix,raw};break}
+            if(!target)throw Error(name+' target ix missing');
+            const accounts=target.ix.accounts.map(meta);
+            const ai=await call('getMultipleAccounts',[accounts.map(a=>a.pk),{encoding:'base64',commitment:'confirmed'}]);
+            const detailed=accounts.map((a,k)=>({...a,owner:ai.value[k]?.owner??null,lamports:ai.value[k]?.lamports??null,dataLen:ai.value[k]?.data?.[0]?Buffer.from(ai.value[k].data[0],'base64').length:null,executable:ai.value[k]?.executable??null}));
+            const inner=(tx.meta.innerInstructions??[]).find(g=>g.index===target.ixIndex)?.instructions??[];
+            const result={name,sig,slot:tx.slot,blockTime:tx.blockTime,ixIndex:target.ixIndex,dataHex:target.raw.toString('hex'),accounts:detailed,inner:inner.map((x,j)=>({j,stackHeight:x.stackHeight,programId:flat[x.programIdIndex],accounts:(x.accounts??[]).map(meta),dataHex:x.data?Buffer.from(bs58.decode(x.data)).toString('hex'):null})),logs:tx.meta.logMessages??[]};
+            console.log('RESULT',name,JSON.stringify(result,null,2));
+          }
+          NODE
