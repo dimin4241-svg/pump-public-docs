@@ -1,0 +1,54 @@
+name: mayhem-binary-surface
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/mayhem-binary-surface.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm install --no-save bs58
+      - name: Fetch deployed Mayhem ProgramData read-only
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          import bs58pkg from 'bs58'; const bs58=bs58pkg.default??bs58pkg;
+          const P='MAyhSmzXzV1pTf7LsNkrNwkWKTo4ougAJ1PPg47MD4e';
+          const RPCS=['https://rpc.solanatracker.io/public','https://api.mainnet-beta.solana.com','https://solana-rpc.publicnode.com'];
+          let id=1; const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          async function rpc(method,params){let last;for(const url of RPCS){try{const r=await fetch(url,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-read-only-binary-surface/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method,params})});if(!r.ok)throw Error('HTTP '+r.status);const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));return {url,result:j.result}}catch(e){last=e;console.log('RPCFAIL',method,url,String(e).slice(0,180));await sleep(300)}}throw last}
+          async function account(pk){const {url,result}=await rpc('getAccountInfo',[pk,{encoding:'base64',commitment:'confirmed'}]);const a=result?.value;if(!a)throw Error('missing '+pk);return {url,a,buf:Buffer.from(a.data[0],'base64')}}
+          const p=await account(P);
+          console.log('PROGRAM_META',JSON.stringify({rpc:p.url,owner:p.a.owner,lamports:p.a.lamports,dataLen:p.buf.length,executable:p.a.executable,hex:p.buf.toString('hex')},null,2));
+          if(p.buf.length<36)throw Error('unexpected Program account length '+p.buf.length);
+          const tag=p.buf.readUInt32LE(0); const programData=bs58.encode(p.buf.subarray(4,36));
+          console.log('PROGRAM_STATE_TAG',tag); console.log('PROGRAMDATA',programData);
+          const pd=await account(programData);
+          console.log('PROGRAMDATA_META',JSON.stringify({rpc:pd.url,owner:pd.a.owner,lamports:pd.a.lamports,dataLen:pd.buf.length,executable:pd.a.executable,headHex:pd.buf.subarray(0,96).toString('hex')},null,2));
+          const magic=Buffer.from([0x7f,0x45,0x4c,0x46]); const elfOff=pd.buf.indexOf(magic);
+          console.log('ELF_OFFSET',elfOff); if(elfOff<0)throw Error('ELF magic not found');
+          console.log('PROGRAMDATA_PREFIX_HEX',pd.buf.subarray(0,elfOff).toString('hex'));
+          if(pd.buf.length>=13){console.log('PROGRAMDATA_STATE_TAG',pd.buf.readUInt32LE(0));console.log('LAST_DEPLOY_SLOT_LE',pd.buf.readBigUInt64LE(4).toString());console.log('UPGRADE_AUTH_OPTION',pd.buf[12]);if(pd.buf[12]===1&&pd.buf.length>=45)console.log('UPGRADE_AUTHORITY',bs58.encode(pd.buf.subarray(13,45)))}
+          fs.writeFileSync('mayhem-programdata.bin',pd.buf); fs.writeFileSync('mayhem.so',pd.buf.subarray(elfOff));
+          console.log('ELF_SIZE',pd.buf.length-elfOff);
+          NODE
+          echo '=== FILE ==='
+          file mayhem.so || true
+          sha256sum mayhem.so mayhem-programdata.bin
+          echo '=== ELF HEADERS ==='
+          readelf -h mayhem.so || true
+          readelf -S mayhem.so | head -120 || true
+          echo '=== SECURITY/STATE STRINGS ==='
+          strings -a -t d -n 4 mayhem.so | grep -iE 'instruction:|burn|sweep|withdraw|reset|resume|stop|trading|admin|authority|vault|fee|global.?params|mayhem.?state|deployed|stable|quote|token|source|instructions/' | head -1200 || true
+          echo '=== ANCHOR ERROR-LIKE STRINGS ==='
+          strings -a -t d -n 5 mayhem.so | grep -iE 'constraint|unauthorized|invalid|exceed|limit|disabled|enabled|insufficient|overflow|underflow|slippage|state|balance|maximum|minimum|not allowed|already|must be|cannot|only ' | head -1200 || true
+          echo '=== ALL LONG ASCII STRINGS ==='
+          strings -a -t d -n 10 mayhem.so | head -2500 || true
