@@ -1,0 +1,45 @@
+name: mayhem-binary-account-context
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/mayhem-binary-account-context.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm install --no-save bs58
+      - name: Recover account-name neighborhoods read-only
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const PD='4TXghKDfUy26yBMjicyfSfAp995GbLtNvW1d1uPSknub';
+          const RPCS=['https://rpc.solanatracker.io/public','https://api.mainnet-beta.solana.com']; let id=1;
+          async function rpc(){for(const u of RPCS){try{const r=await fetch(u,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-read-only-binary-context/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method:'getAccountInfo',params:[PD,{encoding:'base64',commitment:'confirmed'}]})});if(!r.ok)continue;const j=await r.json();if(j.result?.value)return j.result.value}catch{}}throw Error('RPC failed')}
+          const a=await rpc(); const b=Buffer.from(a.data[0],'base64'); const off=b.indexOf(Buffer.from([0x7f,0x45,0x4c,0x46])); fs.writeFileSync('mayhem.so',b.subarray(off));
+          NODE
+          strings -a -t d -n 3 mayhem.so > strings.txt
+          python3 - <<'PY'
+          import re
+          rows=[]
+          for line in open('strings.txt',errors='replace'):
+              m=re.match(r'\s*(\d+)\s+(.*)',line.rstrip('\n'))
+              if m: rows.append((int(m.group(1)),m.group(2)))
+          targets=['Instruction: SweepFees','Instruction: SweepFeesAdmin','Instruction: WithdrawAdmin','Instruction: WithdrawQuoteAdmin','fee_recipient','sol_vault','global_params','admin_quote_ata','sol_vault_quote_ata','wsol_mint','quote_mint']
+          seen=set()
+          for t in targets:
+              hits=[i for i,(_,s) in enumerate(rows) if t.lower() in s.lower()]
+              print('\n### TARGET',t,'HITS',len(hits))
+              for i in hits[:12]:
+                  key=(max(0,i-18),min(len(rows),i+28))
+                  if key in seen: continue
+                  seen.add(key)
+                  print('--- CONTEXT index',i,'offset',rows[i][0],'---')
+                  for off,s in rows[key[0]:key[1]]: print(f'{off:9d} {s}')
+          PY
