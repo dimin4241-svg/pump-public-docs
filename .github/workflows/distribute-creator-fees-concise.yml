@@ -1,0 +1,35 @@
+name: distribute-creator-fees-concise
+on:
+  push:
+    paths:
+      - '.github/workflows/distribute-creator-fees-concise.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-sdk@1.36.0 @solana/web3.js @solana/spl-token bn.js
+      - name: Exact distribute source and IDL
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const j=JSON.parse(fs.readFileSync('node_modules/@pump-fun/pump-sdk/src/idl/pump.json','utf8'));
+          for(const n of ['distribute_creator_fees','get_minimum_distributable_fee','migrate_bonding_curve_creator','collect_creator_fee']){
+            const ix=j.instructions.find(x=>x.name===n);console.log('IDL',n,JSON.stringify(ix));
+          }
+          for(const t of j.types??[])if(/sharing|shareholder|distribut/i.test(t.name))console.log('TYPE',t.name,JSON.stringify(t));
+          for(const a of j.accounts??[])if(/sharing/i.test(a.name))console.log('ACCOUNT',a.name,JSON.stringify(a));
+          NODE
+          echo 'SOURCE_SHARING_BEGIN'
+          nl -ba node_modules/@pump-fun/pump-sdk/src/sharing.ts | sed -n '1,360p'
+          echo 'SOURCE_SHARING_END'
+          node --input-type=module <<'NODE'
+          import * as p from '@pump-fun/pump-sdk';
+          console.log('EXPORTS',Object.keys(p).filter(x=>/shar|distribut|creator|fee/i.test(x)).sort());
+          for(const Cn of ['PumpSdk','OnlinePumpSdk']){const C=p[Cn];if(!C?.prototype)continue;for(const n of Object.getOwnPropertyNames(C.prototype))if(/shar|distribut|creator|fee/i.test(n))console.log('METHOD',Cn,n,'arity',C.prototype[n].length,'src',String(C.prototype[n]).slice(0,9000));}
+          NODE
