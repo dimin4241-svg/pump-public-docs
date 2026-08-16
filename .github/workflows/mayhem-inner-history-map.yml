@@ -1,0 +1,61 @@
+name: mayhem-inner-history-map
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm install --no-save bs58
+      - name: Read-only inner Mayhem CPI map
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import crypto from 'node:crypto';
+          import bs58pkg from 'bs58'; const bs58=bs58pkg.default??bs58pkg;
+          const P='MAyhSmzXzV1pTf7LsNkrNwkWKTo4ougAJ1PPg47MD4e';
+          const names=['initialize_global_params','initialize_fee_recipient','sweep_fees','sweep_fees_admin','update_max_sol_per_sweep','update_max_stable_per_sweep','withdraw_admin','withdraw_quote_admin','update_trader','update_admin','reset_state','reset_sol_deployed','reset_stable_deployed','resume_trading','stop_trading','burn_tokens','extend_account','update_global_params','initialize_mayhem_state','sell','sell_v2','buy','buy_v2','sell_pump_swap','buy_pump_swap'];
+          const disc=n=>crypto.createHash('sha256').update('global:'+n).digest().subarray(0,8).toString('hex');
+          const byDisc=new Map(names.map(n=>[disc(n),n]));
+          const RPCS=['https://rpc.solanatracker.io/public','https://api.mainnet-beta.solana.com','https://solana-rpc.publicnode.com'];
+          let rid=1; const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          async function one(url,method,params){const r=await fetch(url,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-read-only-inner-history/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:rid++,method,params})});if(!r.ok)throw Error('HTTP '+r.status);const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));return j.result}
+          async function call(method,params){let e;for(const u of RPCS){try{return await one(u,method,params)}catch(x){e=x;console.log('RPCFAIL',method,u,String(x).slice(0,140));await sleep(180)}}throw e}
+          async function batchTx(sigs){let e;for(const url of RPCS){try{const req=sigs.map(sig=>({jsonrpc:'2.0',id:rid++,method:'getTransaction',params:[sig,{encoding:'jsonParsed',commitment:'confirmed',maxSupportedTransactionVersion:0}]}));const r=await fetch(url,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-read-only-inner-history/1.0'},body:JSON.stringify(req)});if(!r.ok)throw Error('HTTP '+r.status);const arr=await r.json();if(!Array.isArray(arr))throw Error('non-array');const m=new Map(arr.map(x=>[x.id,x.result]));return req.map(x=>m.get(x.id)??null)}catch(x){e=x;console.log('BATCHFAIL',url,String(x).slice(0,170));await sleep(350)}}throw e}
+          let sigs=[],before;
+          for(let page=0;page<15;page++){
+            const a=await call('getSignaturesForAddress',[P,{limit:100,commitment:'confirmed',...(before?{before}:{})}]); if(!a?.length)break;
+            sigs.push(...a.filter(x=>x.err==null)); before=a[a.length-1].signature;
+            console.log('PAGE',page,'OK',sigs.length,'SLOT',a[a.length-1].slot); await sleep(140);
+          }
+          const counts={top:{},inner:{}},hits=[];
+          const decode=(data)=>{try{const b=Buffer.from(bs58.decode(data));const d=b.subarray(0,8).toString('hex');return {d,name:byDisc.get(d)??'unknown:'+d}}catch{return null}};
+          const accountPk=(a,keys)=>typeof a==='number'?(keys[a]?.pubkey??keys[a]??String(a)):(typeof a==='string'?a:a?.toString?.());
+          for(let i=0;i<sigs.length;i+=12){
+            const chunk=sigs.slice(i,i+12),txs=await batchTx(chunk.map(x=>x.signature));
+            for(let j=0;j<txs.length;j++){
+              const tx=txs[j]; if(!tx||tx.meta?.err)continue;
+              const msg=tx.transaction?.message,keys=msg?.accountKeys??[];
+              const keyMap=new Map(keys.map((k,idx)=>[typeof k==='string'?k:k.pubkey,{idx,signer:typeof k==='string'?null:k.signer,writable:typeof k==='string'?null:k.writable,source:typeof k==='string'?null:k.source}]));
+              const signerList=keys.filter(k=>typeof k!=='string'&&k.signer).map(k=>k.pubkey);
+              const processIx=(ix,where,parentIndex,stackHeight)=>{
+                const pid=typeof ix.programId==='string'?ix.programId:(typeof ix.programId==='number'?(keys[ix.programId]?.pubkey??keys[ix.programId]):ix.programId?.toString?.());
+                if(pid!==P||!ix.data)return;
+                const z=decode(ix.data);if(!z)return;counts[where][z.name]=(counts[where][z.name]??0)+1;
+                const target=where==='inner'||!/^(buy|sell|buy_v2|sell_v2|buy_pump_swap|sell_pump_swap)$/.test(z.name);
+                if(target){const accounts=(ix.accounts??[]).map((a,idx)=>{const pk=accountPk(a,keys);return {idx,pubkey:pk,...(keyMap.get(pk)??{})}});const h={where,parentIndex,stackHeight,name:z.name,disc:z.d,signature:chunk[j].signature,slot:tx.slot,blockTime:tx.blockTime,accounts,allSigners:signerList};hits.push(h);console.log('HIT',JSON.stringify(h,null,2));}
+              };
+              (msg?.instructions??[]).forEach((ix,idx)=>processIx(ix,'top',idx,ix.stackHeight??1));
+              for(const group of tx.meta?.innerInstructions??[])for(const ix of group.instructions??[])processIx(ix,'inner',group.index,ix.stackHeight??null);
+            }
+            console.log('PROGRESS',Math.min(i+12,sigs.length),'COUNTS',JSON.stringify(counts)); await sleep(200);
+          }
+          console.log('FINAL',JSON.stringify(counts,null,2));
+          console.log('HITS',hits.length);
+          console.log('HIT_SUMMARY',JSON.stringify(hits,null,2));
+          NODE
