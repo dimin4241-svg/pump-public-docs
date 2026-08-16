@@ -1,0 +1,38 @@
+name: mayhem-trade-cpi-inspect
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm install --no-save @solana/web3.js bs58
+      - name: Read-only representative Mayhem trade CPI inspection
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import {Connection,PublicKey} from '@solana/web3.js';
+          import bs58pkg from 'bs58'; const bs58=bs58pkg.default??bs58pkg;
+          const P='MAyhSmzXzV1pTf7LsNkrNwkWKTo4ougAJ1PPg47MD4e';
+          const wanted=new Map([
+            ['c2951c220e7467d6','buy_v2'],['ae123813f63bd1bc','sell_v2'],
+            ['66063d1201daebea','buy'],['33e685a4017f83ad','sell'],
+            ['2970bf2b24c10c3b','buy_pump_swap'],['2d66bf1478bb681f','sell_pump_swap']
+          ]);
+          const conn=new Connection('https://api.mainnet-beta.solana.com','confirmed');
+          const sigs=await conn.getSignaturesForAddress(new PublicKey(P),{limit:100},'confirmed');
+          const found={};
+          function flatten(tx){const msg=tx.transaction.message;const k=msg.getAccountKeys({accountKeysFromLookups:tx.meta?.loadedAddresses});return {msg,flat:[...k.staticAccountKeys,...(k.accountKeysFromLookups?.writable??[]),...(k.accountKeysFromLookups?.readonly??[])],nStatic:k.staticAccountKeys.length,nw:(k.accountKeysFromLookups?.writable??[]).length};}
+          function meta(i,msg,flat,nStatic,nw){const h=msg.header,pk=flat[i]?.toBase58?.()??String(flat[i]),signer=i<h.numRequiredSignatures;let writable=false,source='lookup-readonly';if(i<nStatic){source='transaction';const sw=h.numRequiredSignatures-h.numReadonlySignedAccounts,uw=nStatic-h.numReadonlyUnsignedAccounts;writable=signer?i<sw:i<uw}else if(i<nStatic+nw){source='lookup-writable';writable=true}return {i,pk,signer,writable,source}}
+          for(const s of sigs){if(Object.keys(found).length>=6)break;if(s.err)continue;let tx;try{tx=await conn.getTransaction(s.signature,{commitment:'confirmed',maxSupportedTransactionVersion:0})}catch{continue}if(!tx||tx.meta?.err)continue;const {msg,flat,nStatic,nw}=flatten(tx);for(const [idx,ix] of msg.compiledInstructions.entries()){if(flat[ix.programIdIndex]?.toBase58()!==P)continue;const raw=Buffer.from(ix.data),d=raw.subarray(0,8).toString('hex'),name=wanted.get(d);if(!name||found[name])continue;const accounts=[...ix.accountKeyIndexes].map(i=>meta(i,msg,flat,nStatic,nw));const infos=await conn.getMultipleAccountsInfo(accounts.map(a=>new PublicKey(a.pk)),'confirmed');const accountInfo=accounts.map((a,i)=>({...a,owner:infos[i]?.owner?.toBase58()??null,executable:infos[i]?.executable??null,dataLen:infos[i]?.data?.length??null,lamports:infos[i]?.lamports??null}));const inner=[];for(const g of tx.meta?.innerInstructions??[]){if(g.index!==idx)continue;for(const [j,c] of (g.instructions??[]).entries()){inner.push({j,stackHeight:c.stackHeight,programId:flat[c.programIdIndex]?.toBase58(),accounts:[...(c.accounts??[])].map(i=>meta(i,msg,flat,nStatic,nw)),dataHex:Buffer.from(bs58.decode(c.data)).toString('hex')})}}
+              found[name]={signature:s.signature,slot:tx.slot,blockTime:tx.blockTime,idx,dataHex:raw.toString('hex'),accounts:accountInfo,inner,logs:(tx.meta?.logMessages??[])};console.log('FOUND',name,JSON.stringify(found[name],null,2));
+            }
+          }
+          console.log('SUMMARY_KEYS',Object.keys(found));
+          for(const [name,x] of Object.entries(found))console.log('COMPACT',name,JSON.stringify({signature:x.signature,slot:x.slot,dataHex:x.dataHex,accounts:x.accounts.map(a=>({i:a.i,pk:a.pk,signer:a.signer,writable:a.writable,owner:a.owner,executable:a.executable,dataLen:a.dataLen})),inner:x.inner.map(y=>({j:y.j,stackHeight:y.stackHeight,programId:y.programId,accounts:y.accounts,dataHex:y.dataHex}))},null,2));
+          NODE
