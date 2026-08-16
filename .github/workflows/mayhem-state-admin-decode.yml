@@ -1,0 +1,57 @@
+name: mayhem-state-admin-decode
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/mayhem-state-admin-decode.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  decode:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm install --no-save @pump-fun/pump-sdk@1.36.0 @pump-fun/pump-swap-sdk@1.19.0 bs58
+      - name: Static Mayhem state surface
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '=== MAYHEM STATIC GREP ==='
+          grep -RniE 'mayhem[_A-Za-z]*state|Mayhem[A-Za-z]*State|global[_A-Za-z]*params|Global[A-Za-z]*Params|sweep[_A-Za-z]*fees|withdraw[_A-Za-z]*quote|burn[_A-Za-z]*tokens|reset[_A-Za-z]*state|resume[_A-Za-z]*trading|stop[_A-Za-z]*trading' node_modules/@pump-fun/pump-sdk node_modules/@pump-fun/pump-swap-sdk --exclude='*.map' | head -500 || true
+      - name: Read-only live state decode
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import crypto from 'node:crypto';
+          import bs58pkg from 'bs58'; const bs58=bs58pkg.default??bs58pkg;
+          const STATE='13ec7XdrjF3h3YcqBTFDSReRcUFwbCnJaAQspM4j6DDJ';
+          const MAYHEM='MAyhSmzXzV1pTf7LsNkrNwkWKTo4ougAJ1PPg47MD4e';
+          const RPCS=['https://rpc.solanatracker.io/public','https://api.mainnet-beta.solana.com','https://solana-rpc.publicnode.com'];
+          let id=1; const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          async function rpc(method,params){let last;for(const url of RPCS){try{const r=await fetch(url,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-read-only-state-decode/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method,params})});if(!r.ok)throw Error('HTTP '+r.status);const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));return {url,result:j.result}}catch(e){last=e;console.log('RPCFAIL',method,url,String(e).slice(0,180));await sleep(300)}}throw last}
+          const ai=(await rpc('getAccountInfo',[STATE,{encoding:'base64',commitment:'confirmed'}])).result?.value;
+          if(!ai)throw Error('state missing'); const b=Buffer.from(ai.data[0],'base64');
+          console.log('STATE_META',JSON.stringify({pubkey:STATE,owner:ai.owner,lamports:ai.lamports,dataLen:b.length,executable:ai.executable},null,2));
+          console.log('STATE_HEX',b.toString('hex'));
+          console.log('DISCRIMINATOR_HEX',b.subarray(0,8).toString('hex'));
+          const accountNames=['MayhemState','MayhemGlobalState','GlobalParams','MayhemGlobalParams','MayhemParams','State'];
+          for(const n of accountNames){const d=crypto.createHash('sha256').update('account:'+n).digest().subarray(0,8).toString('hex');console.log('ACCOUNT_DISC_CANDIDATE',n,d,d===b.subarray(0,8).toString('hex')?'MATCH':'')}
+          console.log('=== ALIGNED U64 ===');
+          for(let off=8;off+8<=b.length;off+=8){console.log('U64',off,b.readBigUInt64LE(off).toString(),'hex',b.subarray(off,off+8).toString('hex'))}
+          console.log('=== BYTE FLAGS / SMALL VALUES ===');
+          for(let off=8;off<b.length;off++){const v=b[off];if(v<=3)console.log('SMALLBYTE',off,v)}
+          const candidates=[];
+          for(let off=8;off+32<=b.length;off++){const bytes=b.subarray(off,off+32);if(bytes.every(x=>x===0))continue;candidates.push({off,pk:bs58.encode(bytes)})}
+          const live=[];
+          for(let base=0;base<candidates.length;base+=80){const chunk=candidates.slice(base,base+80);let res;try{res=(await rpc('getMultipleAccounts',[chunk.map(x=>x.pk),{encoding:'base64',commitment:'confirmed'}])).result?.value??[]}catch(e){console.log('CHUNK_FAIL',base,String(e));continue}for(let i=0;i<chunk.length;i++){const a=res[i];if(!a)continue;const len=a.data?.[0]?Buffer.from(a.data[0],'base64').length:null;live.push({...chunk[i],owner:a.owner,lamports:a.lamports,dataLen:len,executable:a.executable})}await sleep(180)}
+          console.log('LIVE_32BYTE_WINDOWS',JSON.stringify(live,null,2));
+          const exactProgramWindows=live.filter(x=>x.owner===MAYHEM || x.pk===MAYHEM);
+          console.log('MAYHEM_RELATED_WINDOWS',JSON.stringify(exactProgramWindows,null,2));
+          const systemWallets=live.filter(x=>x.owner==='11111111111111111111111111111111' && x.dataLen===0 && !x.executable && x.lamports>0);
+          console.log('SYSTEM_WALLET_CANDIDATES',JSON.stringify(systemWallets,null,2));
+          console.log('=== RARE INSTRUCTION DISCRIMINATORS ===');
+          const names=['burn_tokens','sweep_fees','sweep_fees_admin','withdraw_quote_admin','withdraw_admin','reset_state','reset_sol_deployed','reset_stable_deployed','resume_trading','stop_trading','set_admin','set_authority','update_admin'];
+          for(const n of names){console.log('IXDISC',n,crypto.createHash('sha256').update('global:'+n).digest().subarray(0,8).toString('hex'))}
+          NODE
