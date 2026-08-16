@@ -1,0 +1,30 @@
+name: mayhem-admin-history
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/mayhem-admin-history.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  trace:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save bs58
+      - name: Read-only admin history trace
+        shell: bash
+        run: |
+          cat > x.mjs <<'NODE'
+          import bs58pkg from 'bs58';const bs58=bs58pkg.default??bs58pkg;
+          const ADMIN='FFWtrEQ4B4PKQoVuHYzZq8FabGkVatYzDpEVHsK5rrhF',MAY='MAyhSmzXzV1pTf7LsNkrNwkWKTo4ougAJ1PPg47MD4e';
+          const NAMES={'1e1b87bc899eda6b':'WithdrawAdmin','cc712a30723af859':'WithdrawQuoteAdmin','afe1624776422294':'SweepFees','4c93c5e16f9c75e7':'SweepFeesAdmin','22ada705c885e192':'UpdateMaxSolPerSweep','804b4c8b7dc46f67':'UpdateMaxStablePerSweep','c9cf63406556af60':'UpdateTrader','a1b028d53cb8b3e4':'UpdateAdmin','9176742a28db948b':'ResetState','b0ad9da2f0bcc439':'ResetSolDeployed','bf2530b70f5489cb':'ResetStableDeployed','922ed456459f1e41':'ResumeTrading','7fb06a3bf27a726f':'StopTrading','9224de6c59e2f97e':'UpdateGlobalParams','0d127fea3b28ccda':'InitializeGlobalParams','da578ec8cec516c8':'InitializeFeeRecipient','4c0f33fee5d77942':'BurnTokens','ea66c2cb96483ee5':'ExtendAccount'};
+          const RPCS=['https://api.mainnet-beta.solana.com','https://rpc.solanatracker.io/public'];let id=1;const sl=m=>new Promise(r=>setTimeout(r,m));async function q(u,m,p){const r=await fetch(u,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-readonly/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method:m,params:p})});if(!r.ok)throw Error('HTTP '+r.status);const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));return j.result}async function call(m,p){let e;for(const u of RPCS){for(let n=0;n<5;n++)try{return await q(u,m,p)}catch(x){e=x;await sl(250+450*n)}console.log('RPC_FAIL',m,u,String(e).slice(0,130))}throw e}
+          const sigs=[];let before;for(let p=0;p<3;p++){const o={limit:100};if(before)o.before=before;const a=await call('getSignaturesForAddress',[ADMIN,o]);sigs.push(...a.filter(x=>!x.err));if(a.length<100)break;before=a.at(-1).signature;await sl(100)}console.log('SIGS',sigs.length,sigs[0]?.slot,sigs.at(-1)?.slot);
+          const key=x=>typeof x==='string'?x:x?.pubkey??String(x);function keys(t){const a=(t.transaction.message.accountKeys??[]).map(key),l=t.meta?.loadedAddresses??{};return [...a,...(l.writable??[]).map(key),...(l.readonly??[]).map(key)]}function dec(ix,k){let d=Buffer.alloc(0);try{d=Buffer.from(bs58.decode(ix.data??''))}catch{}return {pid:k[ix.programIdIndex],data:d,accounts:(ix.accounts??[]).map(i=>k[i])}}
+          const rows=[];for(let i=0;i<sigs.length;i++){let t;try{t=await call('getTransaction',[sigs[i].signature,{encoding:'json',maxSupportedTransactionVersion:0,commitment:'confirmed'}])}catch(e){continue}if(!t)continue;const k=keys(t),h=t.transaction.message.header,signers=(t.transaction.message.accountKeys??[]).slice(0,h.numRequiredSignatures).map(key);for(let oi=0;oi<(t.transaction.message.instructions??[]).length;oi++){const d=dec(t.transaction.message.instructions[oi],k);if(d.pid!==MAY||d.data.length<8)continue;const disc=d.data.subarray(0,8).toString('hex');const row={signature:sigs[i].signature,slot:sigs[i].slot,blockTime:sigs[i].blockTime,disc,name:NAMES[disc]??'Unknown',signers,accounts:d.accounts,dataHex:d.data.toString('hex')};rows.push(row);console.log('ROW',JSON.stringify(row,null,2))}await sl(80)}
+          const counts={};for(const r of rows)counts[r.name]=(counts[r.name]??0)+1;console.log('SUMMARY',JSON.stringify({counts,rows},null,2));
+          NODE
+          node x.mjs
