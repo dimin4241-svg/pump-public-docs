@@ -1,0 +1,40 @@
+name: parse-set-coin-creator-surface
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/parse-set-coin-creator-surface.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  parse:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: audit/boost-runtime-probe-20260815}
+      - shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --allow-escape-sequences repos/dimin4241-svg/pump-public-docs/actions/jobs/95123768250/logs > raw.log
+          python3 - <<'PY'
+          import re
+          s=open('raw.log',encoding='utf-8-sig',errors='replace').read()
+          s=re.sub(r'\x1b\[[0-9;]*m','',s)
+          lines=[re.sub(r'^\d{4}-\d\d-\d\dT[^ ]+Z\s+','',x) for x in s.splitlines()]
+          pats=['setCoinCreator','set_coin_creator','metadata','bondingCurve','bonding_curve','coinCreator','coin_creator','baseMint','base_mint','findProgramAddress','getPda','accountsPartial','accountsStrict']
+          hits=[]
+          for i,l in enumerate(lines):
+            if any(p.lower() in l.lower() for p in pats):
+              hits.append(i)
+          keep=set()
+          for i in hits:
+            keep.update(range(max(0,i-8),min(len(lines),i+18)))
+          last=-2
+          for i in sorted(keep):
+            if i>last+1: print('---')
+            print(f'{i+1}: {lines[i]}')
+            last=i
+          PY
