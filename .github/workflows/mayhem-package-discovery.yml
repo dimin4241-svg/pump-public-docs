@@ -1,0 +1,25 @@
+name: mayhem-package-discovery
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/mayhem-package-discovery.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  discover:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 6
+    steps:
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - name: Query npm registry read-only
+        shell: bash
+        run: |
+          echo '=== EXACT CANDIDATES ==='
+          for p in @pump-fun/mayhem-sdk @pump-fun/pump-mayhem-sdk @pump-fun/mayhem @pump-fun/pump-mayhem; do
+            echo "PACKAGE $p"
+            npm view "$p" name version repository dist.tarball 2>&1 || true
+          done
+          echo '=== SEARCH ==='
+          npm search --json mayhem pump-fun 2>/dev/null | node -e 'let s="";process.stdin.on("data",d=>s+=d);process.stdin.on("end",()=>{try{let a=JSON.parse(s);for(const x of a.filter(x=>String(x.name).includes("pump")||String(x.name).includes("mayhem")).slice(0,30))console.log(JSON.stringify({name:x.name,version:x.version,description:x.description,links:x.links}))}catch(e){console.log(s.slice(0,10000))}})'
