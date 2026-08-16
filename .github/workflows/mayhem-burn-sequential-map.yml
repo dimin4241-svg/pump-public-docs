@@ -1,0 +1,49 @@
+name: mayhem-burn-sequential-map
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/mayhem-burn-sequential-map.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @solana/web3.js @solana/spl-token @pump-fun/pump-sdk@1.36.0
+      - name: Simulation-only sequential BurnTokens map
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import {PublicKey,TransactionInstruction,TransactionMessage,VersionedTransaction,Keypair} from '@solana/web3.js';
+          import {TOKEN_PROGRAM_ID,TOKEN_2022_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID} from '@solana/spl-token';
+          import * as pump from '@pump-fun/pump-sdk'; import crypto from 'node:crypto';
+          const MINT=new PublicKey('5wGtQmhiJ3Gb8VBBbXno9byUzVmyeZ9dFuRt8EcQpump'),P=pump.MAYHEM_PROGRAM_ID,STATE=pump.getMayhemStatePda(MINT),VAULT=pump.getTokenVaultPda(MINT),SOLV=pump.getSolVaultPda(),G=pump.getGlobalParamsPda(),BC1=pump.bondingCurvePda(MINT),BC2=pump.bondingCurveV2Pda(MINT),TRADER=new PublicKey('Gygj9QQby4j2jryqyqBHvLP7ctv2SaANgh4sCb69BUpA'),ADMIN=new PublicKey('FFWtrEQ4B4PKQoVuHYzZq8FabGkVatYzDpEVHsK5rrhF'),SYS=new PublicKey('11111111111111111111111111111111'),[EV]=PublicKey.findProgramAddressSync([Buffer.from('__event_authority')],P);
+          const m=(p,s=false,w=false)=>({pubkey:p,isSigner:s,isWritable:w}), disc=crypto.createHash('sha256').update('global:burn_tokens').digest().subarray(0,8);
+          const options={
+            sol_vault:[['canonical_sol_vault',m(SOLV,false,true)],['random_sol_vault',m(Keypair.generate().publicKey,false,true)]],
+            bonding_curve:[['bc_v1',m(BC1,false,true)],['bc_v2',m(BC2,false,true)]],
+            global_params:[['mayhem_global_params',m(G,false,true)]],
+            mayhem_state:[['mayhem_state',m(STATE,false,true)]], mint:[['mint',m(MINT,false,true)]], mayhem_token_vault:[['token_vault',m(VAULT,false,true)]], token_vault:[['token_vault',m(VAULT,false,true)]],
+            global:[['pump_global',m(pump.GLOBAL_PDA,false,false)]], pump_global:[['pump_global',m(pump.GLOBAL_PDA,false,false)]],
+            pump_program:[['pump_program',m(pump.PUMP_PROGRAM_ID,false,false)]], pump_event_authority:[['pump_event',m(pump.PUMP_EVENT_AUTHORITY_PDA,false,false)]],
+            event_authority:[['mayhem_event',m(EV,false,false)]], program:[['mayhem_program',m(P,false,false)]], system_program:[['system',m(SYS,false,false)]],
+            token_program:[['token22',m(TOKEN_2022_PROGRAM_ID,false,false)],['token_legacy',m(TOKEN_PROGRAM_ID,false,false)]], base_token_program:[['token22',m(TOKEN_2022_PROGRAM_ID,false,false)],['token_legacy',m(TOKEN_PROGRAM_ID,false,false)]],
+            associated_token_program:[['ata_program',m(ASSOCIATED_TOKEN_PROGRAM_ID,false,false)]], admin:[['admin',m(ADMIN,true,false)]], trader:[['trader',m(TRADER,true,true)]]
+          };
+          console.log('DERIVED',JSON.stringify({state:STATE.toBase58(),mint:MINT.toBase58(),vault:VAULT.toBase58(),solVault:SOLV.toBase58(),bcV1:BC1.toBase58(),bcV2:BC2.toBase58(),globalParams:G.toBase58(),pumpGlobal:pump.GLOBAL_PDA.toBase58(),pumpProgram:pump.PUMP_PROGRAM_ID.toBase58(),pumpEvent:pump.PUMP_EVENT_AUTHORITY_PDA.toBase58(),mayhemEvent:EV.toBase58()},null,2));
+          const URL='https://api.mainnet-beta.solana.com';let id=1;async function rpc(method,params){const r=await fetch(URL,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-simulation-only-burn-sequential/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method,params})});if(!r.ok)throw Error('HTTP '+r.status);const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));return j.result}const bh=(await rpc('getLatestBlockhash',[{commitment:'processed'}])).value.blockhash;
+          function parse(v){const logs=v?.logs??[],t=logs.join('\n');return {logs,account:t.match(/AnchorError caused by account: ([A-Za-z0-9_\-]+)/)?.[1]??null,code:t.match(/Error Code: ([A-Za-z0-9_]+)/)?.[1]??null,num:Number(t.match(/Error Number: (\d+)/)?.[1]??0)||null}}
+          async function sim(label,keys,full=false){const ix=new TransactionInstruction({programId:P,keys,data:disc});const msg=new TransactionMessage({payerKey:TRADER,recentBlockhash:bh,instructions:[ix]}).compileToV0Message();const tx=new VersionedTransaction(msg);const v=(await rpc('simulateTransaction',[Buffer.from(tx.serialize()).toString('base64'),{encoding:'base64',sigVerify:false,replaceRecentBlockhash:true,commitment:'processed'}])).value,e=parse(v);console.log('SIM',label,JSON.stringify({err:v.err??null,units:v.unitsConsumed,account:e.account,code:e.code,num:e.num,interesting:e.logs.filter(x=>/Instruction:|AnchorError|Error Code|Error Number|Left:|Right:|failed|Mayhem|burn|Permission/i.test(x)).slice(-30)},null,2));if(full)for(const l of e.logs)console.log('FULLLOG',l);return {v,e}}
+          let prefix=[m(STATE,false,true),m(MINT,false,true),m(VAULT,false,true)];
+          for(let step=3;step<24;step++){
+            const base=await sim('NEED_'+step,prefix); if(base.v.err==null){console.log('SUCCESS_WITH_PREFIX',step);break} if(base.e.code!=='AccountNotEnoughKeys'){console.log('HANDLER_OR_CONSTRAINT_BEFORE_NEXT',step,base.e.account,base.e.code,base.e.num);break} const name=base.e.account; console.log('NEXT_ACCOUNT',step,name); const opts=options[name]; if(!opts){console.log('NO_OPTIONS_FOR',name);break}
+            let chosen=null;for(const [label,meta] of opts){const r=await sim('TRY_'+step+'_'+name+'_'+label,[...prefix,meta]);if(r.e.code==='AccountNotEnoughKeys' && r.e.account!==name){chosen={label,meta,r};break}if(r.v.err==null){chosen={label,meta,r};break}if(r.e.account!==name && r.e.code!=='AccountNotInitialized' && r.e.code!=='AccountDiscriminatorMismatch'){chosen={label,meta,r};break}}
+            if(!chosen){console.log('NO_VALID_OPTION',step,name);break} console.log('CHOSEN',step,name,chosen.label,chosen.meta.pubkey.toBase58(),'NEXT',chosen.r.e.account,chosen.r.e.code); prefix.push(chosen.meta)
+          }
+          console.log('FINAL_PREFIX',JSON.stringify(prefix.map((x,i)=>({i,pk:x.pubkey.toBase58(),signer:x.isSigner,writable:x.isWritable})),null,2)); await sim('FINAL_CONTROL',prefix,true);
+          // Explicitly prove whether sol_vault is constrained in parser/handler at same stage.
+          if(prefix.length>3){const bad=prefix.map(x=>({...x}));bad[3]=m(Keypair.generate().publicKey,false,true);await sim('MUTATE_SOL_VAULT_RANDOM',bad,true)}
+          NODE
