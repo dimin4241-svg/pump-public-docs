@@ -1,0 +1,25 @@
+name: no-signer-economic-surface-concise
+on:
+  push:
+    paths:
+      - '.github/workflows/no-signer-economic-surface-concise.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inventory:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-sdk@1.36.0 @pump-fun/pump-swap-sdk@1.19.0
+      - name: Print only no-signer or weak-signer economic instructions
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const files=['node_modules/@pump-fun/pump-sdk/src/idl/pump.json','node_modules/@pump-fun/pump-sdk/src/idl/pump_amm.json','node_modules/@pump-fun/pump-swap-sdk/src/idl/pump_amm.json'];
+          const verbs=/(claim|collect|transfer|withdraw|burn|sweep|migrate|close|sync|distribute|fee|incentive|cashback|boost|set_coin_creator)/i;
+          function flat(xs,out=[]){for(const a of xs??[]){if(a.accounts)flat(a.accounts,out);else out.push(a)}return out}
+          for(const file of files){const j=JSON.parse(fs.readFileSync(file,'utf8'));console.log('\n===',file,j.address,'===');for(const ix of j.instructions??[]){if(!verbs.test(ix.name))continue;const a=flat(ix.accounts),s=a.filter(x=>x.signer);if(s.length>1)continue;console.log(JSON.stringify({name:ix.name,disc:Buffer.from(ix.discriminator??[]).toString('hex'),signers:s.map(x=>x.name),args:ix.args??[],accounts:a.map(x=>({name:x.name,w:!!x.writable,s:!!x.signer,pda:!!x.pda,address:x.address??null,relations:x.relations??[]}))}))}}
+          NODE
