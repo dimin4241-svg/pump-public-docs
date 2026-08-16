@@ -31,11 +31,11 @@ jobs:
           const USDC=new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');
           const [EVENT]=PublicKey.findProgramAddressSync([Buffer.from('__event_authority')],P);
           const VAULT_USDC=getAssociatedTokenAddressSync(USDC,SOL_VAULT,true,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID);
-          const ADMIN_USDC=getAssociatedTokenAddressSync(USDC,ADMIN,false,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID);
-          const TRADER_USDC=getAssociatedTokenAddressSync(USDC,TRADER,false,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID);
+          const ADMIN_USDC=getAssociatedTokenAddressSync(USDC,ADMIN,true,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID);
+          const TRADER_USDC=getAssociatedTokenAddressSync(USDC,TRADER,true,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID);
           console.log('DERIVED',JSON.stringify({event:EVENT.toBase58(),vaultUsdc:VAULT_USDC.toBase58(),adminUsdc:ADMIN_USDC.toBase58(),traderUsdc:TRADER_USDC.toBase58()},null,2));
           const RPCS=['https://rpc.solanatracker.io/public','https://api.mainnet-beta.solana.com','https://solana-rpc.publicnode.com'];let id=1;const sleep=ms=>new Promise(r=>setTimeout(r,ms));
-          async function rpc(method,params){let last;for(const url of RPCS){try{const r=await fetch(url,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-simulation-only-withdraw-auth/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method,params})});if(!r.ok)throw Error('HTTP '+r.status);const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));return {url,result:j.result}}catch(e){last=e;console.log('RPCFAIL',method,url,String(e).slice(0,160));await sleep(220)}}throw last}
+          async function rpc(method,params){let last;for(const url of RPCS){try{const r=await fetch(url,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-simulation-only-withdraw-auth/1.1'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method,params})});if(!r.ok)throw Error('HTTP '+r.status);const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));return {url,result:j.result}}catch(e){last=e;console.log('RPCFAIL',method,url,String(e).slice(0,160));await sleep(220)}}throw last}
           const bh=(await rpc('getLatestBlockhash',[{commitment:'processed'}])).result.value.blockhash;
           const disc=n=>crypto.createHash('sha256').update('global:'+n).digest().subarray(0,8);
           const dataVariants=n=>[disc(n),Buffer.concat([disc(n),Buffer.alloc(8)]),Buffer.concat([disc(n),Buffer.from([1,0,0,0,0,0,0,0])])];
