@@ -1,0 +1,40 @@
+name: mayhem-top-live-and-fees
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/mayhem-top-live-and-fees.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: audit/boost-runtime-probe-20260815}
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-swap-sdk@1.19.0 @solana/web3.js bs58
+      - shell: bash
+        run: |
+          echo '=== FEES.TS ==='
+          sed -n '1,180p' node_modules/@pump-fun/pump-swap-sdk/src/sdk/fees.ts
+          echo '=== FEE CALLSITE ==='
+          sed -n '1080,1140p' node_modules/@pump-fun/pump-swap-sdk/src/sdk/offlinePumpAmm.ts
+          cat > rank.mjs <<'NODE'
+          import bs58pkg from 'bs58';const bs58=bs58pkg.default??bs58pkg;
+          const PROGRAM='pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA';
+          const RPCS=['https://api.mainnet-beta.solana.com','https://solana-rpc.publicnode.com','https://rpc.solanatracker.io/public'];let id=1;const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          async function req(u,m,p,n=3){let e;for(let a=0;a<n;a++){try{const r=await fetch(u,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-readonly/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method:m,params:p})});if(r.status===429||r.status>=500){e=Error('HTTP '+r.status);await sleep(250+300*a);continue}const x=await r.json();if(x.error)throw Error(JSON.stringify(x.error));return x.result}catch(x){e=x;await sleep(200)}}throw e}
+          async function call(m,p){let e;for(const u of RPCS){try{const x=await req(u,m,p);console.log('RPC_OK',m,u);return x}catch(x){e=x;console.log('RPC_FAIL',m,u,String(x).slice(0,160))}}throw e}
+          let rows=null;
+          for(const u of RPCS){try{rows=await req(u,'getProgramAccounts',[PROGRAM,{encoding:'base64',commitment:'confirmed',filters:[{dataSize:301},{memcmp:{offset:243,bytes:'2'}}],dataSlice:{offset:0,length:245}}],2);console.log('MAYHEM_GPA_RPC',u,'ROWS',rows.length);break}catch(e){console.log('MAYHEM_GPA_FAIL',u,String(e).slice(0,200))}}
+          if(!rows)throw Error('no mayhem GPA');
+          const pools=[];for(const r of rows){const b=Buffer.from(r.account.data[0],'base64');if(b.length<245||b[243]!==1)continue;pools.push({pool:r.pubkey,creator:bs58.encode(b.subarray(11,43)),baseMint:bs58.encode(b.subarray(43,75)),quoteMint:bs58.encode(b.subarray(75,107)),lpMint:bs58.encode(b.subarray(107,139)),poolBase:bs58.encode(b.subarray(139,171)),poolQuote:bs58.encode(b.subarray(171,203)),lpSupply:b.readBigUInt64LE(203).toString(),coinCreator:bs58.encode(b.subarray(211,243))});}
+          console.log('MAYHEM_PARSED',pools.length);
+          const byQuote=new Map();for(let i=0;i<pools.length;i+=100){const batch=pools.slice(i,i+100);let vals=null;try{vals=(await call('getMultipleAccounts',[batch.map(x=>x.poolQuote),{encoding:'base64',commitment:'confirmed'}])).value}catch(e){console.log('BATCH_FAIL',i,String(e).slice(0,120));continue}for(let j=0;j<batch.length;j++){const a=vals[j];if(!a)continue;const d=Buffer.from(a.data[0],'base64');if(d.length<72)continue;byQuote.set(batch[j].poolQuote,{amount:d.readBigUInt64LE(64),owner:a.owner});}if(i%2000===0)console.log('PROGRESS',i,pools.length);}
+          const ranked=pools.map(p=>({...p,quoteAmount:(byQuote.get(p.poolQuote)?.amount??0n).toString(),quoteProgram:byQuote.get(p.poolQuote)?.owner??null})).sort((a,b)=>BigInt(a.quoteAmount)>BigInt(b.quoteAmount)?-1:BigInt(a.quoteAmount)<BigInt(b.quoteAmount)?1:0);
+          console.log('TOP_MAYHEM',JSON.stringify(ranked.slice(0,30),null,2));
+          NODE
+          node rank.mjs
