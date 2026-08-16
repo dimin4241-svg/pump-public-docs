@@ -1,0 +1,51 @@
+name: mayhem-creator-state-runtime-v2
+on:
+  push:
+    paths:
+      - '.github/workflows/mayhem-creator-state-runtime-v2.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-swap-sdk@1.19.0 @pump-fun/pump-sdk@1.36.0 @solana/web3.js
+      - name: Simulation-only canonical set/migrate creator transitions
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          import {Connection,PublicKey,TransactionMessage,VersionedTransaction,Keypair,TransactionInstruction} from '@solana/web3.js';
+          import {OnlinePumpAmmSdk,PUMP_AMM_SDK,getPumpAmmProgram} from '@pump-fun/pump-swap-sdk';
+          import {bondingCurvePda} from '@pump-fun/pump-sdk';
+          const RPC='https://api.mainnet-beta.solana.com', connection=new Connection(RPC,'confirmed');
+          const online=new OnlinePumpAmmSdk(connection), program=getPumpAmmProgram(connection);
+          const POOL=new PublicKey('DSV2CUbhfEWRPRn9QRZWkYohRi47WEeauz8s89ekKBdN');
+          const PAYER=new PublicKey('Gygj9QQby4j2jryqyqBHvLP7ctv2SaANgh4sCb69BUpA');
+          const METADATA_PROGRAM=new PublicKey('metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s');
+          const safe=v=>{if(v==null)return v;if(v?.toBase58)return v.toBase58();if(v?.toString&&typeof v!=='object')return v.toString();if(Array.isArray(v))return v.map(safe);if(typeof v==='object'){const o={};for(const [k,z] of Object.entries(v))o[k]=safe(z);return o}return v};
+          const pre=await online.fetchPool(POOL); const BASE=pre.baseMint;
+          const [METADATA]=PublicKey.findProgramAddressSync([Buffer.from('metadata'),METADATA_PROGRAM.toBuffer(),BASE.toBuffer()],METADATA_PROGRAM);
+          const BONDING=bondingCurvePda(BASE);
+          const idl=JSON.parse(fs.readFileSync('node_modules/@pump-fun/pump-swap-sdk/src/idl/pump_amm.json','utf8'));
+          const migDef=idl.instructions.find(x=>x.name==='migrate_pool_coin_creator');
+          const sharingDef=migDef.accounts.find(x=>x.name==='sharing_config');
+          const SHARING_PROGRAM=new PublicKey(Uint8Array.from(sharingDef.pda.program.value));
+          const [SHARING]=PublicKey.findProgramAddressSync([Buffer.from('sharing-config'),BASE.toBuffer()],SHARING_PROGRAM);
+          console.log('DERIVED',JSON.stringify({pool:POOL.toBase58(),baseMint:BASE.toBase58(),preCoinCreator:pre.coinCreator.toBase58(),poolCreator:pre.creator.toBase58(),metadata:METADATA.toBase58(),bondingCurve:BONDING.toBase58(),sharingProgram:SHARING_PROGRAM.toBase58(),sharingConfig:SHARING.toBase58()},null,2));
+          const infos=await connection.getMultipleAccountsInfo([METADATA,BONDING,SHARING],'confirmed');console.log('DERIVED_META',JSON.stringify([METADATA,BONDING,SHARING].map((p,i)=>({pk:p.toBase58(),exists:!!infos[i],owner:infos[i]?.owner.toBase58()??null,len:infos[i]?.data.length??null})),null,2));
+          function desc(ix){return {data:Buffer.from(ix.data).toString('hex'),keys:ix.keys.map((k,i)=>({i,pk:k.pubkey.toBase58(),s:k.isSigner,w:k.isWritable}))}}
+          function mutate(ix,index,pk){const keys=ix.keys.map(k=>({...k}));keys[index]={...keys[index],pubkey:pk};return new TransactionInstruction({programId:ix.programId,keys,data:Buffer.from(ix.data)})}
+          function parse(logs){const t=(logs??[]).join('\n');return {account:t.match(/AnchorError caused by account: ([A-Za-z0-9_\-]+)/)?.[1]??null,code:t.match(/Error Code: ([A-Za-z0-9_]+)/)?.[1]??null,num:Number(t.match(/Error Number: (\d+)/)?.[1]??0)||null,interesting:(logs??[]).filter(x=>/Instruction:|AnchorError|Error Code|Error Number|Left:|Right:|failed|success|creator|sharing/i.test(x)).slice(-100)}}
+          async function sim(label,ix){const {blockhash}=await connection.getLatestBlockhash('processed');const msg=new TransactionMessage({payerKey:PAYER,recentBlockhash:blockhash,instructions:[ix]}).compileToV0Message();const tx=new VersionedTransaction(msg);const raw=Buffer.from(tx.serialize()).toString('base64');const req={jsonrpc:'2.0',id:1,method:'simulateTransaction',params:[raw,{encoding:'base64',sigVerify:false,replaceRecentBlockhash:true,commitment:'processed',accounts:{encoding:'base64',addresses:[POOL.toBase58()]}}]};const r=await fetch(RPC,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-simulation-only-creator-state-v2/1.0'},body:JSON.stringify(req)});const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));const v=j.result.value,e=parse(v.logs);let post=null,postErr=null;try{const a=v.accounts?.[0];if(a?.data?.[0])post=PUMP_AMM_SDK.decodePool(Buffer.from(a.data[0],'base64'))}catch(x){postErr=String(x)}console.log('\nSIM',label,JSON.stringify({err:v.err,units:v.unitsConsumed,account:e.account,code:e.code,num:e.num,preCoinCreator:pre.coinCreator.toBase58(),postCoinCreator:post?.coinCreator?.toBase58?.()??null,postCreator:post?.creator?.toBase58?.()??null,postDecodeError:postErr,interesting:e.interesting},null,2));return {v,e,post}}
+
+          let setIx=null;try{setIx=await program.methods.setCoinCreator().accountsPartial({pool:POOL,metadata:METADATA,bondingCurve:BONDING}).instruction();console.log('SET_IX',JSON.stringify(desc(setIx),null,2));await sim('set_control',setIx)}catch(e){console.log('SET_BUILD_FAIL',String(e).slice(0,1200))}
+          if(setIx){const metaI=setIx.keys.findIndex(k=>k.pubkey.equals(METADATA)),bondI=setIx.keys.findIndex(k=>k.pubkey.equals(BONDING));if(metaI>=0)await sim('set_random_metadata',mutate(setIx,metaI,Keypair.generate().publicKey));if(bondI>=0)await sim('set_random_bonding_curve',mutate(setIx,bondI,Keypair.generate().publicKey))}
+
+          let migIx=null;try{migIx=await program.methods.migratePoolCoinCreator().accountsPartial({pool:POOL,sharingConfig:SHARING}).instruction();console.log('MIGRATE_IX',JSON.stringify(desc(migIx),null,2));await sim('migrate_control',migIx)}catch(e){console.log('MIGRATE_BUILD_FAIL',String(e).slice(0,1200))}
+          if(migIx){const si=migIx.keys.findIndex(k=>k.pubkey.equals(SHARING));if(si>=0)await sim('migrate_random_sharing_config',mutate(migIx,si,Keypair.generate().publicKey))}
+          NODE
