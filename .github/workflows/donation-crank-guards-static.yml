@@ -1,0 +1,28 @@
+name: donation-crank-guards-static
+on:
+  push:
+    paths:
+      - '.github/workflows/donation-crank-guards-static.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-sdk@1.36.0
+      - name: Concise crank account docs, errors and source context
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const j=JSON.parse(fs.readFileSync('node_modules/@pump-fun/pump-sdk/src/idl/pump_fees.json','utf8'));
+          for(const n of ['crank_donation_fee_pda','create_donation_fee_pda']){const ix=j.instructions.find(x=>x.name===n);console.log('IX',n,JSON.stringify(ix,null,2))}
+          console.log('DONATION_ERRORS');for(const e of j.errors??[])if(/donat|relay|deboun|whitelist|quote|creator|config|mint/i.test((e.name??'')+' '+(e.msg??'')))console.log(e.code,e.name,e.msg);
+          NODE
+          echo 'SDK_CRANK_LINES'
+          nl -ba node_modules/@pump-fun/pump-sdk/src/sdk.ts | sed -n '1940,2090p'
+          echo 'IDL_CRANK_LINES'
+          nl -ba node_modules/@pump-fun/pump-sdk/src/idl/pump_fees.ts | sed -n '295,570p'
