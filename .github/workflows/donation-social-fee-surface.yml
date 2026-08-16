@@ -1,0 +1,34 @@
+name: donation-social-fee-surface
+on:
+  push:
+    paths:
+      - '.github/workflows/donation-social-fee-surface.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-sdk@1.36.0 @solana/web3.js @solana/spl-token bs58
+      - name: Static donation/social/relay value surface
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const files=fs.readdirSync('node_modules/@pump-fun/pump-sdk/src/idl').filter(x=>x.endsWith('.json')).map(x=>'node_modules/@pump-fun/pump-sdk/src/idl/'+x);
+          const re=/(donation|social|relay|fee_pda|fee.*pda|crank|debounc|whitelist|epoch)/i;
+          function flat(xs,o=[]){for(const a of xs??[]){if(a.accounts)flat(a.accounts,o);else o.push(a)}return o}
+          for(const f of files){let j;try{j=JSON.parse(fs.readFileSync(f,'utf8'))}catch{continue}const matched=(j.instructions??[]).filter(ix=>re.test(ix.name)||flat(ix.accounts).some(a=>re.test(a.name)));if(!matched.length)continue;console.log('\n=== IDL',f,'program',j.address,'===');for(const ix of matched){const a=flat(ix.accounts);console.log('IX',JSON.stringify({name:ix.name,disc:Buffer.from(ix.discriminator??[]).toString('hex'),args:ix.args??[],signers:a.filter(x=>x.signer).map(x=>x.name),accounts:a.map(x=>({name:x.name,w:!!x.writable,s:!!x.signer,pda:x.pda??null,address:x.address??null,relations:x.relations??[]}))}))}for(const e of j.errors??[])if(re.test((e.name??'')+' '+(e.msg??'')))console.log('ERR',e.code,e.name,e.msg);for(const a of j.accounts??[])if(re.test(a.name))console.log('ACCOUNT',a.name,JSON.stringify(a));for(const t of j.types??[])if(re.test(t.name))console.log('TYPE',t.name,JSON.stringify(t));}
+          NODE
+          echo '=== SOURCE REFS ==='
+          grep -RniE 'donation|socialFee|social_fee|relay|debouncer|mintWhitelist|feePda|fee_pda' node_modules/@pump-fun/pump-sdk/src --exclude='*.map' | head -1000 || true
+          node --input-type=module <<'NODE'
+          import * as p from '@pump-fun/pump-sdk';
+          console.log('EXPORTS',Object.keys(p).filter(x=>/donation|social|relay|fee.*pda/i.test(x)).sort());
+          for(const [owner,label] of [[p,'module'],[p.PumpSdk?.prototype,'PumpSdk'],[p.OnlinePumpSdk?.prototype,'OnlinePumpSdk']]){if(!owner)continue;for(const k of [...new Set([...Object.keys(owner),...Object.getOwnPropertyNames(owner)])])if(/donation|social|relay/i.test(k)&&typeof owner[k]==='function')console.log('FUNC',label,k,'arity',owner[k].length,'SRC',String(owner[k]).slice(0,16000));}
+          NODE
