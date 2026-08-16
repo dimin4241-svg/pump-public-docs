@@ -1,0 +1,37 @@
+name: mayhem-onchain-idl-recover
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/mayhem-onchain-idl-recover.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  recover:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm install --no-save @solana/web3.js bs58
+      - name: Derive and decode old Anchor IDL account read-only
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import {PublicKey} from '@solana/web3.js';
+          import crypto from 'node:crypto'; import zlib from 'node:zlib';
+          const P=new PublicKey('MAyhSmzXzV1pTf7LsNkrNwkWKTo4ougAJ1PPg47MD4e');
+          const [base,bump]=PublicKey.findProgramAddressSync([],P);
+          const idl=await PublicKey.createWithSeed(base,'anchor:idl',P);
+          console.log('IDL_BASE',base.toBase58(),'bump',bump); console.log('IDL_ADDRESS',idl.toBase58());
+          const RPCS=['https://rpc.solanatracker.io/public','https://api.mainnet-beta.solana.com','https://solana-rpc.publicnode.com']; let id=1;
+          async function rpc(method,params){let last;for(const url of RPCS){try{const r=await fetch(url,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-read-only-idl-recover/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method,params})});if(!r.ok)throw Error('HTTP '+r.status);const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));return {url,result:j.result}}catch(e){last=e;console.log('RPCFAIL',url,String(e).slice(0,180))}}throw last}
+          const {url,result}=await rpc('getAccountInfo',[idl.toBase58(),{encoding:'base64',commitment:'confirmed'}]);const a=result?.value;
+          console.log('IDL_ACCOUNT',JSON.stringify(a?{rpc:url,owner:a.owner,lamports:a.lamports,executable:a.executable,dataLen:Buffer.from(a.data[0],'base64').length}:null,null,2));
+          if(!a){console.log('NO_OLD_ANCHOR_IDL_ACCOUNT');process.exit(0)}
+          const b=Buffer.from(a.data[0],'base64'); console.log('HEAD_HEX',b.subarray(0,96).toString('hex'));console.log('ACCOUNT_DISC_EXPECT',crypto.createHash('sha256').update('account:IdlAccount').digest().subarray(0,8).toString('hex'));
+          const starts=[0,8,40,44,36,32];
+          for(const off of starts){if(off>=b.length)continue;const x=b.subarray(off);for(const [name,fn] of [['inflate',zlib.inflateSync],['inflateRaw',zlib.inflateRawSync],['gunzip',zlib.gunzipSync]]){try{const d=fn(x);const s=d.toString('utf8');console.log('DECODE_OK',off,name,'len',d.length);console.log(s.slice(0,250000));process.exit(0)}catch{}}}
+          if(b.length>=44){const len=b.readUInt32LE(40);console.log('VEC_LEN_AT_40',len);const x=b.subarray(44,Math.min(b.length,44+len));for(const [name,fn] of [['inflate',zlib.inflateSync],['inflateRaw',zlib.inflateRawSync],['gunzip',zlib.gunzipSync]]){try{const d=fn(x);console.log('VEC_DECODE_OK',name,d.length);console.log(d.toString('utf8').slice(0,250000));process.exit(0)}catch(e){console.log('VEC_DECODE_FAIL',name,String(e).slice(0,100))}}}
+          console.log('IDL_RAW_ASCII',b.toString('utf8').replace(/[^\x20-\x7e\n\r\t]/g,'.').slice(0,20000));
+          NODE
