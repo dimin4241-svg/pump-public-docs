@@ -1,0 +1,47 @@
+name: protocol-fee-destination-live-probe
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/protocol-fee-destination-live-probe.yml']
+  workflow_dispatch:
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: audit/boost-runtime-probe-20260815}
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-swap-sdk@1.19.0 @solana/web3.js @solana/spl-token bn.js
+      - run: |
+          cat > pfee_probe.mjs <<'NODE'
+          import fs from 'node:fs';
+          import BN from 'bn.js';
+          import {Connection,PublicKey,Transaction,TransactionInstruction,ComputeBudgetProgram} from '@solana/web3.js';
+          import {getAssociatedTokenAddressSync,AccountLayout} from '@solana/spl-token';
+          import {OnlinePumpAmmSdk,PUMP_AMM_SDK,PUMP_AMM_PROGRAM_ID} from '@pump-fun/pump-swap-sdk';
+          const POOL=new PublicKey('GseMAnNDvntR5uFePZ51yZBXzNSn7GdFPkfHwfr6d77J');
+          const USER=new PublicKey('HTVZVEQMBsNanubDPTs3CxDAEGNFQHJY8c1441iy2S5r');
+          const idl=JSON.parse(fs.readFileSync('node_modules/@pump-fun/pump-swap-sdk/src/idl/pump_amm.json','utf8'));
+          const buyDisc=Buffer.from(idl.instructions.find(x=>x.name.toLowerCase()==='buy').discriminator);
+          const RPCS=['https://rpc.solanatracker.io/public','https://api.mainnet-beta.solana.com','https://solana-rpc.publicnode.com'];let rid=1;const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          async function raw(u,m,p,n=4){let e;for(let i=0;i<n;i++){try{const r=await fetch(u,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-simulation-only/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:rid++,method:m,params:p})});if(r.status===429||r.status>=500){e=Error('HTTP '+r.status);await sleep(250+350*i);continue}const j=await r.json();if(j.error){e=Error(JSON.stringify(j.error));if(/429|No response|Too many/i.test(String(e))){await sleep(250+350*i);continue}throw e}return j.result}catch(x){e=x;await sleep(180)}}throw e}
+          async function call(m,p){let e;for(const u of RPCS){try{return await raw(u,m,p)}catch(x){e=x;console.log('RPC_FAIL',m,u,String(x).slice(0,180))}}throw e}
+          let conn;for(const u of RPCS){try{const c=new Connection(u,'confirmed');await c.getLatestBlockhash();conn=c;console.log('SDK_RPC',u);break}catch(e){console.log('SDK_FAIL',u,String(e).slice(0,140))}}if(!conn)throw Error('no sdk rpc');
+          const sdk=new OnlinePumpAmmSdk(conn),state=await sdk.swapSolanaState(POOL,USER),p=state.pool,g=state.globalConfig;
+          const normal=g.protocolFeeRecipients??[],reserved=g.reservedFeeRecipients??[];
+          console.log('STATE',JSON.stringify({isMayhem:p.isMayhemMode,isCashback:p.isCashbackCoin,base:p.baseMint.toBase58(),quote:p.quoteMint.toBase58(),B:state.poolBaseAmount.toString(),Q:state.poolQuoteAmount.toString(),normal:normal.map(x=>x.toBase58()),reserved:reserved.map(x=>x.toBase58()),userQuote:state.userQuoteTokenAccount.toBase58()},null,2));
+          const all=await PUMP_AMM_SDK.buyQuoteInput(state,new BN(2_000_000),5);
+          const buyIndex=all.findIndex(ix=>ix.programId.equals(PUMP_AMM_PROGRAM_ID)&&ix.data.length>=8&&ix.data.subarray(0,8).equals(buyDisc));if(buyIndex<0)throw Error('Buy missing');const buy=all[buyIndex],K=buy.keys;
+          const ns=new Set(normal.map(x=>x.toBase58())),rs=new Set(reserved.map(x=>x.toBase58()));const feeI=K.findIndex(k=>ns.has(k.pubkey.toBase58()));if(feeI<0)throw Error('protocol recipient missing');const feeAtaI=feeI+1;
+          const original=K[feeI].pubkey,originalAta=K[feeAtaI].pubkey;const reserved0=reserved[0],reservedAta=getAssociatedTokenAddressSync(p.quoteMint,reserved0,true,state.quoteTokenProgram);const userAta=state.userQuoteTokenAccount;const normal2=normal.find(x=>!x.equals(original))??normal[0],normal2Ata=getAssociatedTokenAddressSync(p.quoteMint,normal2,true,state.quoteTokenProgram);
+          console.log('BUY_META',JSON.stringify({buyIndex,keyCount:K.length,feeI,feeAtaI,original:original.toBase58(),originalAta:originalAta.toBase58(),reserved0:reserved0.toBase58(),reservedAta:reservedAta.toBase58(),normal2:normal2.toBase58(),normal2Ata:normal2Ata.toBase58(),keys:K.map((k,i)=>({i,p:k.pubkey.toBase58(),normal:ns.has(k.pubkey.toBase58()),reserved:rs.has(k.pubkey.toBase58()),w:k.isWritable,s:k.isSigner}))},null,2));
+          function mut(map){return new TransactionInstruction({programId:buy.programId,data:Buffer.from(buy.data),keys:K.map((k,i)=>map[i]?{...k,pubkey:map[i]}:{...k})})}
+          const cases={control:buy,reserved_domain:mut({[feeI]:reserved0,[feeAtaI]:reservedAta}),arbitrary_user:mut({[feeI]:USER,[feeAtaI]:userAta}),correct_recipient_user_ata:mut({[feeAtaI]:userAta}),correct_recipient_other_authorized_ata:mut({[feeAtaI]:normal2Ata}),other_authorized_correct_ata:mut({[feeI]:normal2,[feeAtaI]:normal2Ata})};
+          function txIxs(x){return all.map((ix,i)=>i===buyIndex?x:ix)}
+          function tok(a){if(!a)return null;const b=Buffer.from(a.data[0],'base64');return b.length>=72?AccountLayout.decode(b).amount.toString():null}
+          async function sim(name,x){const bh=(await call('getLatestBlockhash',[{commitment:'processed'}])).value.blockhash;const tx=new Transaction({feePayer:USER,recentBlockhash:bh}).add(ComputeBudgetProgram.setComputeUnitLimit({units:1_000_000}),...txIxs(x));const bytes=tx.serialize({requireAllSignatures:false,verifySignatures:false});const watch=[p.poolQuoteTokenAccount,state.userQuoteTokenAccount,originalAta,reservedAta,normal2Ata];let v;for(const u of RPCS){try{v=(await raw(u,'simulateTransaction',[bytes.toString('base64'),{encoding:'base64',sigVerify:false,replaceRecentBlockhash:true,commitment:'processed',accounts:{encoding:'base64',addresses:watch.map(q=>q.toBase58())}}],3)).value;console.log('SIM_RPC',name,u);break}catch(e){console.log('SIM_FAIL',name,u,String(e).slice(0,180))}}if(!v){console.log('CASE',name,JSON.stringify({noSim:true}));return}const out={err:v.err,units:v.unitsConsumed,amounts:(v.accounts??[]).map(tok),instructions:(v.logs??[]).filter(l=>l.includes('Instruction:')),anchor:(v.logs??[]).filter(l=>l.includes('AnchorError')||l.includes('Error Code:')),failed:(v.logs??[]).filter(l=>l.includes('failed:'))};console.log('CASE',name,JSON.stringify(out,null,2));if(v.err)for(const l of v.logs??[])if(/AnchorError|Error Code|failed:|Invalid|FeeRecipient|ConstraintToken/i.test(l))console.log('ERRLOG',name,l)}
+          for(const [n,x] of Object.entries(cases))await sim(n,x);
+          NODE
+          node pfee_probe.mjs
