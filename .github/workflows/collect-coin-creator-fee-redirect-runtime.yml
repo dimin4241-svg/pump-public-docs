@@ -68,6 +68,7 @@ jobs:
             coin_creator_vault_ata:canonicalVault,
             coin_creator_token_account:canonicalDestination,
             event_authority:eventAuthority,
+            program:PROGRAM,
           };
           function make(over={}){const keys=def.accounts.map(a=>{const p=over[a.name]??map[a.name];if(!p)throw Error('missing '+a.name);return {pubkey:p,isSigner:!!a.signer,isWritable:!!a.writable}});return new TransactionInstruction({programId:PROGRAM,keys,data:Buffer.from(def.discriminator)});}
           const cases={
