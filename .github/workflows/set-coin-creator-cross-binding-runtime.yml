@@ -1,0 +1,127 @@
+name: set-coin-creator-cross-binding-runtime
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/set-coin-creator-cross-binding-runtime.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: audit/boost-runtime-probe-20260815}
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-swap-sdk@1.19.0 @solana/web3.js @coral-xyz/anchor bs58
+      - name: Simulation-only set_coin_creator cross-binding differential
+        shell: bash
+        run: |
+          cat > probe.mjs <<'NODE'
+          import fs from 'fs';
+          import {Connection,PublicKey,Keypair,Transaction,TransactionInstruction,ComputeBudgetProgram,SystemProgram} from '@solana/web3.js';
+          import {BorshAccountsCoder} from '@coral-xyz/anchor';
+          import {OnlinePumpAmmSdk,PUMP_AMM_SDK,pumpAmmJson} from '@pump-fun/pump-swap-sdk';
+
+          // Authorized bounty harness: read-only RPC + simulateTransaction only. No broadcast methods are present.
+          const AMM=new PublicKey('pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA');
+          const PAYER=new PublicKey('39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg');
+          const TARGETS=[
+            new PublicKey('9pzKW4w96te927oDr8Kq7qke6nJEzAENTF6r5UAvUJzM'), // live Mayhem pool with incinerator coinCreator in prior inventory
+            new PublicKey('3EUUwdSpEXap46NB6n5Mmt3U8XM8vW8HPCLtJDoGzw33'),
+          ];
+          const FOREIGN=new PublicKey('3KFN45igGN2vJ86UTgB4RMJt3A68PHzuvLA6qQ3i7dQ5');
+          const RPCS=['https://solana-rpc.publicnode.com','https://api.mainnet-beta.solana.com','https://rpc.solanatracker.io/public'];
+          const pumpJson=JSON.parse(fs.readFileSync('idl/pump.json','utf8'));
+          const PUMP=new PublicKey(pumpJson.address);
+          const META=new PublicKey('metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s');
+          const ammCoder=new BorshAccountsCoder(pumpAmmJson);
+          const pumpCoder=new BorshAccountsCoder(pumpJson);
+          const setDef=pumpAmmJson.instructions.find(i=>i.name==='set_coin_creator');
+          if(!setDef)throw Error('set_coin_creator missing');
+          console.log('SET_DEF',JSON.stringify(setDef,null,2));
+
+          let id=1;const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          async function raw(u,m,p,n=4){let e;for(let a=0;a<n;a++){try{const r=await fetch(u,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-simulation-only/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method:m,params:p})});if(r.status===429||r.status>=500){e=Error('HTTP '+r.status);await sleep(250+350*a);continue}const x=await r.json();if(x.error)throw Error(JSON.stringify(x.error));return x.result}catch(x){e=x;await sleep(150)}}throw e}
+          async function call(m,p){let e;for(const u of RPCS){try{return await raw(u,m,p)}catch(x){e=x;console.log('RPC_FAIL',m,u,String(x).slice(0,180))}}throw e}
+          function clean(x){if(x==null)return x;if(typeof x==='bigint')return x.toString();if(typeof x?.toBase58==='function')return x.toBase58();if(Array.isArray(x))return x.map(clean);if(typeof x==='object'){const y={};for(const [k,v] of Object.entries(x))y[k]=clean(v);return y}return x}
+          function curvePda(mint){return PublicKey.findProgramAddressSync([Buffer.from('bonding-curve'),mint.toBuffer()],PUMP)[0]}
+          function metadataPda(mint){return PublicKey.findProgramAddressSync([Buffer.from('metadata'),META.toBuffer(),mint.toBuffer()],META)[0]}
+          const eventAuthority=PublicKey.findProgramAddressSync([Buffer.from('__event_authority')],AMM)[0];
+
+          let conn=null,online=null;
+          for(const u of RPCS){try{const c=new Connection(u,'confirmed');await c.getLatestBlockhash();const o=new OnlinePumpAmmSdk(c);await o.swapSolanaState(FOREIGN,PAYER);conn=c;online=o;console.log('SDK_RPC',u);break}catch(e){console.log('SDK_RPC_FAIL',u,String(e).slice(0,180))}}
+          if(!online)throw Error('no SDK-capable rpc');
+
+          async function state(pool){return await online.swapSolanaState(pool,PAYER)}
+          const allPools=[...TARGETS,FOREIGN];
+          const states=new Map();for(const p of allPools){try{const s=await state(p);states.set(p.toBase58(),s);console.log('POOL_STATE',p.toBase58(),JSON.stringify({baseMint:s.pool.baseMint.toBase58(),quoteMint:s.pool.quoteMint.toBase58(),coinCreator:s.pool.coinCreator.toBase58(),isMayhemMode:s.pool.isMayhemMode},null,2))}catch(e){console.log('POOL_STATE_FAIL',p.toBase58(),String(e));}}
+          const foreignState=states.get(FOREIGN.toBase58());if(!foreignState)throw Error('foreign pool state unavailable');
+
+          async function canonicalIx(pool,s){
+            try{const ix=await PUMP_AMM_SDK.setCoinCreator(pool);console.log('SDK_SET_BUILT',pool.toBase58());return ix}catch(e){console.log('SDK_SET_BUILD_FAIL',pool.toBase58(),String(e).slice(0,240));}
+            const map={
+              pool,
+              bonding_curve:curvePda(s.pool.baseMint),
+              metadata:metadataPda(s.pool.baseMint),
+              base_mint:s.pool.baseMint,
+              mint:s.pool.baseMint,
+              pump_program:PUMP,
+              token_metadata_program:META,
+              metadata_program:META,
+              event_authority:eventAuthority,
+              program:AMM,
+              system_program:SystemProgram.programId,
+            };
+            const keys=setDef.accounts.map(a=>{let p=map[a.name];if(!p&&a.address)p=new PublicKey(a.address);if(!p)throw Error('manual map missing '+a.name);return {pubkey:p,isSigner:!!a.signer,isWritable:!!a.writable}});
+            console.log('MANUAL_SET_BUILT',pool.toBase58());
+            return new TransactionInstruction({programId:AMM,keys,data:Buffer.from(setDef.discriminator)});
+          }
+
+          const foreignIx=await canonicalIx(FOREIGN,foreignState);
+          const names=setDef.accounts.map(a=>a.name);
+          const foreignByName=Object.fromEntries(names.map((n,i)=>[n,foreignIx.keys[i]?.pubkey]));
+          console.log('FOREIGN_CANONICAL_KEYS',JSON.stringify(names.map((n,i)=>({name:n,key:foreignIx.keys[i]?.pubkey.toBase58()})),null,2));
+          const foreignCurve=foreignByName.bonding_curve??curvePda(foreignState.pool.baseMint);
+          const foreignCurveInfo=await call('getAccountInfo',[foreignCurve.toBase58(),{encoding:'base64',commitment:'confirmed'}]);
+          let foreignCurveDecoded=null;try{foreignCurveDecoded=clean(pumpCoder.decode('bonding_curve',Buffer.from(foreignCurveInfo.value.data[0],'base64')))}catch{}
+          console.log('FOREIGN_SOURCE',JSON.stringify({pool:FOREIGN.toBase58(),baseMint:foreignState.pool.baseMint.toBase58(),coinCreator:foreignState.pool.coinCreator.toBase58(),curve:foreignCurve.toBase58(),curveOwner:foreignCurveInfo.value?.owner,curveDecoded:foreignCurveDecoded},null,2));
+
+          const bh=(await call('getLatestBlockhash',[{commitment:'confirmed'}])).value.blockhash;
+          async function sim(label,target,ix){
+            const tx=new Transaction({feePayer:PAYER,recentBlockhash:bh}).add(ComputeBudgetProgram.setComputeUnitLimit({units:350000}),ix);
+            const bytes=tx.serialize({requireAllSignatures:false,verifySignatures:false});
+            let v=null;for(const u of RPCS){try{v=(await raw(u,'simulateTransaction',[bytes.toString('base64'),{encoding:'base64',sigVerify:false,replaceRecentBlockhash:true,commitment:'confirmed',accounts:{encoding:'base64',addresses:[target.toBase58()]}}],3)).value;break}catch(e){console.log('SIM_RPC_FAIL',label,u,String(e).slice(0,180))}}
+            if(!v){const z={rpc:'fail'};console.log('CASE',label,JSON.stringify(z));return z}
+            const logs=v.logs??[];let post=null;try{post=clean(ammCoder.decode('pool',Buffer.from(v.accounts[0].data[0],'base64')))}catch(e){post={decodeError:String(e)}}
+            const out={err:v.err,units:v.unitsConsumed,postCoinCreator:post?.coinCreator??null,postBaseMint:post?.baseMint??null,anchor:logs.filter(x=>x.includes('AnchorError')||x.includes('Error Code:')),failed:logs.filter(x=>x.includes('failed:')),instructions:logs.filter(x=>x.includes('Instruction:'))};
+            console.log('CASE',label,JSON.stringify(out,null,2));if(v.err)for(const x of logs)console.log('ERRLOG',label,x);return out;
+          }
+
+          const summary={};
+          for(const target of TARGETS){
+            const s=states.get(target.toBase58());if(!s){summary[target.toBase58()]={state:'unavailable'};continue}
+            const canon=await canonicalIx(target,s);
+            console.log('TARGET_CANONICAL_KEYS',target.toBase58(),JSON.stringify(names.map((n,i)=>({name:n,key:canon.keys[i]?.pubkey.toBase58()})),null,2));
+            const targetCurve=canon.keys[names.indexOf('bonding_curve')]?.pubkey??curvePda(s.pool.baseMint);
+            const ci=await call('getAccountInfo',[targetCurve.toBase58(),{encoding:'base64',commitment:'confirmed'}]);let curveDecoded=null;try{curveDecoded=clean(pumpCoder.decode('bonding_curve',Buffer.from(ci.value.data[0],'base64')))}catch{}
+            console.log('TARGET_SOURCE',JSON.stringify({pool:target.toBase58(),preCoinCreator:s.pool.coinCreator.toBase58(),baseMint:s.pool.baseMint.toBase58(),curve:targetCurve.toBase58(),curveOwner:ci.value?.owner,curveDecoded},null,2));
+
+            function mutate(replacements){const keys=canon.keys.map((k,i)=>({pubkey:replacements[names[i]]??k.pubkey,isSigner:k.isSigner,isWritable:k.isWritable}));return new TransactionInstruction({programId:canon.programId,keys,data:Buffer.from(canon.data)});}
+            const bundle={};for(const n of names){if(['bonding_curve','metadata','base_mint','mint'].includes(n)&&foreignByName[n])bundle[n]=foreignByName[n]}
+            const random=Keypair.generate().publicKey;
+            const cases={
+              control:canon,
+              foreign_curve_only:mutate({bonding_curve:foreignCurve}),
+              foreign_source_bundle:mutate(bundle),
+              random_curve:mutate({bonding_curve:random}),
+            };
+            const r={preCoinCreator:s.pool.coinCreator.toBase58(),baseMint:s.pool.baseMint.toBase58(),targetCurve:targetCurve.toBase58(),foreignCurve:foreignCurve.toBase58(),cases:{}};
+            for(const [n,ix] of Object.entries(cases))r.cases[n]=await sim(target.toBase58().slice(0,6)+'_'+n,target,ix);
+            summary[target.toBase58()]=r;
+          }
+          console.log('DECISIVE',JSON.stringify(summary,null,2));
+          NODE
+          node probe.mjs
