@@ -15,14 +15,15 @@ jobs:
         with:
           node-version: 24
       - run: npm install --no-save @pump-fun/pump-sdk@1.36.0 @solana/web3.js @solana/spl-token bs58
-      - name: Simulation-only cross-token shared relay differential
+      - name: Simulation-only funded cross-token shared relay differential
         shell: bash
         run: |
           node --input-type=module <<'NODE'
+          import crypto from 'node:crypto';
           import bs58pkg from 'bs58'; const bs58=bs58pkg.default??bs58pkg;
           import {PublicKey,TransactionMessage,VersionedTransaction} from '@solana/web3.js';
           import * as p from '@pump-fun/pump-sdk';
-          import {NATIVE_MINT} from '@solana/spl-token';
+          import {NATIVE_MINT,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID,getAssociatedTokenAddressSync} from '@solana/spl-token';
 
           const RPC='https://api.mainnet-beta.solana.com';
           const FEE='pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ';
@@ -31,13 +32,12 @@ jobs:
           const RELAY=p.DONATION_RELAY_PROGRAM_ID_MAINNET;
           let id=1;
           async function rpc(method,params){
-            const r=await fetch(RPC,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-simulation-only-cross-token-donation/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method,params})});
+            const r=await fetch(RPC,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-simulation-only-cross-token-donation/2.0'},body:JSON.stringify({jsonrpc:'2.0',id:id++,method,params})});
             if(!r.ok) throw Error('HTTP '+r.status);
             const j=await r.json(); if(j.error) throw Error(JSON.stringify(j.error)); return j.result;
           }
           function parseDonation(row){
-            const b=Buffer.from(row.account.data[0],'base64');
-            let o=10;
+            const b=Buffer.from(row.account.data[0],'base64'); let o=10;
             const config=bs58.encode(b.subarray(o,o+=32));
             const base=bs58.encode(b.subarray(o,o+=32));
             const quote=bs58.encode(b.subarray(o,o+=32));
@@ -46,61 +46,50 @@ jobs:
             const lastCrankTs=b.readBigInt64LE(o);
             return {pda:row.pubkey,lamports:row.account.lamports,config,base,quote,creator,totalDonated:totalDonated.toString(),lastCrankTs:lastCrankTs.toString()};
           }
-          function compactAccount(a){
-            if(!a) return null;
-            const data=Buffer.from(a.data[0],'base64');
-            return {lamports:a.lamports,owner:a.owner,executable:a.executable,dataLen:data.length,dataHex:data.toString('hex')};
-          }
-          function parseLogs(logs){
-            const xs=logs??[]; const t=xs.join('\n');
-            return {
-              code:t.match(/Error Code: ([A-Za-z0-9_]+)/)?.[1]??null,
-              num:Number(t.match(/Error Number: (\d+)/)?.[1]??0)||null,
-              account:t.match(/AnchorError caused by account: ([A-Za-z0-9_\-]+)/)?.[1]??null,
-              interesting:xs.filter(x=>/Instruction:|AnchorError|Error Code|Error Number|donat|relay|deboun|epoch|whitelist|Transfer|failed|success/i.test(x)).slice(-220)
-            };
-          }
+          function dataBuf(a){return a?.data?.[0]?Buffer.from(a.data[0],'base64'):null}
+          function hash(b){return b?crypto.createHash('sha256').update(b).digest('hex').slice(0,24):null}
+          function donationState(a){const b=dataBuf(a);if(!b||b.length<154)return null;return {lamports:String(a.lamports),totalDonated:b.readBigUInt64LE(138).toString(),lastCrankTs:b.readBigInt64LE(146).toString(),hash:hash(b)}}
+          function tokenState(a){const b=dataBuf(a);if(!b||b.length<72)return null;return {lamports:String(a.lamports),amount:b.readBigUInt64LE(64).toString(),hash:hash(b)}}
+          function rawState(a){const b=dataBuf(a);return a?{lamports:String(a.lamports),owner:a.owner,dataLen:b?.length??0,hash:hash(b)}:null}
+          function changedBytes(a,b){const x=dataBuf(a),y=dataBuf(b);if(!x||!y)return null;const out=[];for(let i=0;i<Math.min(x.length,y.length);i++)if(x[i]!==y[i])out.push(i);if(x.length!==y.length)out.push('len');return out.slice(0,100)}
+          function parseLogs(logs){const xs=logs??[],t=xs.join('\n');return {code:t.match(/Error Code: ([A-Za-z0-9_]+)/)?.[1]??null,num:Number(t.match(/Error Number: (\d+)/)?.[1]??0)||null,account:t.match(/AnchorError caused by account: ([A-Za-z0-9_\-]+)/)?.[1]??null,interesting:xs.filter(x=>/Instruction:|AnchorError|Error Code|Error Number|Nothing to donate|donat|relay|deboun|epoch|Transfer|failed|success/i.test(x)).slice(-180)}}
 
-          const rows=(await rpc('getProgramAccounts',[FEE,{encoding:'base64',commitment:'confirmed',filters:[{memcmp:{offset:0,bytes:DISC}}],dataSlice:{offset:0,length:218}}])).map(parseDonation);
-          const ws=rows.filter(x=>x.quote===NATIVE_MINT.toBase58());
-          const groups=new Map();
-          for(const x of ws){const k=x.config+'|'+x.quote; if(!groups.has(k))groups.set(k,[]); groups.get(k).push(x)}
-          const ranked=[...groups.entries()].map(([k,v])=>({k,v,bases:new Set(v.map(x=>x.base)).size,total:v.reduce((a,x)=>a+BigInt(x.lamports),0n),max:v.reduce((a,x)=>a>BigInt(x.lamports)?a:BigInt(x.lamports),0n)})).filter(g=>g.bases>=2).sort((a,b)=>a.total===b.total?0:(a.total>b.total?-1:1));
-          console.log('MULTI_BASE_GROUP_COUNT',ranked.length);
-          console.log('TOP_MULTI_BASE_GROUPS',JSON.stringify(ranked.slice(0,20).map(g=>({config:g.v[0].config,quote:g.v[0].quote,count:g.v.length,bases:g.bases,totalLamports:g.total.toString(),members:g.v.sort((a,b)=>b.lamports-a.lamports).slice(0,8)})),null,2));
-          if(!ranked.length) throw Error('No multi-base config+quote groups');
-          const chosen=ranked.find(g=>g.v.some(x=>BigInt(x.lamports)>3000000n) && new Set(g.v.map(x=>x.base)).size>=2) ?? ranked[0];
-          const members=[...chosen.v].sort((a,b)=>b.lamports-a.lamports);
-          let A=members[0],B=members.find(x=>x.base!==A.base);
-          if(!B) throw Error('No second distinct base in chosen group');
+          const rent=BigInt(await rpc('getMinimumBalanceForRentExemption',[218]));
+          const rows=(await rpc('getProgramAccounts',[FEE,{encoding:'base64',commitment:'confirmed',filters:[{memcmp:{offset:0,bytes:DISC}}],dataSlice:{offset:0,length:218}}])).map(parseDonation).filter(x=>x.quote===NATIVE_MINT.toBase58());
+          const groups=new Map();for(const x of rows){const k=x.config+'|'+x.quote;if(!groups.has(k))groups.set(k,[]);groups.get(k).push(x)}
+          const ranked=[...groups.entries()].map(([k,v])=>{const funded=v.filter(x=>BigInt(x.lamports)>rent),fundedBases=new Set(funded.map(x=>x.base)).size,fundedExcess=funded.reduce((s,x)=>s+(BigInt(x.lamports)-rent),0n);return {k,v,funded,fundedBases,fundedExcess}}).filter(g=>g.fundedBases>=2).sort((a,b)=>a.fundedExcess===b.fundedExcess?0:(a.fundedExcess>b.fundedExcess?-1:1));
+          console.log('RENT_218',rent.toString(),'FUNDED_MULTI_BASE_GROUP_COUNT',ranked.length);
+          console.log('TOP_FUNDED_GROUPS',JSON.stringify(ranked.slice(0,12).map(g=>({config:g.funded[0].config,fundedBases:g.fundedBases,fundedExcess:g.fundedExcess.toString(),funded:[...g.funded].sort((a,b)=>b.lamports-a.lamports).slice(0,6).map(x=>({...x,excess:(BigInt(x.lamports)-rent).toString()}))})),null,2));
+          if(!ranked.length)throw Error('No group with two funded distinct base mints');
+          const chosen=ranked[0];
+          const funded=[...chosen.funded].sort((a,b)=>b.lamports-a.lamports);
+          const A=funded[0],B=funded.find(x=>x.base!==A.base);if(!B)throw Error('No distinct funded B');
           const CONFIG=new PublicKey(A.config),QUOTE=new PublicKey(A.quote);
-          const EPOCH=p.donationRelayEpochTrackerPda(CONFIG,QUOTE,RELAY);
-          const DEB=p.donationRelayDebouncerPda(CONFIG,QUOTE,RELAY);
-          const WATCH=[new PublicKey(A.pda),new PublicKey(B.pda),EPOCH,DEB];
-          console.log('CHOSEN',JSON.stringify({A,B,relay:RELAY.toBase58(),epoch:EPOCH.toBase58(),debouncer:DEB.toBase58(),sameConfig:A.config===B.config,sameQuote:A.quote===B.quote,differentBase:A.base!==B.base},null,2));
+          const EPOCH=p.donationRelayEpochTrackerPda(CONFIG,QUOTE,RELAY),DEB=p.donationRelayDebouncerPda(CONFIG,QUOTE,RELAY);
+          const DEB_ATA=getAssociatedTokenAddressSync(QUOTE,DEB,true,TOKEN_PROGRAM_ID,ASSOCIATED_TOKEN_PROGRAM_ID);
+          const WATCH=[new PublicKey(A.pda),new PublicKey(B.pda),EPOCH,DEB,DEB_ATA];
+          const pre=(await rpc('getMultipleAccounts',[WATCH.map(x=>x.toBase58()),{encoding:'base64',commitment:'confirmed'}])).value;
+          const EXCESS_A=BigInt(A.lamports)-rent,EXCESS_B=BigInt(B.lamports)-rent;
+          console.log('CHOSEN',JSON.stringify({A:{...A,excess:EXCESS_A.toString()},B:{...B,excess:EXCESS_B.toString()},sameConfig:A.config===B.config,sameQuote:A.quote===B.quote,differentBase:A.base!==B.base,epoch:EPOCH.toBase58(),debouncer:DEB.toBase58(),debouncerAta:DEB_ATA.toBase58(),pre:{A:donationState(pre[0]),B:donationState(pre[1]),epoch:rawState(pre[2]),debouncer:rawState(pre[3]),debouncerAta:tokenState(pre[4])}},null,2));
 
           const ixA=await p.PUMP_SDK.crankDonationFeePda({payer:PAYER,mint:new PublicKey(A.base),configId:CONFIG,donationRelayProgramId:RELAY,quoteMint:QUOTE});
           const ixB=await p.PUMP_SDK.crankDonationFeePda({payer:PAYER,mint:new PublicKey(B.base),configId:CONFIG,donationRelayProgramId:RELAY,quoteMint:QUOTE});
-          const keySummary=ix=>ix.keys.map((k,i)=>({i,pk:k.pubkey.toBase58(),s:k.isSigner,w:k.isWritable}));
-          console.log('IX_A_KEYS',JSON.stringify(keySummary(ixA),null,2));
-          console.log('IX_B_KEYS',JSON.stringify(keySummary(ixB),null,2));
-          const sharedA=new Set(ixA.keys.map(k=>k.pubkey.toBase58()));
-          console.log('SHARED_KEYS',JSON.stringify(ixB.keys.map(k=>k.pubkey.toBase58()).filter(x=>sharedA.has(x)),null,2));
+          const sharedA=new Set(ixA.keys.map(k=>k.pubkey.toBase58()));console.log('SHARED_RELAY_ACCOUNTS',JSON.stringify(ixB.keys.map(k=>k.pubkey.toBase58()).filter(x=>sharedA.has(x)&&[EPOCH,DEB,DEB_ATA].some(p=>p.toBase58()===x)),null,2));
 
-          async function sim(label,ixs){
+          async function sim(label,ixs,expectedAdded){
             const bh=(await rpc('getLatestBlockhash',[{commitment:'processed'}])).value.blockhash;
             const tx=new VersionedTransaction(new TransactionMessage({payerKey:PAYER,recentBlockhash:bh,instructions:ixs}).compileToV0Message());
             const raw=Buffer.from(tx.serialize()).toString('base64');
             const v=(await rpc('simulateTransaction',[raw,{encoding:'base64',sigVerify:false,replaceRecentBlockhash:true,commitment:'processed',accounts:{encoding:'base64',addresses:WATCH.map(x=>x.toBase58())}}])).value;
-            const e=parseLogs(v.logs);
-            console.log('\nSIM',label,JSON.stringify({err:v.err,units:v.unitsConsumed,code:e.code,num:e.num,account:e.account,watched:WATCH.map((pk,i)=>({pk:pk.toBase58(),post:compactAccount(v.accounts?.[i])})),interesting:e.interesting},null,2));
-            return {v,e};
+            const e=parseLogs(v.logs),post=v.accounts??[];
+            const preAmt=BigInt(tokenState(pre[4])?.amount??'0'),postAmt=BigInt(tokenState(post[4])?.amount??'0');
+            const out={err:v.err,units:v.unitsConsumed,code:e.code,num:e.num,account:e.account,states:{A:donationState(post[0]),B:donationState(post[1]),epoch:rawState(post[2]),debouncer:rawState(post[3]),debouncerAta:tokenState(post[4])},deltas:{A_lamports:post[0]?(BigInt(post[0].lamports)-BigInt(pre[0].lamports)).toString():null,B_lamports:post[1]?(BigInt(post[1].lamports)-BigInt(pre[1].lamports)).toString():null,debouncerAtaAmount:(postAmt-preAmt).toString(),expectedAdded:expectedAdded.toString(),matchesExpected:(postAmt-preAmt)===expectedAdded,epochChangedBytes:changedBytes(pre[2],post[2]),debouncerChangedBytes:changedBytes(pre[3],post[3])},interesting:e.interesting};
+            console.log('\nSIM',label,JSON.stringify(out,null,2));return out;
           }
-
-          await sim('A_ONLY',[ixA]);
-          await sim('B_ONLY',[ixB]);
-          await sim('A_THEN_B',[ixA,ixB]);
-          await sim('B_THEN_A',[ixB,ixA]);
-          await sim('A_THEN_A',[ixA,ixA]);
-          await sim('B_THEN_B',[ixB,ixB]);
+          await sim('A_ONLY',[ixA],EXCESS_A);
+          await sim('B_ONLY',[ixB],EXCESS_B);
+          await sim('A_THEN_B',[ixA,ixB],EXCESS_A+EXCESS_B);
+          await sim('B_THEN_A',[ixB,ixA],EXCESS_A+EXCESS_B);
+          await sim('A_THEN_A',[ixA,ixA],EXCESS_A);
+          await sim('B_THEN_B',[ixB,ixB],EXCESS_B);
           NODE
