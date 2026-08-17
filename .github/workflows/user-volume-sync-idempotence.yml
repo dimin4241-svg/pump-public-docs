@@ -9,37 +9,47 @@ on:
 jobs:
   probe:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      - run: npm install --no-save @pump-fun/pump-sdk@1.36.0 @pump-fun/pump-swap-sdk@1.19.0 @solana/web3.js bs58
-      - name: Simulation-only repeated sync and cross-program accumulator checks
+      - run: npm install --no-save @pump-fun/pump-sdk@1.36.0 @pump-fun/pump-swap-sdk@1.19.0 @solana/web3.js
+      - name: Simulation-only deterministic repeated sync and cross-program checks
         shell: bash
         run: |
           node --input-type=module <<'NODE'
           import crypto from 'node:crypto';
-          import bs58pkg from 'bs58';const bs58=bs58pkg.default??bs58pkg;
-          import {Connection,PublicKey,TransactionInstruction,TransactionMessage,VersionedTransaction} from '@solana/web3.js';
+          import {PublicKey,TransactionInstruction,TransactionMessage,VersionedTransaction} from '@solana/web3.js';
           import * as p from '@pump-fun/pump-sdk';
           import * as a from '@pump-fun/pump-swap-sdk';
-          const RPC='https://api.mainnet-beta.solana.com',c=new Connection(RPC,'confirmed'),PAYER=new PublicKey('Gygj9QQby4j2jryqyqBHvLP7ctv2SaANgh4sCb69BUpA');
-          const PUMP=new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P'),AMM=new PublicKey('pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA');
-          const known=['GZd3BGEAeNiU7Av14FVCctyaMJkBCk9U6RBMUxuGYQYz','WKyGCzTjridLVa8zQ4TDHUkzyMocgSqBZriUjEcEDof','EzXcJ2m3nvMp8Gmh4Y3fTCyDywxXxYRnwQpZesaf9wfV','bwamJzztZsepfkteWRChggmXuiiCQvpLqPietdNfSXa','8CNhE46n2EidvYipH85dGYYyXEnJ7AGRY6mSXaWiW9jZ','J41GsL8GGZJpVa7dPDyeYBHWuAeAZ965tyjUtPi9skTh','GH9yk8vgFvHnAD8JZqXxr3hBN1Lr1mJ9NPzrP5mVqiJe','2aBqiwtWi3oxJ9DFLytGieRTu4YaxpuCUrkQmpC7Tyus','C2N2Ac5E9m128Tct2AepMpN4VdULpxWAX3gcigqup7rc',PAYER.toBase58()];
+
+          const RPC='https://api.mainnet-beta.solana.com';
+          const PAYER=new PublicKey('Gygj9QQby4j2jryqyqBHvLP7ctv2SaANgh4sCb69BUpA');
+          const known=['GZd3BGEAeNiU7Av14FVCctyaMJkBCk9U6RBMUxuGYQYz','WKyGCzTjridLVa8zQ4TDHUkzyMocgSqBZriUjEcEDof','EzXcJ2m3nvMp8Gmh4Y3fTCyDywxXxYRnwQpZesaf9wfV','bwamJzztZsepfkteWRChggmXuiiCQvpLqPietdNfSXa','8CNhE46n2EidvYipH85dGYYyXEnJ7AGRY6mSXaWiW9jZ','J41GsL8GGZJpVa7dPDyeYBHWuAeAZ965tyjUtPi9skTh','GH9yk8vgFvHnAD8JZqXxr3hBN1Lr1mJ9NPzrP5mVqiJe','2aBqiwtWi3oxJ9DFLytGieRTu4YaxpuCUrkQmpC7Tyus','C2N2Ac5E9m128Tct2AepMpN4VdULpxWAX3gcigqup7rc','DRY2uEb6niBnbyN9kUv3HMiDAZKZ4jhjbJDLJv5jna47','4NqzaxJX6h51dYFjeoBZPWqk9cVzrCg8d7mzpMhM9LGk','yHCxHBEaJW5tbndqC8JciSThr7U1cqLpdcsvHcx6PRe',PAYER.toBase58()];
+          let rpcId=1;
+          async function rpc(method,params){
+            const ctl=new AbortController();const timer=setTimeout(()=>ctl.abort(),12000);
+            try{const r=await fetch(RPC,{method:'POST',signal:ctl.signal,headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-simulation-only-volume-sync/2.0'},body:JSON.stringify({jsonrpc:'2.0',id:rpcId++,method,params})});if(!r.ok)throw Error('HTTP '+r.status);const j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));return j.result}finally{clearTimeout(timer)}
+          }
           const safe=v=>{if(v==null)return v;if(typeof v==='bigint')return v.toString();if(v?.toBase58)return v.toBase58();if(v?.constructor?.name==='BN')return v.toString();if(Array.isArray(v))return v.map(safe);if(typeof v==='object'){const o={};for(const [k,z] of Object.entries(v))o[k]=safe(z);return o}return v};
           const hash=b=>crypto.createHash('sha256').update(b).digest('hex').slice(0,24);
-          function parse(logs){const t=(logs??[]).join('\n');return {code:t.match(/Error Code: ([A-Za-z0-9_]+)/)?.[1]??null,num:Number(t.match(/Error Number: (\d+)/)?.[1]??0)||null,account:t.match(/AnchorError caused by account: ([A-Za-z0-9_\-]+)/)?.[1]??null,interesting:(logs??[]).filter(x=>/Instruction:|AnchorError|Error Code|Error Number|volume|accumulator|incentive|failed|success/i.test(x)).slice(-100)}}
-          async function recentSigners(program){const sigs=await c.getSignaturesForAddress(program,{limit:20},'confirmed'),txs=await c.getParsedTransactions(sigs.map(x=>x.signature),{commitment:'confirmed',maxSupportedTransactionVersion:0}),out=[];for(const tx of txs){for(const k of tx?.transaction?.message?.accountKeys??[])if(k.signer&&k.pubkey&&!k.pubkey.equals(program))out.push(k.pubkey.toBase58())}return out}
-          let users=[...known];try{users.push(...await recentSigners(PUMP),...await recentSigners(AMM))}catch(e){console.log('RECENT_FAIL',String(e).slice(0,500))}users=[...new Set(users)].slice(0,100);console.log('CANDIDATE_USERS',users.length,JSON.stringify(users.slice(0,40)));
-          async function infoFor(user,kind){const U=new PublicKey(user),ix=kind==='pump'?await p.PUMP_SDK.syncUserVolumeAccumulator(U):await a.PUMP_AMM_SDK.syncUserVolumeAccumulator(U),acc=ix.keys[2].pubkey,info=await c.getAccountInfo(acc,'confirmed');return {U,ix,acc,info}}
-          const live=[];for(const u of users){for(const kind of ['pump','amm']){try{const z=await infoFor(u,kind);if(z.info){let decoded;try{decoded=kind==='pump'?p.PUMP_SDK.decodeUserVolumeAccumulator(z.info):a.PUMP_AMM_SDK.decodeUserVolumeAccumulator(z.info)}catch(e){decoded={decodeError:String(e)}}live.push({user:u,kind,...z,decoded});console.log('LIVE',kind,u,z.acc.toBase58(),JSON.stringify(safe(decoded)))} }catch(e){console.log('CHECK_FAIL',kind,u,String(e).slice(0,200))}if(live.length>=12)break}if(live.length>=12)break}
-          if(!live.length){console.log('NO_LIVE_ACCUMULATORS');process.exit(0)}
-          async function simulate(label,ixs,watch){const bh=(await c.getLatestBlockhash('processed')).blockhash,tx=new VersionedTransaction(new TransactionMessage({payerKey:PAYER,recentBlockhash:bh,instructions:ixs}).compileToV0Message()),raw=Buffer.from(tx.serialize()).toString('base64');const r=await fetch(RPC,{method:'POST',headers:{'content-type':'application/json','user-agent':'pump-authorized-bounty-simulation-only-volume-sync/1.0'},body:JSON.stringify({jsonrpc:'2.0',id:1,method:'simulateTransaction',params:[raw,{encoding:'base64',sigVerify:false,replaceRecentBlockhash:true,commitment:'processed',accounts:{encoding:'base64',addresses:[watch.toBase58()]}}]})}),j=await r.json();if(j.error)throw Error(JSON.stringify(j.error));const v=j.result.value,e=parse(v.logs),aa=v.accounts?.[0],b=aa?.data?.[0]?Buffer.from(aa.data[0],'base64'):null;return {label,err:v.err,code:e.code,num:e.num,account:e.account,hash:b?hash(b):null,hex:b?.toString('hex')??null,interesting:e.interesting}}
+          function parse(logs){const t=(logs??[]).join('\n');return {code:t.match(/Error Code: ([A-Za-z0-9_]+)/)?.[1]??null,num:Number(t.match(/Error Number: (\d+)/)?.[1]??0)||null,account:t.match(/AnchorError caused by account: ([A-Za-z0-9_\-]+)/)?.[1]??null,interesting:(logs??[]).filter(x=>/Instruction:|AnchorError|Error Code|Error Number|volume|accumulator|incentive|failed|success/i.test(x)).slice(-80)}}
+
+          const entries=[];
+          for(const user of known){const U=new PublicKey(user);for(const kind of ['pump','amm']){try{const ix=kind==='pump'?await p.PUMP_SDK.syncUserVolumeAccumulator(U):await a.PUMP_AMM_SDK.syncUserVolumeAccumulator(U);entries.push({user,kind,ix,acc:ix.keys[2].pubkey})}catch(e){console.log('BUILD_FAIL',user,kind,String(e).slice(0,180))}}}
+          const infos=(await rpc('getMultipleAccounts',[entries.map(x=>x.acc.toBase58()),{encoding:'base64',commitment:'confirmed'}])).value;
+          const live=[];
+          for(let i=0;i<entries.length;i++){const raw=infos[i];if(!raw?.data?.[0])continue;const data=Buffer.from(raw.data[0],'base64'),info={data,lamports:raw.lamports,owner:new PublicKey(raw.owner),executable:raw.executable,rentEpoch:raw.rentEpoch??0};let decoded;try{decoded=entries[i].kind==='pump'?p.PUMP_SDK.decodeUserVolumeAccumulator(info):a.PUMP_AMM_SDK.decodeUserVolumeAccumulator(info)}catch(e){decoded={decodeError:String(e)}}live.push({...entries[i],info,decoded});console.log('LIVE',entries[i].kind,entries[i].user,entries[i].acc.toBase58(),JSON.stringify(safe(decoded)))}
+          console.log('LIVE_COUNT',live.length);
+          if(!live.length){console.log('NO_LIVE_ACCUMULATORS_IN_DETERMINISTIC_SAMPLE');process.exit(0)}
+
+          async function simulate(label,ixs,watch){const bh=(await rpc('getLatestBlockhash',[{commitment:'processed'}])).value.blockhash;const tx=new VersionedTransaction(new TransactionMessage({payerKey:PAYER,recentBlockhash:bh,instructions:ixs}).compileToV0Message());const raw=Buffer.from(tx.serialize()).toString('base64');const v=(await rpc('simulateTransaction',[raw,{encoding:'base64',sigVerify:false,replaceRecentBlockhash:true,commitment:'processed',accounts:{encoding:'base64',addresses:[watch.toBase58()]}}])).value,e=parse(v.logs),aa=v.accounts?.[0],b=aa?.data?.[0]?Buffer.from(aa.data[0],'base64'):null;return {label,err:v.err,code:e.code,num:e.num,account:e.account,hash:b?hash(b):null,interesting:e.interesting}}
           let anomaly=false;
-          for(const z of live.slice(0,8)){const preHash=hash(z.info.data),one=await simulate(z.kind+'_ONE_'+z.user,[z.ix],z.acc),two=await simulate(z.kind+'_TWO_'+z.user,[z.ix,z.ix],z.acc),three=await simulate(z.kind+'_THREE_'+z.user,[z.ix,z.ix,z.ix],z.acc);const firstChanged=one.hash&&one.hash!==preHash,repeatChanged=two.hash&&one.hash&&two.hash!==one.hash,thirdChanged=three.hash&&two.hash&&three.hash!==two.hash;if(repeatChanged||thirdChanged)anomaly=true;console.log('\nSYNC_RESULT',JSON.stringify({user:z.user,kind:z.kind,acc:z.acc.toBase58(),preHash,decodedPre:safe(z.decoded),one:{err:one.err,code:one.code,hash:one.hash},two:{err:two.err,code:two.code,hash:two.hash},three:{err:three.err,code:three.code,hash:three.hash},firstChanged,repeatChanged,thirdChanged,oneInteresting:one.interesting,twoInteresting:two.interesting},null,2))}
+          for(const z of live.slice(0,4)){const preHash=hash(z.info.data),one=await simulate(z.kind+'_ONE',[z.ix],z.acc),two=await simulate(z.kind+'_TWO',[z.ix,z.ix],z.acc),three=await simulate(z.kind+'_THREE',[z.ix,z.ix,z.ix],z.acc);const firstChanged=!!one.hash&&one.hash!==preHash,repeatChanged=!!two.hash&&!!one.hash&&two.hash!==one.hash,thirdChanged=!!three.hash&&!!two.hash&&three.hash!==two.hash;if(repeatChanged||thirdChanged)anomaly=true;console.log('SYNC_RESULT',JSON.stringify({user:z.user,kind:z.kind,acc:z.acc.toBase58(),decodedPre:safe(z.decoded),preHash,one:{err:one.err,code:one.code,num:one.num,hash:one.hash},two:{err:two.err,code:two.code,num:two.num,hash:two.hash},three:{err:three.err,code:three.code,num:three.num,hash:three.hash},firstChanged,repeatChanged,thirdChanged,interestingOne:one.interesting,interestingTwo:two.interesting},null,2))}
           console.log('REPEAT_SYNC_ANOMALY',anomaly);
-          // Cross-program substitution for a user that has both accumulator accounts.
+
           const byUser=new Map();for(const z of live){if(!byUser.has(z.user))byUser.set(z.user,{});byUser.get(z.user)[z.kind]=z}
-          const both=[...byUser.entries()].find(([,v])=>v.pump&&v.amm);if(both){const [user,v]=both;function replaceAcc(ix,oldPk,newPk){const ks=ix.keys.map(k=>({...k})),i=ks.findIndex(k=>k.pubkey.equals(oldPk));ks[i].pubkey=newPk;return new TransactionInstruction({programId:ix.programId,keys:ks,data:Buffer.from(ix.data)})}const ammWithPump=replaceAcc(v.amm.ix,v.amm.acc,v.pump.acc),pumpWithAmm=replaceAcc(v.pump.ix,v.pump.acc,v.amm.acc);const x1=await simulate('AMM_WITH_PUMP_ACC',[ammWithPump],v.pump.acc),x2=await simulate('PUMP_WITH_AMM_ACC',[pumpWithAmm],v.amm.acc);console.log('CROSS_PROGRAM',JSON.stringify({user,pumpAcc:v.pump.acc.toBase58(),ammAcc:v.amm.acc.toBase58(),ammWithPump:{err:x1.err,code:x1.code,num:x1.num,account:x1.account,interesting:x1.interesting},pumpWithAmm:{err:x2.err,code:x2.code,num:x2.num,account:x2.account,interesting:x2.interesting}},null,2))}else console.log('NO_USER_WITH_BOTH_ACCUMULATORS_IN_SAMPLE');
+          const both=[...byUser.entries()].find(([,v])=>v.pump&&v.amm);
+          if(both){const [user,v]=both;function replaceAcc(ix,oldPk,newPk){const ks=ix.keys.map(k=>({...k})),i=ks.findIndex(k=>k.pubkey.equals(oldPk));if(i<0)throw Error('acc key absent');ks[i].pubkey=newPk;return new TransactionInstruction({programId:ix.programId,keys:ks,data:Buffer.from(ix.data)})}const x1=await simulate('AMM_WITH_PUMP_ACC',[replaceAcc(v.amm.ix,v.amm.acc,v.pump.acc)],v.pump.acc),x2=await simulate('PUMP_WITH_AMM_ACC',[replaceAcc(v.pump.ix,v.pump.acc,v.amm.acc)],v.amm.acc);console.log('CROSS_PROGRAM',JSON.stringify({user,pumpAcc:v.pump.acc.toBase58(),ammAcc:v.amm.acc.toBase58(),ammWithPump:{err:x1.err,code:x1.code,num:x1.num,account:x1.account,interesting:x1.interesting},pumpWithAmm:{err:x2.err,code:x2.code,num:x2.num,account:x2.account,interesting:x2.interesting}},null,2))} else console.log('NO_USER_WITH_BOTH_ACCUMULATORS_IN_SAMPLE');
           NODE
