@@ -29,7 +29,7 @@ jobs:
           python3 - <<'PY'
           import hashlib,json,urllib.request
           from pathlib import Path
-          headers={'User-Agent':'okko-standoff365-static-research/1.0','Accept':'application/json','ruStoreVerCode':'2000000000'}
+          headers={'User-Agent':'okko-standoff365-static-research/1.0','Accept':'application/json','ruStoreVerCode':'12000'}
           with urllib.request.urlopen(urllib.request.Request('https://backapi.rustore.ru/applicationData/overallInfo/ru.more.play',headers=headers),timeout=40) as r:
               info=json.load(r)['body']
           body=json.dumps({'appId':info['appId'],'firstInstall':True}).encode()
