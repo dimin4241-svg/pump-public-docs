@@ -1,0 +1,47 @@
+name: RuStore macOS native trust probe v187
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: macos-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve public RuStore download URL
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/rustore-probe
+          python3 - <<'PY'
+          import json,urllib.request,urllib.parse
+          from pathlib import Path
+          h={'User-Agent':'okko-standoff365-static-research/1.0','Accept':'application/json','ruStoreVerCode':'12000'}
+          with urllib.request.urlopen(urllib.request.Request('https://backapi.rustore.ru/applicationData/overallInfo/ru.more.play',headers=h),timeout=30) as r:
+              info=json.load(r)['body']
+          body=json.dumps({'appId':info['appId'],'firstInstall':True}).encode()
+          with urllib.request.urlopen(urllib.request.Request('https://backapi.rustore.ru/applicationData/download-link',data=body,headers={**h,'Content-Type':'application/json; charset=utf-8'},method='POST'),timeout=30) as r:
+              dl=json.load(r)['body']['apkUrl']
+          u=urllib.parse.urlsplit(dl);assert u.scheme=='https' and u.hostname
+          Path('/tmp/rustore-probe/url').write_text(dl,encoding='utf-8')
+          print(json.dumps({'versionName':info.get('versionName'),'cdnHost':u.hostname},ensure_ascii=False))
+          PY
+      - name: Verify CDN with native macOS trust only
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --location --fail --silent --show-error \
+            --range 0-0 \
+            --header 'User-Agent: okko-standoff365-static-research/1.0' \
+            --header 'Accept: */*' \
+            --output /tmp/rustore-probe/one-byte "$(cat /tmp/rustore-probe/url)"
+          test -s /tmp/rustore-probe/one-byte
+          echo "native-macos-tls=success"
+
+# Public RuStore/CDN trust probe only. No Okko target traffic.
+# Uses the unmodified native macOS trust store; no --insecure, custom CA, or trust override.
