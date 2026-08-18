@@ -1,0 +1,346 @@
+name: Temporary exact Okko static extractor v185
+
+on:
+  push:
+    branches: [tmp-okko-static-v185]
+    paths:
+      - '.github/workflows/okko-static-exact-v185.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  exact-static:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Fetch exact public Okko package from RuStore
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/okko
+          python3 - <<'PY'
+          import hashlib, json, urllib.request
+          from pathlib import Path
+          pkg='ru.more.play'
+          headers={'User-Agent':'okko-standoff365-static-research/1.0','Accept':'application/json','ruStoreVerCode':'2000000000'}
+          with urllib.request.urlopen(urllib.request.Request(f'https://backapi.rustore.ru/applicationData/overallInfo/{pkg}',headers=headers),timeout=40) as r:
+              info=json.load(r)['body']
+          body=json.dumps({'appId':info['appId'],'firstInstall':True}).encode()
+          h2={**headers,'Content-Type':'application/json; charset=utf-8'}
+          with urllib.request.urlopen(urllib.request.Request('https://backapi.rustore.ru/applicationData/download-link',data=body,headers=h2,method='POST'),timeout=40) as r:
+              dl=json.load(r)['body']['apkUrl']
+          out=Path('/tmp/okko/okko.pkg'); sha=hashlib.sha256(); n=0
+          with urllib.request.urlopen(urllib.request.Request(dl,headers={'User-Agent':'okko-standoff365-static-research/1.0','Accept':'*/*'}),timeout=180) as r,out.open('wb') as f:
+              while True:
+                  b=r.read(1024*1024)
+                  if not b: break
+                  f.write(b); sha.update(b); n+=len(b)
+          got=sha.hexdigest()
+          print(json.dumps({'versionName':info.get('versionName'),'bytes':n,'sha256':got},ensure_ascii=False))
+          assert n==45942514
+          assert got=='b00bca9cb327ab3ee483b46d390c9120ac28bfc7674c75fda0129c6c594cc1f9'
+          PY
+
+      - name: Install JADX
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL=$(python3 - <<'PY'
+          import json,urllib.request
+          d=json.load(urllib.request.urlopen('https://api.github.com/repos/skylot/jadx/releases/latest',timeout=30))
+          print([a['browser_download_url'] for a in d['assets'] if a['name'].startswith('jadx-') and a['name'].endswith('.zip')][0])
+          PY
+          )
+          curl -L --fail --retry 2 "$URL" -o /tmp/jadx.zip
+          mkdir -p /tmp/jadx
+          unzip -q /tmp/jadx.zip -d /tmp/jadx
+          chmod +x /tmp/jadx/bin/jadx
+          /tmp/jadx/bin/jadx --version
+
+      - name: Extract APK and decompile exact package
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import shutil,zipfile
+          from pathlib import Path
+          pkg=Path('/tmp/okko/okko.pkg'); out=Path('/tmp/okko/okko.apk')
+          if zipfile.is_zipfile(pkg):
+              with zipfile.ZipFile(pkg) as z:
+                  apks=[x for x in z.infolist() if x.filename.lower().endswith('.apk')]
+                  if apks:
+                      info=max(apks,key=lambda x:x.file_size)
+                      with z.open(info) as src,out.open('wb') as dst: shutil.copyfileobj(src,dst,1024*1024)
+                  else: shutil.copy2(pkg,out)
+          else: shutil.copy2(pkg,out)
+          print(out.stat().st_size)
+          PY
+          rm -rf /tmp/okko/jadx
+          /tmp/jadx/bin/jadx --no-res --no-imports --show-bad-code --threads-count 4 -d /tmp/okko/jadx /tmp/okko/okko.apk >/tmp/jadx.stdout 2>/tmp/jadx.stderr || true
+          test -d /tmp/okko/jadx/sources
+
+      - name: Derive minimal converter and config evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from __future__ import annotations
+          import hashlib,json,re
+          from pathlib import Path
+
+          SRC=Path('/tmp/okko/jadx/sources')
+          OUT=Path('okko-static-v185.json')
+          EXPECTED='b00bca9cb327ab3ee483b46d390c9120ac28bfc7674c75fda0129c6c594cc1f9'
+          STRONG={'answer','text','content','query','prompt','recommendation','recommendations','suggestion','suggestions','reply','utterance'}
+          WEAK={'message','status','state','progress','error','errors','code','token','id','requestid','requesttoken','timestamp','retryafter'}
+          URL_RX=re.compile(r'(?i)https?://(?:[a-z0-9-]+\.)+(?:okko\.tv|playfamily\.ru|tvgateway\.ru|yotaplay\.ru|howdoyoustream\.ru)(?::\d+)?(?:/[^\s\"\'<>]*)?|https?://okko\.sport(?::\d+)?(?:/[^\s\"\'<>]*)?')
+          HOST_RX=re.compile(r'(?i)(?:https?://)?((?:[a-z0-9-]+\.)+(?:okko\.tv|playfamily\.ru|tvgateway\.ru|yotaplay\.ru|howdoyoustream\.ru)|okko\.sport)(?::\d+)?')
+          FIELD_RX=re.compile(r'^\s*(?:(?:public|private|protected|final|static|transient|volatile)\s+)+([A-Za-z0-9_.$<>?, \[\]]+)\s+([A-Za-z_$][\w$]*)\s*(?:;|=)')
+          GETTER_RX=re.compile(r'\b(?:get|is)([A-Za-z_$][\w$]*)\s*\(\s*\)\s*\{')
+          ASSIGN_RX=re.compile(r'(?m)^\s*(?:final\s+)?(?:[A-Za-z0-9_.$<>?, \[\]]+\s+)?([A-Za-z_$][\w$]*)\s*=\s*([^;]+);')
+          IDENT_RX=re.compile(r'\b([A-Za-z_$][\w$]*)\b')
+          GCALL_RX=re.compile(r'\.\s*(?:get|is)([A-Za-z_$][\w$]*)\s*\(')
+
+          def digest(p):
+              h=hashlib.sha256();n=0
+              with open(p,'rb') as f:
+                  for b in iter(lambda:f.read(1024*1024),b''):n+=len(b);h.update(b)
+              return n,h.hexdigest()
+
+          def rel(p): return str(p.relative_to(SRC)).replace('\\','/')
+          def read(p): return p.read_text(encoding='utf-8',errors='replace')
+          def find_exact(path,basename):
+              p=SRC/path
+              if p.is_file(): return p
+              rows=list(SRC.rglob(basename))
+              if len(rows)!=1: raise SystemExit(f'{basename}: expected 1, got {len(rows)}')
+              return rows[0]
+
+          def matching(text,op,left,right):
+              d=0;q=None;esc=False
+              for i in range(op,len(text)):
+                  c=text[i]
+                  if q:
+                      if esc:esc=False
+                      elif c=='\\':esc=True
+                      elif c==q:q=None
+                      continue
+                  if c in ('\"',"'"):q=c;continue
+                  if c==left:d+=1
+                  elif c==right:
+                      d-=1
+                      if d==0:return i
+              return None
+
+          def split_args(s):
+              out=[];st=0;dp=db=ds=da=0;q=None;esc=False
+              for i,c in enumerate(s):
+                  if q:
+                      if esc:esc=False
+                      elif c=='\\':esc=True
+                      elif c==q:q=None
+                      continue
+                  if c in ('\"',"'"):q=c
+                  elif c=='(':dp+=1
+                  elif c==')':dp-=1
+                  elif c=='{':db+=1
+                  elif c=='}':db-=1
+                  elif c=='[':ds+=1
+                  elif c==']':ds-=1
+                  elif c=='<':da+=1
+                  elif c=='>':da=max(0,da-1)
+                  elif c==',' and dp==db==ds==da==0:
+                      out.append(s[st:i].strip());st=i+1
+              out.append(s[st:].strip())
+              return [x for x in out if x]
+
+          def semantic_tokens(s):
+              if not s:return set()
+              x=re.sub(r'^(?:get|is)','',s,flags=re.I)
+              x=re.sub(r'[^A-Za-z0-9]+',' ',x)
+              o=set()
+              for c in x.split():
+                  ps=re.findall(r'[A-Z]+(?=[A-Z][a-z]|\d|$)|[A-Z]?[a-z]+|\d+',c)
+                  o.update(p.lower() for p in (ps or [c]))
+              return o
+
+          def strength(names):
+              toks=set(); compact=set()
+              for n in names:
+                  toks.update(semantic_tokens(n));compact.add(re.sub(r'[^A-Za-z0-9]+','',n).lower())
+              if toks&STRONG or compact&STRONG:return 'strong-private'
+              if toks&WEAK or compact&WEAK:return 'weak-metadata'
+              return 'unknown'
+
+          def model(p):
+              text=read(p); lines=text.splitlines();fields={};getters={}
+              for i,l in enumerate(lines,1):
+                  m=FIELD_RX.search(l)
+                  if m:fields[m.group(2)]={'type':m.group(1).strip(),'line':i}
+              for i,l in enumerate(lines,1):
+                  m=GETTER_RX.search(l)
+                  if not m:continue
+                  suffix=m.group(1);prefix='get' if 'get' in m.group(0) else 'is';tail='\n'.join(lines[i-1:min(len(lines),i+7)])
+                  rm=re.search(r'return\s+(?:this\.)?([A-Za-z_$][\w$]*)\s*;',tail)
+                  fld=rm.group(1) if rm else None
+                  getters[prefix+suffix]={'suffix':suffix,'field':fld,'line':i}
+              return {'path':rel(p),'field_names':sorted(fields),'getters':getters}
+
+          def constructors(p):
+              text=read(p);cls=p.stem;out=[]
+              rx=re.compile(r'(?m)^\s*(?:(?:public|private|protected)\s+)?'+re.escape(cls)+r'\s*\(([^)]*)\)\s*\{')
+              for m in rx.finditer(text):
+                  rows=split_args(m.group(1));names=[]
+                  for x in rows:
+                      x=re.sub(r'@[\w.$]+(?:\([^)]*\))?\s*','',x).strip();mm=re.search(r'([A-Za-z_$][\w$]*)\s*$',x);names.append(mm.group(1) if mm else '')
+                  op=text.find('{',m.start(),m.end()+2);cp=matching(text,op,'{','}') if op>=0 else None;body=text[op+1:cp] if cp else ''
+                  field_by={}
+                  for idx,n in enumerate(names):
+                      if not n:continue
+                      mm=re.search(r'this\.([A-Za-z_$][\w$]*)\s*=\s*'+re.escape(n)+r'\s*;',body)
+                      if mm:field_by[idx]=mm.group(1)
+                  out.append({'arity':len(names),'param_names':names,'field_by_param':field_by})
+              return out
+
+          def find_converter_method(text):
+              # Locate a method whose declaration contains AiAssistantAnswerResponse and whose body constructs/returns AiAssistantAnswer.
+              for hit in [m.start() for m in re.finditer(r'AiAssistantAnswerResponse',text)]:
+                  line_start=text.rfind('\n',0,hit)+1
+                  decl_start=max(text.rfind('\n',0,line_start-1)+1,text.rfind('}',0,line_start)+1)
+                  brace=text.find('{',hit,hit+1200)
+                  if brace<0:continue
+                  close=matching(text,brace,'{','}')
+                  if close is None:continue
+                  sig=text[line_start:brace]
+                  body=text[brace+1:close]
+                  if 'AiAssistantAnswer' not in sig and 'AiAssistantAnswer' not in body:continue
+                  pm=re.search(r'AiAssistantAnswerResponse\s+([A-Za-z_$][\w$]*)',sig)
+                  if not pm:continue
+                  return sig.strip(),body,pm.group(1)
+              return None,None,None
+
+          def getter_sem(expr,ident):
+              o=set()
+              crx=re.compile(r'\b'+re.escape(ident)+r'((?:\s*\.\s*(?:get|is)[A-Za-z_$][\w$]*\s*\(\s*\))+)',re.S)
+              for cm in crx.finditer(expr):
+                  for gm in GCALL_RX.finditer(cm.group(1)):o.add(gm.group(1))
+              return o
+
+          def taint(expr,rp,assigns,depth=0,seen=None):
+              if seen is None:seen=set()
+              if depth>8:return False,set(),[]
+              d=bool(re.search(r'\b'+re.escape(rp)+r'\b',expr));sem=getter_sem(expr,rp);paths=[]
+              if d:paths.append('direct-response')
+              for ident in IDENT_RX.findall(expr):
+                  if ident==rp or ident in seen or ident not in assigns:continue
+                  for rhs in assigns[ident]:
+                      dd,ss,pp=taint(rhs,rp,assigns,depth+1,seen|{ident})
+                      if dd:
+                          d=True;sem|=ss;sem|=getter_sem(expr,ident);paths.append('local:'+ident);paths+=pp
+              return d,sem,paths[:20]
+
+          pkg_n,pkg_h=digest('/tmp/okko/okko.pkg')
+          assert pkg_n==45942514 and pkg_h==EXPECTED
+          conv=find_exact(Path('ru/okko/sdk/domain/converters/aiAssistant/AiAssistantDomainConverter.java'),'AiAssistantDomainConverter.java')
+          resp=find_exact(Path('ru/okko/sdk/domain/oldEntity/response/aiAssistant/AiAssistantAnswerResponse.java'),'AiAssistantAnswerResponse.java')
+          dom=find_exact(Path('ru/okko/sdk/domain/entity/aiAssistant/model/AiAssistantAnswer.java'),'AiAssistantAnswer.java')
+          provider=find_exact(Path('ru/okko/commonApp/internal/di/modules/lazyApi/RekkoGatewayApiProvider.java'),'RekkoGatewayApiProvider.java')
+          repo=find_exact(Path('ru/okko/sdk/data/repository/aiAssistant/AiAssistantRepositoryImpl.java'),'AiAssistantRepositoryImpl.java')
+
+          rmodel=model(resp);dmodel=model(dom);ctors=constructors(dom)
+          sig,body,rp=find_converter_method(read(conv))
+          mappings=[]
+          if body and rp:
+              assigns={}
+              for m in ASSIGN_RX.finditer(body):assigns.setdefault(m.group(1),[]).append(m.group(2).strip())
+              nrx=re.compile(r'\bnew\s+(?:[A-Za-z_$][\w$]*\.)*AiAssistantAnswer\s*\(')
+              for nm in nrx.finditer(body):
+                  op=body.find('(',nm.start(),nm.end()+2);cp=matching(body,op,'(',')') if op>=0 else None
+                  if cp is None:continue
+                  args=split_args(body[op+1:cp]);ctor=next((c for c in ctors if c['arity']==len(args)),None)
+                  for i,a in enumerate(args):
+                      der,sem,paths=taint(a,rp,assigns);dest=set()
+                      if ctor and i<len(ctor['param_names']):dest.add(ctor['param_names'][i])
+                      if ctor and i in ctor['field_by_param']:dest.add(ctor['field_by_param'][i])
+                      names=set(sem)|dest
+                      mappings.append({'index':i,'response_derived':der,'source_semantics':sorted(sem),'destination_semantics':sorted(dest),'strength':strength(names),'paths':paths})
+
+          repo_text=read(repo)
+          live_binding=('AiAssistantDomainConverter' in repo_text and re.search(r'\.f\.a\s*\(\s*\(ru\.okko\.sdk\.domain\.oldEntity\.response\.aiAssistant\.AiAssistantAnswerResponse\)',repo_text) is not None)
+          strict=[x for x in mappings if x['response_derived'] and x['strength']=='strong-private']
+
+          provider_text=read(provider)
+          dynamic_binding='getConfig().getRekkoGatewayUrlV2()' in provider_text and '.baseUrl(' in provider_text
+          getter_files=[];config_impl=[];config_urls=[];config_hosts=[]
+          for p in SRC.rglob('*.java'):
+              try:t=read(p)
+              except Exception:continue
+              rr=rel(p)
+              if 'getRekkoGatewayUrlV2' in t or 'rekkoGatewayUrlV2' in t:
+                  urls=sorted(set(URL_RX.findall(t)))
+                  getter_files.append({'path':rr,'urls':urls[:20]})
+              if re.search(r'\bimplements\s+(?:ru\.okko\.sdk\.domain\.repository\.login\.)?ConfigRepository\b',t):
+                  config_impl.append(rr)
+              if 'config.tvgateway.ru' in t.lower() or 'pre-config.tvgateway.ru' in t.lower():
+                  us=sorted(set(URL_RX.findall(t)))
+                  if us:config_urls.extend(us)
+                  for hm in HOST_RX.finditer(t):
+                      h=hm.group(1).lower().rstrip('.')
+                      if 'tvgateway.ru' in h:config_hosts.append(h)
+
+          direct_rekko_hosts=[]
+          for row in getter_files:
+              for u in row['urls']:
+                  hm=HOST_RX.search(u)
+                  if hm:direct_rekko_hosts.append(hm.group(1).lower().rstrip('.'))
+
+          report={
+            'status':'ok','run_rev':'v185.0',
+            'package_identity':{'version_name':'8.180.0','bytes':pkg_n,'sha256':pkg_h},
+            'network_policy':{'okko_requests':0,'protected_requests':0,'runtime_started':False,'credentials_read':False,'mutations':0,'identifier_enumeration':False,'static_only':True,'downloads_from_target':0},
+            'converter':{
+              'path':rel(conv),'response_model':rmodel,'domain_model':dmodel,
+              'method_found':bool(sig),'response_param':rp,'live_repository_binding_proven':live_binding,
+              'mappings':mappings,
+              'strict_private_mapping_count':len(strict),
+              'strict_private_answer_payload_proven':bool(live_binding and sig and strict),
+            },
+            'config':{
+              'provider_path':rel(provider),'dynamic_config_to_baseurl_proven':dynamic_binding,
+              'rekko_getter_files':getter_files[:50],
+              'config_repository_implementers':sorted(set(config_impl))[:50],
+              'config_service_urls':sorted(set(config_urls))[:50],
+              'config_service_hosts':sorted(set(config_hosts)),
+              'direct_rekko_hosts':sorted(set(direct_rekko_hosts)),
+              'exact_rekko_host_proven':len(set(direct_rekko_hosts))==1,
+            },
+            'decision':{'vulnerability_proven':False,'reportable':False,'runtime_authorized':False}
+          }
+          OUT.write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          print(json.dumps({'converter':report['converter'],'config':report['config']},ensure_ascii=False,indent=2)[:50000])
+          PY
+
+      - name: Persist derived evidence only
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add okko-static-v185.json
+          git commit -m 'evidence: persist exact Okko static v185' || exit 0
+          git push origin HEAD:tmp-okko-static-v185
+
+# Temporary compute-only workflow. It downloads the exact public RuStore package and GitHub-hosted JADX,
+# performs local static analysis, and persists only derived non-secret evidence. It sends zero requests to
+# Okko/Standoff target or protected endpoints and never reads runtime credentials or third-party identifiers.
