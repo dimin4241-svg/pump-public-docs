@@ -1,0 +1,23 @@
+name: Temporary hosted runner probe v185
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - name: Confirm hosted runner execution
+        run: |
+          set -euo pipefail
+          echo "runner-os=$RUNNER_OS"
+          echo "runner-arch=$RUNNER_ARCH"
+          test "$RUNNER_OS" = Linux
+
+# Compute infrastructure probe only. No Okko or other target traffic.
