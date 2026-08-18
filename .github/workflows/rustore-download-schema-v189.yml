@@ -1,0 +1,54 @@
+name: Sanitized RuStore download schema v189
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Inspect sanitized response shape
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json,urllib.request,urllib.parse
+          h={'User-Agent':'okko-standoff365-static-research/1.0','Accept':'application/json','ruStoreVerCode':'12000'}
+          with urllib.request.urlopen(urllib.request.Request('https://backapi.rustore.ru/applicationData/overallInfo/ru.more.play',headers=h),timeout=30) as r:
+              info=json.load(r)
+          body0=info.get('body') or {}
+          req_body=json.dumps({'appId':body0['appId'],'firstInstall':True}).encode()
+          with urllib.request.urlopen(urllib.request.Request('https://backapi.rustore.ru/applicationData/download-link',data=req_body,headers={**h,'Content-Type':'application/json; charset=utf-8'},method='POST'),timeout=30) as r:
+              dl=json.load(r)
+
+          def shape(v,depth=0):
+              if depth>5:return '<max-depth>'
+              if isinstance(v,dict):
+                  return {k:shape(x,depth+1) for k,x in v.items()}
+              if isinstance(v,list):
+                  return [shape(x,depth+1) for x in v[:5]]
+              if isinstance(v,str):
+                  if v.startswith('http://') or v.startswith('https://'):
+                      u=urllib.parse.urlsplit(v)
+                      return {'type':'url','scheme':u.scheme,'host':u.hostname,'path_suffix':u.path[-80:]}
+                  if len(v)>100:return {'type':'string','len':len(v)}
+                  return v
+              if v is None:return None
+              return {'type':type(v).__name__,'value':v if isinstance(v,(bool,int,float)) else None}
+
+          out={
+              'overallInfo':shape(info),
+              'downloadLink':shape(dl),
+              'versionName':body0.get('versionName'),
+          }
+          print(json.dumps(out,ensure_ascii=False,indent=2)[:50000])
+          PY
+
+# Public RuStore metadata only. No APK download, no Okko target traffic, no credentials,
+# no mutations, no certificate override or bypass.
