@@ -1,4 +1,4 @@
-name: Exact Okko static closure via trusted RuStore CDN v191
+name: Exact Rekko V2 config provenance v193
 
 on:
   pull_request:
@@ -8,41 +8,37 @@ permissions:
   contents: read
 
 jobs:
-  exact-static:
+  config-static:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '21'
 
-      - name: Download and verify exact public package
+      - name: Download and verify exact public Okko package
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p /tmp/okko
-          URL='https://static.rustore.ru/2026/8/14/7b/de764e6d-0184-4e0f-a7c6-0b6a30580a79.zip'
           curl --location --fail --retry 2 --silent --show-error \
             --header 'User-Agent: okko-standoff365-static-research/1.0' \
-            --header 'Accept: */*' \
-            --output /tmp/okko/okko.pkg "$URL"
+            --output /tmp/okko/okko.pkg \
+            'https://static.rustore.ru/2026/8/14/7b/de764e6d-0184-4e0f-a7c6-0b6a30580a79.zip'
           python3 - <<'PY'
-          import hashlib,json
+          import hashlib
           from pathlib import Path
           p=Path('/tmp/okko/okko.pkg');h=hashlib.sha256();n=0
           with p.open('rb') as f:
               for b in iter(lambda:f.read(1024*1024),b''):
                   n+=len(b);h.update(b)
-          got=h.hexdigest()
-          print(json.dumps({'bytes':n,'sha256':got},indent=2))
           assert n==45942514
-          assert got=='b00bca9cb327ab3ee483b46d390c9120ac28bfc7674c75fda0129c6c594cc1f9'
+          assert h.hexdigest()=='b00bca9cb327ab3ee483b46d390c9120ac28bfc7674c75fda0129c6c594cc1f9'
           PY
 
-      - name: Install JADX from GitHub
+      - name: Install JADX and decompile exact package
         shell: bash
         run: |
           set -euo pipefail
@@ -55,34 +51,22 @@ jobs:
           curl -L --fail --retry 2 "$URL" -o /tmp/jadx.zip
           mkdir -p /tmp/jadx && unzip -q /tmp/jadx.zip -d /tmp/jadx
           chmod +x /tmp/jadx/bin/jadx
-          /tmp/jadx/bin/jadx --version
-
-      - name: Extract main APK and decompile
-        shell: bash
-        run: |
-          set -euo pipefail
           python3 - <<'PY'
           import shutil,zipfile
           from pathlib import Path
           pkg=Path('/tmp/okko/okko.pkg');out=Path('/tmp/okko/okko.apk')
-          if zipfile.is_zipfile(pkg):
-              with zipfile.ZipFile(pkg) as z:
-                  apks=[x for x in z.infolist() if x.filename.lower().endswith('.apk')]
-                  if apks:
-                      info=max(apks,key=lambda x:x.file_size)
-                      print('selected_apk',info.filename,'bytes',info.file_size)
-                      with z.open(info) as src,out.open('wb') as dst:
-                          shutil.copyfileobj(src,dst,1024*1024)
-                  else:
-                      shutil.copy2(pkg,out)
-          else:
-              shutil.copy2(pkg,out)
+          with zipfile.ZipFile(pkg) as z:
+              apks=[x for x in z.infolist() if x.filename.lower().endswith('.apk')]
+              if apks:
+                  info=max(apks,key=lambda x:x.file_size)
+                  with z.open(info) as src,out.open('wb') as dst:shutil.copyfileobj(src,dst,1024*1024)
+              else:shutil.copy2(pkg,out)
           PY
           /tmp/jadx/bin/jadx --no-res --no-imports --show-bad-code --threads-count 4 \
             -d /tmp/okko/jadx /tmp/okko/okko.apk >/tmp/jadx.stdout 2>/tmp/jadx.stderr || true
           test -d /tmp/okko/jadx/sources
 
-      - name: Derive strict AI converter and Rekko config evidence
+      - name: Map rekkoGatewayUrlV2 constructor slot and config acquisition
         shell: bash
         run: |
           set -euo pipefail
@@ -90,20 +74,12 @@ jobs:
           from __future__ import annotations
           import hashlib,json,re
           from pathlib import Path
-
           SRC=Path('/tmp/okko/jadx/sources')
-          OUT=Path('/tmp/okko-v191.json')
+          OUT=Path('/tmp/okko-v193.json')
           EXPECTED='b00bca9cb327ab3ee483b46d390c9120ac28bfc7674c75fda0129c6c594cc1f9'
-          STRONG={'answer','text','content','query','prompt','recommendation','recommendations','suggestion','suggestions','reply','utterance','result'}
-          WEAK={'message','status','state','progress','error','errors','code','token','id','requestid','requesttoken','timestamp','retryafter'}
-          FIELD_RX=re.compile(r'^\s*(?:(?:public|private|protected|final|static|transient|volatile)\s+)+([A-Za-z0-9_.$<>?, \[\]]+)\s+([A-Za-z_$][\w$]*)\s*(?:;|=)')
-          GETTER_RX=re.compile(r'\b(?:get|is)([A-Za-z_$][\w$]*)\s*\(\s*\)\s*\{')
-          ASSIGN_RX=re.compile(r'(?m)^\s*(?:final\s+)?(?:[A-Za-z0-9_.$<>?, \[\]]+\s+)?([A-Za-z_$][\w$]*)\s*=\s*([^;]+);')
-          IDENT_RX=re.compile(r'\b([A-Za-z_$][\w$]*)\b')
-          GCALL_RX=re.compile(r'\.\s*(?:get|is)([A-Za-z_$][\w$]*)\s*\(')
-          URL_RX=re.compile(r'(?i)https?://(?:[a-z0-9-]+\.)+(?:okko\.tv|playfamily\.ru|tvgateway\.ru|yotaplay\.ru|howdoyoustream\.ru)(?::\d+)?(?:/[^\s\"\'<>]*)?|https?://okko\.sport(?::\d+)?(?:/[^\s\"\'<>]*)?')
-          HOST_RX=re.compile(r'(?i)(?:https?://)?((?:[a-z0-9-]+\.)+(?:okko\.tv|playfamily\.ru|tvgateway\.ru|yotaplay\.ru|howdoyoustream\.ru)|okko\.sport)(?::\d+)?')
-          SERIAL_RX=re.compile(r'(?i)(?:SerialName|SerializedName|JsonProperty)\s*\(\s*"([^"\\]{1,120})"')
+          URL_RX=re.compile(r'(?i)https?://[^\s\"\'<>]+')
+          HOST_RX=re.compile(r'(?i)^https?://([^/:?#]+)')
+          FIELD='rekkoGatewayUrlV2'
 
           def digest(p):
               h=hashlib.sha256();n=0
@@ -112,28 +88,28 @@ jobs:
                       n+=len(b);h.update(b)
               return n,h.hexdigest()
           def rel(p):return str(p.relative_to(SRC)).replace('\\','/')
-          def text(p):return p.read_text(encoding='utf-8',errors='replace')
-          def one(suffix,basename):
-              p=SRC/suffix
+          def rd(p):return p.read_text(encoding='utf-8',errors='replace')
+          def one(path,base):
+              p=SRC/path
               if p.is_file():return p
-              rows=[x for x in SRC.rglob(basename) if str(x).replace('\\','/').endswith(str(suffix).replace('\\','/'))]
-              if not rows:rows=list(SRC.rglob(basename))
-              if len(rows)!=1:raise SystemExit(f'{basename}: expected one, got {len(rows)}')
+              rows=[x for x in SRC.rglob(base) if str(x).replace('\\','/').endswith(str(path).replace('\\','/'))]
+              if not rows:rows=list(SRC.rglob(base))
+              if len(rows)!=1:raise SystemExit(f'{base}: {len(rows)} matches')
               return rows[0]
-          def match(text0,op,left,right):
-              d=0;q=None;esc=False
-              for i in range(op,len(text0)):
-                  c=text0[i]
+          def match(t,op,L,R):
+              dep=0;q=None;esc=False
+              for i in range(op,len(t)):
+                  c=t[i]
                   if q:
                       if esc:esc=False
                       elif c=='\\':esc=True
                       elif c==q:q=None
                       continue
                   if c in ('"',"'"):q=c;continue
-                  if c==left:d+=1
-                  elif c==right:
-                      d-=1
-                      if d==0:return i
+                  if c==L:dep+=1
+                  elif c==R:
+                      dep-=1
+                      if dep==0:return i
               return None
           def split_args(s):
               out=[];st=0;dp=db=ds=da=0;q=None;esc=False
@@ -156,191 +132,122 @@ jobs:
                       out.append(s[st:i].strip());st=i+1
               out.append(s[st:].strip())
               return [x for x in out if x]
-          def tokens(s):
-              if not s:return set()
-              s=re.sub(r'^(?:get|is)','',s,flags=re.I)
-              bits=[]
-              for c in re.sub(r'[^A-Za-z0-9]+',' ',s).split():
-                  bits += re.findall(r'[A-Z]+(?=[A-Z][a-z]|\d|$)|[A-Z]?[a-z]+|\d+',c) or [c]
-              return {x.lower() for x in bits}
-          def strength(names):
-              ts=set();compact=set()
-              for n in names:
-                  ts|=tokens(n);compact.add(re.sub(r'[^A-Za-z0-9]+','',n).lower())
-              if ts&STRONG or compact&STRONG:return 'strong-private'
-              if ts&WEAK or compact&WEAK:return 'weak-metadata'
-              return 'unknown'
-          def model(p):
-              t=text(p);ls=t.splitlines();fields={};getters={};pending=None
-              for i,l in enumerate(ls,1):
-                  sm=SERIAL_RX.search(l)
-                  if sm:pending=(i,sm.group(1))
-                  fm=FIELD_RX.search(l)
-                  if fm:
-                      ser=pending[1] if pending and i-pending[0]<=4 else None
-                      fields[fm.group(2)]={'type':fm.group(1).strip(),'serialized':ser,'line':i}
-                      pending=None
-              for i,l in enumerate(ls,1):
-                  gm=GETTER_RX.search(l)
-                  if not gm:continue
-                  suffix=gm.group(1);pref='get' if 'get' in gm.group(0) else 'is'
-                  tail='\n'.join(ls[i-1:min(len(ls),i+8)])
-                  rm=re.search(r'return\s+(?:this\.)?([A-Za-z_$][\w$]*)\s*;',tail)
-                  fld=rm.group(1) if rm else None;names={suffix}
-                  if fld:
-                      names.add(fld)
-                      if fields.get(fld,{}).get('serialized'):names.add(fields[fld]['serialized'])
-                  getters[pref+suffix]={'field':fld,'names':sorted(names),'line':i}
-              field_names={k:set([k]+([v['serialized']] if v.get('serialized') else [])) for k,v in fields.items()}
-              for g in getters.values():
-                  if g.get('field'):field_names.setdefault(g['field'],set()).update(g['names'])
-              return {'path':rel(p),'fields':fields,'getters':getters,'field_semantics':{k:sorted(v) for k,v in field_names.items()}}
-          def constructors(p,mdl):
-              t=text(p);cls=p.stem;out=[]
-              rx=re.compile(r'(?m)^\s*(?:(?:public|private|protected)\s+)?'+re.escape(cls)+r'\s*\(([^)]*)\)\s*\{')
-              for m in rx.finditer(t):
-                  rows=split_args(m.group(1));names=[]
-                  for r in rows:
-                      r=re.sub(r'@[\w.$]+(?:\([^)]*\))?\s*','',r).strip();mm=re.search(r'([A-Za-z_$][\w$]*)\s*$',r);names.append(mm.group(1) if mm else '')
-                  op=t.find('{',m.start(),m.end()+2);cp=match(t,op,'{','}') if op>=0 else None;body=t[op+1:cp] if cp else ''
-                  fby={};sem={}
-                  for i,n in enumerate(names):
-                      if not n:continue
-                      mm=re.search(r'this\.([A-Za-z_$][\w$]*)\s*=\s*'+re.escape(n)+r'\s*;',body)
-                      if mm:
-                          fld=mm.group(1);fby[i]=fld;sem[i]=sorted(set([n,fld])|set(mdl['field_semantics'].get(fld,[])))
-                  out.append({'arity':len(names),'param_names':names,'field_by_param':fby,'semantics_by_param':sem})
-              return out
-          def converter_method(t):
-              rx=re.compile(r'(?s)(?P<sig>(?:(?:public|private|protected|static|final)\s+)+[^\{;]{0,800}?AiAssistantAnswer[^\{;]{0,300}?\((?P<params>[^)]*AiAssistantAnswerResponse[^)]*)\))\s*\{')
-              for m in rx.finditer(t):
-                  pm=re.search(r'AiAssistantAnswerResponse\s+([A-Za-z_$][\w$]*)',m.group('params'))
-                  if not pm:continue
-                  op=t.find('{',m.start(),m.end()+2);cp=match(t,op,'{','}')
-                  if cp is None:continue
-                  return re.sub(r'\s+',' ',m.group('sig')).strip(),t[op+1:cp],pm.group(1)
-              return None,None,None
-          def rooted(expr,ident,mdl=None):
-              out=set();crx=re.compile(r'\b'+re.escape(ident)+r'((?:\s*\.\s*(?:get|is)[A-Za-z_$][\w$]*\s*\(\s*\))+)',re.S)
-              for cm in crx.finditer(expr):
-                  for gm in GCALL_RX.finditer(cm.group(1)):
-                      suf=gm.group(1);out.add(suf)
-                      if mdl:
-                          row=mdl['getters'].get('get'+suf) or mdl['getters'].get('is'+suf)
-                          if row:out.update(row['names'])
-              return out
-          def taint(expr,rp,assigns,rmdl,depth=0,seen=None):
-              seen=seen or set()
-              if depth>8:return False,set(),[]
-              d=bool(re.search(r'\b'+re.escape(rp)+r'\b',expr));sem=rooted(expr,rp,rmdl);paths=[]
-              if d:paths.append('direct-response')
-              for ident in IDENT_RX.findall(expr):
-                  if ident==rp or ident in seen or ident not in assigns:continue
-                  for rhs in assigns[ident]:
-                      dd,ss,pp=taint(rhs,rp,assigns,rmdl,depth+1,seen|{ident})
-                      if dd:
-                          d=True;sem|=ss;sem|=rooted(expr,ident);paths.append('local:'+ident);paths+=pp
-              return d,sem,paths[:30]
+          def pname(row):
+              row=re.sub(r'@[\w.$]+(?:\([^)]*\))?\s*','',row).strip()
+              m=re.search(r'([A-Za-z_$][\w$]*)\s*$',row);return m.group(1) if m else ''
+          def nearest_method(t,pos):
+              prefix=t[:pos]
+              rx=re.compile(r'(?m)^\s*(?:(?:public|private|protected|static|final|synchronized)\s+)+[^;{}=]{1,700}\([^;{}]*\)\s*\{')
+              ms=list(rx.finditer(prefix[-30000:]));
+              return re.sub(r'\s+',' ',ms[-1].group(0)).strip()[:1000] if ms else None
+          def clean_expr(s):
+              s=re.sub(r'"(?:[^"\\]|\\.)*"',lambda m:m.group(0) if URL_RX.fullmatch(m.group(0).strip('"')) else '"<lit>"',s)
+              return re.sub(r'\s+',' ',s).strip()[:1200]
 
           n,h=digest('/tmp/okko/okko.pkg');assert n==45942514 and h==EXPECTED
-          conv=one(Path('ru/okko/sdk/domain/converters/aiAssistant/AiAssistantDomainConverter.java'),'AiAssistantDomainConverter.java')
-          resp=one(Path('ru/okko/sdk/domain/oldEntity/response/aiAssistant/AiAssistantAnswerResponse.java'),'AiAssistantAnswerResponse.java')
-          dom=one(Path('ru/okko/sdk/domain/entity/aiAssistant/model/AiAssistantAnswer.java'),'AiAssistantAnswer.java')
-          repo=one(Path('ru/okko/sdk/data/repository/aiAssistant/AiAssistantRepositoryImpl.java'),'AiAssistantRepositoryImpl.java')
+          cmr=one(Path('ru/okko/sdk/domain/oldEntity/response/config/ConfigModelResponse.java'),'ConfigModelResponse.java')
+          dcmr=one(Path('ru/okko/sdk/domain/oldEntity/response/config/DefaultConfigModelResponse.java'),'DefaultConfigModelResponse.java')
+          cmi=one(Path('ru/okko/sdk/data/repository/login/ConfigRepositoryImpl.java'),'ConfigRepositoryImpl.java')
+          cmodel=one(Path('ru/okko/sdk/domain/entity/config/ConfigModel.java'),'ConfigModel.java')
           provider=one(Path('ru/okko/commonApp/internal/di/modules/lazyApi/RekkoGatewayApiProvider.java'),'RekkoGatewayApiProvider.java')
+          t=rd(cmr);cls='ConfigModelResponse';constructors=[]
+          crx=re.compile(r'(?m)^\s*(?:(?:public|private|protected)\s+)?'+cls+r'\s*\(([^)]*)\)\s*\{')
+          for m in crx.finditer(t):
+              params=split_args(m.group(1));names=[pname(x) for x in params]
+              op=t.find('{',m.start(),m.end()+2);cp=match(t,op,'{','}') if op>=0 else None
+              if cp is None:continue
+              body=t[op+1:cp]
+              am=re.search(r'this\.'+FIELD+r'\s*=\s*([A-Za-z_$][\w$]*)\s*;',body)
+              idx=names.index(am.group(1)) if am and am.group(1) in names else None
+              constructors.append({'arity':len(params),'field_param':am.group(1) if am else None,'field_index':idx,'synthetic':any('DefaultConstructorMarker' in x for x in params)})
+          real=[x for x in constructors if x['field_index'] is not None and not x['synthetic']]
+          if not real:raise SystemExit('real ConfigModelResponse V2 constructor slot not found')
+          slot=real[0]['field_index'];arity=real[0]['arity']
 
-          rmdl=model(resp);dmdl=model(dom);ctors=constructors(dom,dmdl)
-          sig,body,rp=converter_method(text(conv));maps=[]
-          if body and rp:
-              assigns={}
-              for m in ASSIGN_RX.finditer(body):assigns.setdefault(m.group(1),[]).append(m.group(2).strip())
-              nrx=re.compile(r'\bnew\s+(?:[A-Za-z_$][\w$]*\.)*AiAssistantAnswer\s*\(')
-              for nm in nrx.finditer(body):
-                  op=body.find('(',nm.start(),nm.end()+2);cp=match(body,op,'(',')') if op>=0 else None
+          dt=rd(dcmr);calls=[]
+          patterns=[('new ConfigModelResponse',re.compile(r'\bnew\s+(?:[A-Za-z_$][\w$]*\.)*ConfigModelResponse\s*\(')),('super',re.compile(r'\bsuper\s*\('))]
+          for kind,rx in patterns:
+              for m in rx.finditer(dt):
+                  op=dt.find('(',m.start(),m.end()+2);cp=match(dt,op,'(',')') if op>=0 else None
                   if cp is None:continue
-                  args=split_args(body[op+1:cp]);ctor=next((c for c in ctors if c['arity']==len(args)),None)
-                  for i,a in enumerate(args):
-                      der,src,paths=taint(a,rp,assigns,rmdl);dest=set()
-                      if ctor and i<len(ctor['param_names']):dest.add(ctor['param_names'][i])
-                      if ctor and i in ctor['semantics_by_param']:dest.update(ctor['semantics_by_param'][i])
-                      maps.append({'index':i,'response_derived':der,'source_semantics':sorted(src),'destination_semantics':sorted(dest),'strength':strength(set(src)|dest),'dataflow_paths':paths})
-          live_repo=bool(re.search(r'AiAssistantDomainConverter',text(repo)) and re.search(r'\.f\.a\s*\([^\n]{0,200}AiAssistantAnswerResponse',text(repo)))
-          strict=[x for x in maps if x['response_derived'] and x['strength']=='strong-private']
+                  args=split_args(dt[op+1:cp])
+                  if len(args)!=arity or slot>=len(args):continue
+                  arg=args[slot];urls=URL_RX.findall(arg);host=None
+                  if urls:
+                      hm=HOST_RX.search(urls[0]);host=hm.group(1).lower() if hm else None
+                  calls.append({'kind':kind,'arity':len(args),'slot':slot,'v2_argument':clean_expr(arg),'v2_urls':urls,'v2_host':host,'context':nearest_method(dt,m.start())})
 
-          pt=text(provider)
-          dynamic=bool('getConfig().getRekkoGatewayUrlV2()' in pt and '.baseUrl(' in pt)
-          getter_owners=[];config_impl=[];config_routes=[];config_urls=[]
-          retrofit=re.compile(r'@(GET|POST|PUT|DELETE|PATCH|HEAD)\s*\(\s*"([^"]+)"\s*\)')
+          # Independently find every Rekko-looking URL in default config and preserve literal identity.
+          rekko_literals=[]
+          for m in re.finditer(r'"(https?://[^"\s]*rekko[^"\s]*)"',dt,re.I):
+              u=m.group(1);hm=HOST_RX.search(u)
+              rekko_literals.append({'url':u,'host':hm.group(1).lower() if hm else None,'context':nearest_method(dt,m.start())})
+
+          # Domain ConfigModel keeps the same named property.
+          ct=rd(cmodel);domain_getter=bool(re.search(r'getRekkoGatewayUrlV2\s*\(',ct));domain_field=bool(re.search(r'\brekkoGatewayUrlV2\b',ct))
+          pt=rd(provider);provider_binding=bool('getConfig().getRekkoGatewayUrlV2()' in pt and '.baseUrl(' in pt)
+          rit=rd(cmi)
+          repo_facts={
+              'getConfig_present':bool(re.search(r'\bgetConfig\s*\(',rit)),
+              'default_config_reference':'DefaultConfigModelResponse' in rit,
+              'config_model_response_reference':'ConfigModelResponse' in rit,
+              'config_model_reference':'ConfigModel' in rit,
+          }
+
+          # Recover config Retrofit endpoints by type/route, with fully-qualified annotations supported.
+          endpoints=[];host_bindings=[]
+          ann=re.compile(r'@(?:retrofit2\.http\.)?(GET|POST|PUT|PATCH|DELETE|HEAD)\s*\(\s*"([^"]+)"\s*\)')
           for p in SRC.rglob('*.java'):
-              try:t=text(p)
+              try:s=rd(p)
               except Exception:continue
               rr=rel(p)
-              if 'getRekkoGatewayUrlV2' in t or 'rekkoGatewayUrlV2' in t:
-                  gm=re.search(r'(?s)(?:public|private|protected)[^\{;]{0,500}?getRekkoGatewayUrlV2\s*\([^)]*\)\s*\{(.{0,1600}?)\}',t)
-                  ret=None
-                  if gm:
-                      rm=re.search(r'\breturn\s+([^;]+);',gm.group(1));ret=rm.group(1).strip() if rm else None
-                  urls=sorted(set(URL_RX.findall(t)))
-                  getter_owners.append({'path':rr,'return_expression':ret,'urls':urls[:20]})
-              if re.search(r'\bimplements\s+(?:ru\.okko\.sdk\.domain\.repository\.login\.)?ConfigRepository\b',t):config_impl.append(rr)
-              if re.search(r'(?i)(ConfigRepository|ConfigApi|GetConfigUseCase|config\.tvgateway|getConfig\s*\()',t):
-                  us=sorted(set(URL_RX.findall(t)))
-                  if us:config_urls += [{'path':rr,'url':u} for u in us]
-                  for rm in retrofit.finditer(t):
-                      config_routes.append({'path':rr,'verb':rm.group(1),'route':rm.group(2)})
-          direct_hosts=[]
-          for row in getter_owners:
-              for u in row['urls']:
-                  hm=HOST_RX.search(u)
-                  if hm:direct_hosts.append(hm.group(1).lower().rstrip('.'))
+              for m in ann.finditer(s):
+                  tail=s[m.end():m.end()+1800]
+                  sig=re.sub(r'\s+',' ',tail.split(';',1)[0])[:1200]
+                  if re.search(r'(?i)(ConfigModelResponse|ConfigResponse|ConfigRepository|\bconfig\b)',sig) or re.search(r'(?i)(ConfigApi|ConfigService)',rr):
+                      endpoints.append({'path':rr,'verb':m.group(1),'route':m.group(2),'signature':clean_expr(sig)})
+              if re.search(r'(?i)(ConfigRepository|ConfigApi|ConfigService|GetConfigUseCase|config\.tvgateway|getConfig\s*\()',s):
+                  for um in re.finditer(r'"(https?://[^"\s]+)"',s):
+                      u=um.group(1)
+                      if 'config.tvgateway.ru' in u.lower() or 'pre-config.tvgateway.ru' in u.lower():host_bindings.append({'path':rr,'url':u})
 
+          direct_hosts=sorted(set(x['v2_host'] for x in calls if x.get('v2_host')))
           report={
-            'status':'ok','run_rev':'v191.0',
-            'package_identity':{'version_name':'8.180.0','bytes':n,'sha256':h},
-            'network_policy':{'okko_requests':0,'protected_requests':0,'runtime_started':False,'credentials_read':False,'mutations':0,'third_party_accounts':0,'identifier_enumeration':False,'certificate_or_trust_override':False,'static_only':True},
-            'converter':{
-              'path':rel(conv),'response_model':rmdl,'domain_model':dmdl,
-              'method_signature':sig,'response_param':rp,'live_repository_binding_proven':live_repo,
-              'mappings':maps,'strict_private_mapping_count':len(strict),
-              'strict_private_answer_payload_proven':bool(live_repo and sig and strict),
-            },
-            'config':{
-              'provider_path':rel(provider),'dynamic_config_to_baseurl_proven':dynamic,
-              'getter_owners':getter_owners[:50],'config_repository_implementers':sorted(set(config_impl))[:50],
-              'config_routes':config_routes[:100],'config_urls':config_urls[:100],
-              'direct_rekko_hosts':sorted(set(direct_hosts)),
-              'exact_rekko_host_proven':len(set(direct_hosts))==1,
-            },
-            'decision':{'vulnerability_proven':False,'reportable':False,'runtime_authorized':False}
+              'status':'ok','run_rev':'v193.0',
+              'package_identity':{'version_name':'8.180.0','bytes':n,'sha256':h},
+              'network_policy':{'okko_requests':0,'protected_requests':0,'runtime_started':False,'credentials_read':False,'mutations':0,'identifier_enumeration':False,'certificate_or_trust_override':False,'static_only':True},
+              'config_model_response':{'path':rel(cmr),'constructors':constructors,'selected_real_arity':arity,'rekko_v2_param_index':slot},
+              'default_config':{'path':rel(dcmr),'mapped_calls':calls,'rekko_literals':rekko_literals},
+              'domain_config':{'path':rel(cmodel),'getter_present':domain_getter,'field_present':domain_field},
+              'provider':{'path':rel(provider),'dynamic_config_to_retrofit_baseurl_proven':provider_binding},
+              'repository':{'path':rel(cmi),**repo_facts},
+              'config_network':{'endpoints':endpoints[:100],'config_host_bindings':host_bindings[:100]},
+              'derived':{'mapped_v2_hosts':direct_hosts,'mapped_v2_urls':sorted(set(u for x in calls for u in x['v2_urls']))},
+              'summary':{
+                  'rekko_v2_constructor_slot_proven':slot is not None,
+                  'mapped_default_call_count':len(calls),
+                  'mapped_v2_host_count':len(direct_hosts),
+                  'single_mapped_v2_host_proven':len(direct_hosts)==1,
+                  'provider_dynamic_binding_proven':provider_binding,
+                  'exact_rekko_v2_host_proven':bool(provider_binding and len(direct_hosts)==1),
+                  'vulnerability_proven':False,
+              },
+              'decision':{'vulnerability_proven':False,'reportable':False,'runtime_authorized':False}
           }
           OUT.write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
-          print(json.dumps({'converter':report['converter'],'config':report['config']},ensure_ascii=False,indent=2)[:50000])
+          print(json.dumps({'summary':report['summary'],'derived':report['derived'],'default_calls':calls,'config_network':report['config_network']},ensure_ascii=False,indent=2)[:50000])
           PY
 
-      - name: Validate and upload derived evidence
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import json
-          d=json.load(open('/tmp/okko-v191.json',encoding='utf-8'))
-          assert d['package_identity']=={'version_name':'8.180.0','bytes':45942514,'sha256':'b00bca9cb327ab3ee483b46d390c9120ac28bfc7674c75fda0129c6c594cc1f9'}
-          n=d['network_policy']
-          assert n['okko_requests']==0 and n['protected_requests']==0 and n['runtime_started'] is False
-          assert n['credentials_read'] is False and n['mutations']==0 and n['identifier_enumeration'] is False
-          assert n['certificate_or_trust_override'] is False
-          print(json.dumps({'private_payload':d['converter']['strict_private_answer_payload_proven'],'exact_host':d['config']['exact_rekko_host_proven']},indent=2))
-          PY
-      - uses: actions/upload-artifact@v4
+      - name: Upload derived config evidence
+        uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: okko-exact-static-v191
+          name: okko-rekko-config-v193
           path: |
-            /tmp/okko-v191.json
+            /tmp/okko-v193.json
             /tmp/jadx.stderr
           if-no-files-found: warn
           retention-days: 7
 
-# Exact byte-identical public Okko 8.180.0 package only, fetched through the trusted official
-# static.rustore.ru CDN alias. Native TLS verification remains enabled. Derived evidence only is uploaded.
-# Zero Okko target/protected requests, credentials, mutations, enumeration or certificate/trust override.
+# Byte-identical public Okko 8.180.0, trusted official RuStore CDN alias, native TLS.
+# Static config provenance only; zero Okko target/protected traffic or certificate/trust override.
