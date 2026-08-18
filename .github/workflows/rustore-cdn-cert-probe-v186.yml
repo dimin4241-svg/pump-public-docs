@@ -1,0 +1,52 @@
+name: RuStore CDN certificate chain probe v186
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve public RuStore CDN host
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json,urllib.request,urllib.parse
+          from pathlib import Path
+          h={'User-Agent':'okko-standoff365-static-research/1.0','Accept':'application/json','ruStoreVerCode':'12000'}
+          with urllib.request.urlopen(urllib.request.Request('https://backapi.rustore.ru/applicationData/overallInfo/ru.more.play',headers=h),timeout=30) as r:
+              info=json.load(r)['body']
+          body=json.dumps({'appId':info['appId'],'firstInstall':True}).encode()
+          with urllib.request.urlopen(urllib.request.Request('https://backapi.rustore.ru/applicationData/download-link',data=body,headers={**h,'Content-Type':'application/json; charset=utf-8'},method='POST'),timeout=30) as r:
+              dl=json.load(r)['body']['apkUrl']
+          u=urllib.parse.urlsplit(dl)
+          assert u.scheme=='https' and u.hostname
+          Path('/tmp/rustore_host').write_text(u.hostname,encoding='utf-8')
+          print(json.dumps({'versionName':info.get('versionName'),'cdnHost':u.hostname},ensure_ascii=False))
+          PY
+      - name: Inspect certificate chain without bypass
+        shell: bash
+        run: |
+          set -euo pipefail
+          H="$(cat /tmp/rustore_host)"
+          echo | openssl s_client -connect "$H:443" -servername "$H" -showcerts -verify_return_error 2>&1 | tee /tmp/sclient.txt || true
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          t=Path('/tmp/sclient.txt').read_text(errors='replace')
+          keep=[]
+          for line in t.splitlines():
+              if re.search(r'(?i)(subject=|issuer=|verify error|verify return|verification error|verify return code|depth=|certificate chain)',line):
+                  keep.append(line[:800])
+          print('\n'.join(keep[:120]))
+          PY
+
+# Public RuStore/CDN certificate diagnostics only. No Okko target traffic.
+# TLS verification is not disabled and no certificate/trust override is used.
