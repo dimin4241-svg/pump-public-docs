@@ -1,0 +1,174 @@
+name: Targeted exact Okko AI class extraction v192
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  targeted:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Download and verify exact package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/okko
+          curl --location --fail --retry 2 --silent --show-error \
+            --output /tmp/okko/okko.pkg \
+            'https://static.rustore.ru/2026/8/14/7b/de764e6d-0184-4e0f-a7c6-0b6a30580a79.zip'
+          python3 - <<'PY'
+          import hashlib
+          from pathlib import Path
+          p=Path('/tmp/okko/okko.pkg');h=hashlib.sha256();n=0
+          with p.open('rb') as f:
+              for b in iter(lambda:f.read(1024*1024),b''):
+                  n+=len(b);h.update(b)
+          assert n==45942514
+          assert h.hexdigest()=='b00bca9cb327ab3ee483b46d390c9120ac28bfc7674c75fda0129c6c594cc1f9'
+          PY
+          python3 - <<'PY'
+          import shutil,zipfile
+          from pathlib import Path
+          pkg=Path('/tmp/okko/okko.pkg');out=Path('/tmp/okko/okko.apk')
+          with zipfile.ZipFile(pkg) as z:
+              apks=[x for x in z.infolist() if x.filename.lower().endswith('.apk')]
+              if apks:
+                  info=max(apks,key=lambda x:x.file_size)
+                  with z.open(info) as src,out.open('wb') as dst:shutil.copyfileobj(src,dst,1024*1024)
+              else:shutil.copy2(pkg,out)
+          PY
+      - name: Install JADX
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL=$(python3 - <<'PY'
+          import json,urllib.request
+          d=json.load(urllib.request.urlopen('https://api.github.com/repos/skylot/jadx/releases/latest',timeout=30))
+          print([a['browser_download_url'] for a in d['assets'] if a['name'].startswith('jadx-') and a['name'].endswith('.zip')][0])
+          PY
+          )
+          curl -L --fail --retry 2 "$URL" -o /tmp/jadx.zip
+          mkdir -p /tmp/jadx /tmp/sc && unzip -q /tmp/jadx.zip -d /tmp/jadx
+          chmod +x /tmp/jadx/bin/jadx
+      - name: Decompile target classes only
+        shell: bash
+        run: |
+          set -euo pipefail
+          function one() {
+            local cls="$1"; local out="$2"
+            /tmp/jadx/bin/jadx --no-res --no-imports --show-bad-code \
+              --single-class "$cls" --single-class-output "/tmp/sc/$out" \
+              /tmp/okko/okko.apk >/tmp/sc/${out}.stdout 2>/tmp/sc/${out}.stderr
+            test -s "/tmp/sc/$out"
+          }
+          one 'ru.okko.sdk.domain.converters.aiAssistant.AiAssistantDomainConverter' converter.java
+          one 'ru.okko.sdk.domain.oldEntity.response.aiAssistant.AiAssistantAnswerResponse' response.java
+          one 'ru.okko.sdk.domain.entity.aiAssistant.model.AiAssistantAnswer' domain.java
+          one 'ru.okko.sdk.data.repository.aiAssistant.AiAssistantRepositoryImpl' repository.java
+          one 'ru.okko.commonApp.internal.di.modules.lazyApi.RekkoGatewayApiProvider' provider.java
+      - name: Derive semantic evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json,re
+          from pathlib import Path
+          D=Path('/tmp/sc')
+          def rd(n):return (D/n).read_text(encoding='utf-8',errors='replace')
+          def fields(t):
+              out=[];pending=None
+              for i,l in enumerate(t.splitlines(),1):
+                  sm=re.search(r'(?i)(?:SerialName|SerializedName|JsonProperty)\s*\(\s*"([^"\\]+)"',l)
+                  if sm:pending=(i,sm.group(1))
+                  fm=re.search(r'^\s*(?:(?:public|private|protected|final|static|transient|volatile)\s+)+([A-Za-z0-9_.$<>?, \[\]]+)\s+([A-Za-z_$][\w$]*)\s*(?:;|=)',l)
+                  if fm:
+                      ser=pending[1] if pending and i-pending[0]<=4 else None
+                      out.append({'line':i,'type':fm.group(1).strip(),'field':fm.group(2),'serialized':ser});pending=None
+              return out
+          def getters(t):
+              ls=t.splitlines();out=[]
+              for i,l in enumerate(ls,1):
+                  gm=re.search(r'\b(?:get|is)([A-Za-z_$][\w$]*)\s*\(\s*\)\s*\{',l)
+                  if not gm:continue
+                  tail='\n'.join(ls[i-1:min(len(ls),i+8)])
+                  rm=re.search(r'return\s+(?:this\.)?([A-Za-z_$][\w$]*)\s*;',tail)
+                  out.append({'line':i,'getter':gm.group(1),'field':rm.group(1) if rm else None})
+              return out
+          def match(t,op,L,R):
+              d=0;q=None;esc=False
+              for i in range(op,len(t)):
+                  c=t[i]
+                  if q:
+                      if esc:esc=False
+                      elif c=='\\':esc=True
+                      elif c==q:q=None
+                      continue
+                  if c in ('"',"'"):q=c;continue
+                  if c==L:d+=1
+                  elif c==R:
+                      d-=1
+                      if d==0:return i
+              return None
+          conv=rd('converter.java');resp=rd('response.java');dom=rd('domain.java');repo=rd('repository.java');prov=rd('provider.java')
+          methods=[]
+          rx=re.compile(r'(?s)(?P<sig>(?:(?:public|private|protected|static|final)\s+)+[^\{;]{0,800}?AiAssistantAnswer[^\{;]{0,300}?\((?P<params>[^)]*AiAssistantAnswerResponse[^)]*)\))\s*\{')
+          for m in rx.finditer(conv):
+              pm=re.search(r'AiAssistantAnswerResponse\s+([A-Za-z_$][\w$]*)',m.group('params'))
+              op=conv.find('{',m.start(),m.end()+2);cp=match(conv,op,'{','}') if op>=0 else None
+              if not pm or cp is None:continue
+              body=conv[op+1:cp];rp=pm.group(1)
+              direct=sorted(set(x.group(1) for x in re.finditer(r'\b'+re.escape(rp)+r'\.(?:get|is)([A-Za-z_$][\w$]*)\s*\(',body)))
+              assignments=[]
+              for a in re.finditer(r'(?m)^\s*(?:final\s+)?(?:[A-Za-z0-9_.$<>?, \[\]]+\s+)?([A-Za-z_$][\w$]*)\s*=\s*([^;]+);',body):
+                  rhs=a.group(2)
+                  gs=sorted(set(x.group(1) for x in re.finditer(r'\b'+re.escape(rp)+r'\.(?:get|is)([A-Za-z_$][\w$]*)\s*\(',rhs)))
+                  if gs:assignments.append({'local':a.group(1),'response_getters':gs})
+              ctor_args=[]
+              nm=re.search(r'\bnew\s+(?:[A-Za-z_$][\w$]*\.)*AiAssistantAnswer\s*\(',body)
+              if nm:
+                  po=body.find('(',nm.start(),nm.end()+2);pc=match(body,po,'(',')')
+                  if pc is not None:
+                      raw=body[po+1:pc]
+                      # retain expressions only after replacing string literals
+                      raw=re.sub(r'"(?:[^"\\]|\\.)*"','"<lit>"',raw)
+                      ctor_args=[re.sub(r'\s+',' ',x).strip()[:500] for x in raw.split(',')]
+              methods.append({'signature':re.sub(r'\s+',' ',m.group('sig')).strip(),'response_param':rp,'direct_response_getters':direct,'response_derived_locals':assignments,'domain_constructor_args':ctor_args})
+          out={
+            'status':'ok','run_rev':'v192.0',
+            'package_identity':{'version_name':'8.180.0','bytes':45942514,'sha256':'b00bca9cb327ab3ee483b46d390c9120ac28bfc7674c75fda0129c6c594cc1f9'},
+            'network_policy':{'okko_requests':0,'protected_requests':0,'runtime_started':False,'credentials_read':False,'mutations':0,'identifier_enumeration':False,'certificate_or_trust_override':False,'static_only':True},
+            'response_model':{'fields':fields(resp),'getters':getters(resp)},
+            'domain_model':{'fields':fields(dom),'getters':getters(dom)},
+            'converter_methods':methods,
+            'repository':{
+              'converter_type_present':'AiAssistantDomainConverter' in repo,
+              'answer_response_mapping_present':bool(re.search(r'\.f\.a\s*\([^\n]{0,240}AiAssistantAnswerResponse',repo)),
+            },
+            'provider':{
+              'config_repository_present':'ConfigRepository' in prov,
+              'dynamic_rekko_baseurl_present':bool('getConfig().getRekkoGatewayUrlV2()' in prov and '.baseUrl(' in prov),
+            },
+            'decision':{'vulnerability_proven':False,'reportable':False,'runtime_authorized':False}
+          }
+          Path('/tmp/okko-v192.json').write_text(json.dumps(out,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          print(json.dumps(out,ensure_ascii=False,indent=2)[:50000])
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: okko-targeted-v192
+          path: /tmp/okko-v192.json
+          if-no-files-found: warn
+          retention-days: 7
+
+# Byte-identical public Okko 8.180.0 only, trusted official RuStore CDN alias, native TLS.
+# Targeted JADX decompilation and derived semantic evidence only. Zero Okko target traffic.
