@@ -27,7 +27,7 @@ jobs:
           set -euo pipefail
           mkdir -p /tmp/okko
           python3 - <<'PY'
-          import hashlib,json,urllib.request
+          import json,urllib.request
           from pathlib import Path
           headers={'User-Agent':'okko-standoff365-static-research/1.0','Accept':'application/json','ruStoreVerCode':'12000'}
           with urllib.request.urlopen(urllib.request.Request('https://backapi.rustore.ru/applicationData/overallInfo/ru.more.play',headers=headers),timeout=40) as r:
@@ -35,15 +35,25 @@ jobs:
           body=json.dumps({'appId':info['appId'],'firstInstall':True}).encode()
           with urllib.request.urlopen(urllib.request.Request('https://backapi.rustore.ru/applicationData/download-link',data=body,headers={**headers,'Content-Type':'application/json; charset=utf-8'},method='POST'),timeout=40) as r:
               dl=json.load(r)['body']['apkUrl']
-          out=Path('/tmp/okko/okko.pkg');h=hashlib.sha256();n=0
-          with urllib.request.urlopen(urllib.request.Request(dl,headers={'User-Agent':'okko-standoff365-static-research/1.0','Accept':'*/*'}),timeout=180) as r,out.open('wb') as f:
-              while True:
-                  b=r.read(1024*1024)
-                  if not b:break
-                  f.write(b);h.update(b);n+=len(b)
-          got=h.hexdigest();print(json.dumps({'versionName':info.get('versionName'),'bytes':n,'sha256':got},ensure_ascii=False))
+          Path('/tmp/okko/apk_url').write_text(dl,encoding='utf-8')
+          Path('/tmp/okko/version_name').write_text(str(info.get('versionName') or ''),encoding='utf-8')
+          PY
+          curl --location --fail --retry 2 --silent --show-error \
+            --header 'User-Agent: okko-standoff365-static-research/1.0' \
+            --header 'Accept: */*' \
+            --output /tmp/okko/okko.pkg "$(cat /tmp/okko/apk_url)"
+          python3 - <<'PY'
+          import hashlib,json
+          from pathlib import Path
+          p=Path('/tmp/okko/okko.pkg');h=hashlib.sha256();n=0
+          with p.open('rb') as f:
+              for b in iter(lambda:f.read(1024*1024),b''):
+                  n+=len(b);h.update(b)
+          got=h.hexdigest();version=Path('/tmp/okko/version_name').read_text(encoding='utf-8')
+          print(json.dumps({'versionName':version,'bytes':n,'sha256':got},ensure_ascii=False))
           assert n==45942514 and got=='b00bca9cb327ab3ee483b46d390c9120ac28bfc7674c75fda0129c6c594cc1f9'
           PY
+          rm -f /tmp/okko/apk_url
 
       - name: Install JADX
         shell: bash
@@ -128,4 +138,5 @@ jobs:
           if-no-files-found: warn
 
 # Observable compute-only run of the exact public RuStore package.
+# TLS verification stays enabled for every download.
 # Zero Okko/Standoff target/protected requests, credentials, mutations, enumeration or third-party identifiers.
