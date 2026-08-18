@@ -1,0 +1,41 @@
+name: RuStore trusted static CDN alias probe v190
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Probe official trusted CDN alias
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL='https://static.rustore.ru/2026/8/14/7b/de764e6d-0184-4e0f-a7c6-0b6a30580a79.zip'
+          curl --location --fail --silent --show-error \
+            --range 0-0 \
+            --header 'User-Agent: okko-standoff365-static-research/1.0' \
+            --header 'Accept: */*' \
+            --dump-header /tmp/headers.txt \
+            --output /tmp/one-byte "$URL"
+          test -s /tmp/one-byte
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          t=Path('/tmp/headers.txt').read_text(errors='replace')
+          keep=[]
+          for line in t.splitlines():
+              if re.match(r'(?i)^(HTTP/|content-length:|content-range:|content-type:|etag:|last-modified:|location:)',line):
+                  keep.append(line[:500])
+          print('\n'.join(keep))
+          print('bytes_received',Path('/tmp/one-byte').stat().st_size)
+          PY
+
+# Official RuStore static CDN alias only. Native TLS verification stays enabled.
+# No Okko target traffic, credentials, mutations, enumeration or certificate override.
