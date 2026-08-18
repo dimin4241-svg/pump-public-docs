@@ -1,0 +1,45 @@
+name: RuStore Windows native trust probe v188
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: windows-latest
+    timeout-minutes: 7
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve public RuStore download URL
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $headers = @{
+            'User-Agent' = 'okko-standoff365-static-research/1.0'
+            'Accept' = 'application/json'
+            'ruStoreVerCode' = '12000'
+          }
+          $infoResp = Invoke-RestMethod -Uri 'https://backapi.rustore.ru/applicationData/overallInfo/ru.more.play' -Headers $headers -Method Get
+          $info = $infoResp.body
+          $body = @{ appId = $info.appId; firstInstall = $true } | ConvertTo-Json -Compress
+          $dlResp = Invoke-RestMethod -Uri 'https://backapi.rustore.ru/applicationData/download-link' -Headers ($headers + @{'Content-Type'='application/json; charset=utf-8'}) -Method Post -Body $body
+          $url = [string]$dlResp.body.apkUrl
+          if (-not $url.StartsWith('https://')) { throw 'non-https download url' }
+          Set-Content -Path "$env:RUNNER_TEMP\rustore-url.txt" -Value $url -NoNewline
+          $u = [System.Uri]$url
+          Write-Output (@{ versionName=[string]$info.versionName; cdnHost=$u.Host } | ConvertTo-Json -Compress)
+      - name: Verify CDN with native Windows trust only
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $url = Get-Content "$env:RUNNER_TEMP\rustore-url.txt" -Raw
+          $headers = @{ 'Range'='bytes=0-0'; 'User-Agent'='okko-standoff365-static-research/1.0'; 'Accept'='*/*' }
+          Invoke-WebRequest -Uri $url -Headers $headers -OutFile "$env:RUNNER_TEMP\one-byte.bin" -UseBasicParsing
+          if ((Get-Item "$env:RUNNER_TEMP\one-byte.bin").Length -lt 1) { throw 'empty response' }
+          Write-Output 'native-windows-tls=success'
+
+# Public RuStore/CDN trust probe only. No Okko target traffic.
+# Uses unmodified Windows/SChannel trust; no certificate bypass or custom CA.
