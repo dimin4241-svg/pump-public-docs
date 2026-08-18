@@ -1,0 +1,131 @@
+name: Observable exact Okko static run v185
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  exact-static:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Fetch exact public Okko package from RuStore
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/okko
+          python3 - <<'PY'
+          import hashlib,json,urllib.request
+          from pathlib import Path
+          headers={'User-Agent':'okko-standoff365-static-research/1.0','Accept':'application/json','ruStoreVerCode':'2000000000'}
+          with urllib.request.urlopen(urllib.request.Request('https://backapi.rustore.ru/applicationData/overallInfo/ru.more.play',headers=headers),timeout=40) as r:
+              info=json.load(r)['body']
+          body=json.dumps({'appId':info['appId'],'firstInstall':True}).encode()
+          with urllib.request.urlopen(urllib.request.Request('https://backapi.rustore.ru/applicationData/download-link',data=body,headers={**headers,'Content-Type':'application/json; charset=utf-8'},method='POST'),timeout=40) as r:
+              dl=json.load(r)['body']['apkUrl']
+          out=Path('/tmp/okko/okko.pkg');h=hashlib.sha256();n=0
+          with urllib.request.urlopen(urllib.request.Request(dl,headers={'User-Agent':'okko-standoff365-static-research/1.0','Accept':'*/*'}),timeout=180) as r,out.open('wb') as f:
+              while True:
+                  b=r.read(1024*1024)
+                  if not b:break
+                  f.write(b);h.update(b);n+=len(b)
+          got=h.hexdigest();print(json.dumps({'versionName':info.get('versionName'),'bytes':n,'sha256':got},ensure_ascii=False))
+          assert n==45942514 and got=='b00bca9cb327ab3ee483b46d390c9120ac28bfc7674c75fda0129c6c594cc1f9'
+          PY
+
+      - name: Install JADX
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL=$(python3 - <<'PY'
+          import json,urllib.request
+          d=json.load(urllib.request.urlopen('https://api.github.com/repos/skylot/jadx/releases/latest',timeout=30))
+          print([a['browser_download_url'] for a in d['assets'] if a['name'].startswith('jadx-') and a['name'].endswith('.zip')][0])
+          PY
+          )
+          curl -L --fail --retry 2 "$URL" -o /tmp/jadx.zip
+          mkdir -p /tmp/jadx && unzip -q /tmp/jadx.zip -d /tmp/jadx
+          chmod +x /tmp/jadx/bin/jadx
+          /tmp/jadx/bin/jadx --version
+
+      - name: Extract APK and decompile exact package
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import shutil,zipfile
+          from pathlib import Path
+          pkg=Path('/tmp/okko/okko.pkg');out=Path('/tmp/okko/okko.apk')
+          if zipfile.is_zipfile(pkg):
+              with zipfile.ZipFile(pkg) as z:
+                  apks=[x for x in z.infolist() if x.filename.lower().endswith('.apk')]
+                  if apks:
+                      info=max(apks,key=lambda x:x.file_size)
+                      with z.open(info) as src,out.open('wb') as dst:shutil.copyfileobj(src,dst,1024*1024)
+                  else:shutil.copy2(pkg,out)
+          else:shutil.copy2(pkg,out)
+          print(out.stat().st_size)
+          PY
+          rm -rf /tmp/okko/jadx
+          /tmp/jadx/bin/jadx --no-res --no-imports --show-bad-code --threads-count 4 -d /tmp/okko/jadx /tmp/okko/okko.apk >/tmp/jadx.stdout 2>/tmp/jadx.stderr || true
+          test -d /tmp/okko/jadx/sources
+
+      - name: Extract and run existing v185 analyzer
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('.github/workflows/okko-static-exact-v185.yml')
+          s=p.read_text(encoding='utf-8')
+          mark='      - name: Derive minimal converter and config evidence\n'
+          i=s.index(mark)
+          a=s.index("          python3 - <<'PY'\n",i)+len("          python3 - <<'PY'\n")
+          b=s.index("\n          PY\n",a)
+          raw=s[a:b].splitlines()
+          code='\n'.join(x[10:] if x.startswith('          ') else x for x in raw)+'\n'
+          Path('/tmp/v185_analyze.py').write_text(code,encoding='utf-8')
+          compile(code,'/tmp/v185_analyze.py','exec')
+          print('analyzer_bytes',len(code.encode()))
+          PY
+          python3 /tmp/v185_analyze.py
+          test -s okko-static-v185.json
+
+      - name: Validate derived evidence safety
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          d=json.load(open('okko-static-v185.json',encoding='utf-8'))
+          assert d['package_identity']=={'version_name':'8.180.0','bytes':45942514,'sha256':'b00bca9cb327ab3ee483b46d390c9120ac28bfc7674c75fda0129c6c594cc1f9'}
+          n=d['network_policy']
+          assert n['okko_requests']==0 and n['protected_requests']==0 and n['runtime_started'] is False
+          assert n['credentials_read'] is False and n['mutations']==0 and n['identifier_enumeration'] is False
+          print(json.dumps({'converter':d['converter'],'config':d['config']},ensure_ascii=False,indent=2))
+          PY
+
+      - name: Upload derived evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: okko-static-v185
+          path: |
+            okko-static-v185.json
+            /tmp/jadx.stderr
+          if-no-files-found: warn
+
+# Observable compute-only run of the exact public RuStore package.
+# Zero Okko/Standoff target/protected requests, credentials, mutations, enumeration or third-party identifiers.
