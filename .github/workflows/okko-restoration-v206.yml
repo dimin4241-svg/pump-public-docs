@@ -1,0 +1,366 @@
+name: Exact restoration job storage and producer chain v206
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  static-restoration-storage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Download exact public Okko 8.180.0 and decompile sole APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/okko
+          curl --location --fail --retry 2 --silent --show-error \
+            --header 'User-Agent: okko-standoff365-static-research/1.0' \
+            --output /tmp/okko/okko.pkg \
+            'https://static.rustore.ru/2026/8/14/7b/de764e6d-0184-4e0f-a7c6-0b6a30580a79.zip'
+          python3 - <<'PY'
+          import hashlib,shutil,zipfile
+          from pathlib import Path
+          p=Path('/tmp/okko/okko.pkg');h=hashlib.sha256();n=0
+          with p.open('rb') as f:
+              for b in iter(lambda:f.read(1024*1024),b''):
+                  n+=len(b);h.update(b)
+          got=h.hexdigest();assert n==45942514 and got=='b00bca9cb327ab3ee483b46d390c9120ac28bfc7674c75fda0129c6c594cc1f9'
+          with zipfile.ZipFile(p) as z:
+              apks=[x for x in z.infolist() if x.filename.lower().endswith('.apk')]
+              assert len(apks)==1
+              with z.open(apks[0]) as src,open('/tmp/okko/okko.apk','wb') as dst:shutil.copyfileobj(src,dst,1024*1024)
+          PY
+          URL=$(python3 - <<'PY'
+          import json,urllib.request
+          d=json.load(urllib.request.urlopen('https://api.github.com/repos/skylot/jadx/releases/latest',timeout=30))
+          print([a['browser_download_url'] for a in d['assets'] if a['name'].startswith('jadx-') and a['name'].endswith('.zip')][0])
+          PY
+          )
+          curl -L --fail --retry 2 "$URL" -o /tmp/jadx.zip
+          mkdir -p /tmp/jadx && unzip -q /tmp/jadx.zip -d /tmp/jadx
+          chmod +x /tmp/jadx/bin/jadx
+          /tmp/jadx/bin/jadx --no-res --no-imports --show-bad-code --threads-count 4 \
+            -d /tmp/okko/jadx /tmp/okko/okko.apk >/tmp/jadx.stdout 2>/tmp/jadx.stderr || true
+          test -d /tmp/okko/jadx/sources
+
+      - name: Trace p21 storage and producer-to-poll dataflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from __future__ import annotations
+          import json,re
+          from pathlib import Path
+
+          SRC=Path('/tmp/okko/jadx/sources');OUT=Path('/tmp/okko-v206.json')
+          FIRST=('ru/okko/','ru/more/play/','p003nskobfuscated/','nskobfuscated/')
+          STR_RX=re.compile(r'"([^"\\]*(?:\\.[^"\\]*)*)"')
+          URL_RX=re.compile(r'https?://[^\s\"\'<>]+',re.I)
+
+          def rel(p):return str(p.relative_to(SRC)).replace('\\','/')
+          def rd(p):return p.read_text(encoding='utf-8',errors='replace')
+          def redact(s):
+              safe={'restorationId','purchaseToken','paymentToken','client_type','googlePurchase','google_purchase','purchase_token'}
+              return STR_RX.sub(lambda m:'"'+m.group(1)+'"' if m.group(1) in safe or URL_RX.fullmatch(m.group(1)) else '"<lit>"',s)[:16000]
+          def one(path,base):
+              p=SRC/path
+              if p.is_file():return p
+              rows=[x for x in SRC.rglob(base) if str(x).replace('\\','/').endswith(str(path).replace('\\','/'))] or list(SRC.rglob(base))
+              if len(rows)!=1:raise SystemExit(f'{base}: {len(rows)} matches')
+              return rows[0]
+          def match(t,op,L='(',R=')'):
+              d=0;q=None;esc=False
+              for i in range(op,len(t)):
+                  c=t[i]
+                  if q:
+                      if esc:esc=False
+                      elif c=='\\':esc=True
+                      elif c==q:q=None
+                      continue
+                  if c in ('"',"'"):q=c;continue
+                  if c==L:d+=1
+                  elif c==R:
+                      d-=1
+                      if d==0:return i
+              return None
+          def split_top(s):
+              out=[];st=0;dp=db=ds=da=0;q=None;esc=False
+              for i,c in enumerate(s):
+                  if q:
+                      if esc:esc=False
+                      elif c=='\\':esc=True
+                      elif c==q:q=None
+                      continue
+                  if c in ('"',"'"):q=c
+                  elif c=='(':dp+=1
+                  elif c==')':dp-=1
+                  elif c=='{':db+=1
+                  elif c=='}':db-=1
+                  elif c=='[':ds+=1
+                  elif c==']':ds-=1
+                  elif c=='<':da+=1
+                  elif c=='>':da=max(0,da-1)
+                  elif c==',' and dp==db==ds==da==0:
+                      out.append(s[st:i].strip());st=i+1
+              out.append(s[st:].strip());return [x for x in out if x]
+          def methods(t):
+              out=[]
+              rx=re.compile(r'(?m)^\s*(?:(?:public|private|protected|static|final|synchronized|native|abstract|default)\s+)+[^;={}]{1,3400}?\s+([A-Za-z_$][\w$]*)\s*\(([^;{}]*)\)\s*(?:throws [^{]+)?\{')
+              for m in rx.finditer(t):
+                  op=t.find('{',m.start(),m.end()+2);cp=match(t,op,'{','}') if op>=0 else None
+                  if cp is None:continue
+                  out.append({'start':m.start(),'end':cp+1,'name':m.group(1),'params':m.group(2),'sig':re.sub(r'\s+',' ',m.group(0)[:-1]).strip()[:3400]})
+              return out
+          def owner(ms,pos):
+              rows=[m for m in ms if m['start']<=pos<m['end']]
+              return rows[-1] if rows else None
+          def sl(t,pos,b=12,a=20):
+              ls=t.splitlines();line=t[:pos].count('\n')+1;lo=max(1,line-b);hi=min(len(ls),line+a)
+              return {'line':line,'start':lo,'end':hi,'text':'\n'.join(f'{i:05d}: {redact(ls[i-1])}' for i in range(lo,hi+1))}
+          def typemap(t):
+              out={}
+              for m in re.finditer(r'\b([A-Za-z_$][\w.$]*(?:<[^;={}()]+>)?)\s+([A-Za-z_$][\w$]*)\s*(?=[;=,)])',t):
+                  out[m.group(2)]=re.sub(r'<.*>','',m.group(1)).strip()
+              return out
+          def model(p):
+              t=rd(p);ls=t.splitlines();fields=[];getters=[];pending=None
+              sr=re.compile(r'(?i)(?:SerialName|SerializedName|JsonProperty)\s*\(\s*"([^"\\]{1,160})"')
+              for i,l in enumerate(ls,1):
+                  sm=sr.search(l)
+                  if sm:pending=(i,sm.group(1))
+                  fm=re.search(r'^\s*(?:(?:public|private|protected|final|static|transient|volatile)\s+)+([A-Za-z0-9_.$<>?, \[\]]+)\s+([A-Za-z_$][\w$]*)\s*(?:;|=)',l)
+                  if fm:
+                      ser=pending[1] if pending and i-pending[0]<=4 else None
+                      fields.append({'line':i,'type':fm.group(1).strip(),'field':fm.group(2),'serialized':ser});pending=None
+              for i,l in enumerate(ls,1):
+                  gm=re.search(r'\b(get|is)([A-Za-z_$][\w$]*)\s*\(\s*\)\s*\{',l)
+                  if gm:
+                      tail='\n'.join(ls[i-1:min(len(ls),i+8)]);rm=re.search(r'return\s+(?:this\.)?([A-Za-z_$][\w$]*)\s*;',tail)
+                      getters.append({'line':i,'getter':gm.group(1)+gm.group(2),'field':rm.group(1) if rm else None})
+              return {'path':rel(p),'fields':fields,'getters':getters,'method_signatures':[m['sig'] for m in methods(t)[:120]],'shape':redact(t[:26000])}
+
+          # ----- exact p21 declaration -----
+          p21=one(Path('p003nskobfuscated/p21.java'),'p21.java');p21t=rd(p21);p21m=methods(p21t)
+          p21_info={'path':rel(p21),'kind':'interface' if re.search(r'\binterface\s+p21\b',p21t) else ('abstract-class' if re.search(r'\babstract\s+class\s+p21\b',p21t) else 'class'),
+                    'method_signatures':[m['sig'] for m in p21m[:160]],'shape':redact(p21t[:36000])}
+
+          # ----- implementations / DI bindings / fields of p21 -----
+          implementations=[];bindings=[];p21_fields=[]
+          implrx=re.compile(r'(?:implements|extends)\s+(?:p003nskobfuscated\.)?p21\b')
+          bindrx=re.compile(r'(?i)(?:p003nskobfuscated\.)?p21\.class')
+          fieldrx=re.compile(r'\b(?:p003nskobfuscated\.)?p21\s+([A-Za-z_$][\w$]*)\b')
+          for p in SRC.rglob('*.java'):
+              rp=rel(p)
+              if not rp.startswith(FIRST):continue
+              try:t=rd(p)
+              except Exception:continue
+              ms=methods(t)
+              if implrx.search(t):
+                  em=[]
+                  for m in ms:
+                      if m['name'] in {'a','b','c','d','e','f','g','h','i','j','k','l','m','n'}:
+                          em.append({'signature':m['sig'],'body':redact(t[m['start']:m['end']])[:22000]})
+                  implementations.append({'path':rp,'methods':em,'shape':redact(t[:24000])})
+              for bm in bindrx.finditer(t):
+                  bindings.append({'path':rp,'line':t[:bm.start()].count('\n')+1,'slice':sl(t,bm.start(),10,14)})
+              for fm in fieldrx.finditer(t):
+                  mo=owner(ms,fm.start());p21_fields.append({'path':rp,'field_name':fm.group(1),'owner':mo['sig'] if mo else None,'slice':sl(t,fm.start(),7,9)})
+
+          # ----- all p21 method calls, preserve typed receiver and args -----
+          p21_calls=[]
+          p21_names=sorted(set(m['name'] for m in p21m if m['name'] not in {'equals','hashCode','toString'}))
+          if p21_names:
+              rx=re.compile(r'\b([A-Za-z_$][\w$]*)\.('+'|'.join(re.escape(x) for x in p21_names)+r')\s*\(')
+              for p in SRC.rglob('*.java'):
+                  rp=rel(p)
+                  if not rp.startswith(FIRST):continue
+                  try:t=rd(p)
+                  except Exception:continue
+                  if not any((n+'(') in t for n in p21_names):continue
+                  ms=methods(t);ft=typemap(t)
+                  for mo in ms:
+                      body=t[mo['start']:mo['end']];types={**ft,**typemap(body)}
+                      for cm in rx.finditer(body):
+                          recv,meth=cm.group(1),cm.group(2);typ=types.get(recv,'')
+                          if not (typ=='p003nskobfuscated.p21' or typ=='p21' or typ.endswith('.p21')):continue
+                          op=body.find('(',cm.start(),cm.end()+2);cp=match(body,op) if op>=0 else None
+                          args=split_top(body[op+1:cp]) if cp is not None else []
+                          pos=mo['start']+cm.start()
+                          p21_calls.append({'path':rp,'line':t[:pos].count('\n')+1,'owner':mo['sig'],'receiver':recv,'method':meth,'args':[redact(x) for x in args],'slice':sl(t,pos,9,13)})
+
+          # ----- PaymentRepositoryImpl producer method using restoreGooglePurchase -----
+          pay=one(Path('ru/okko/sdk/data/repository/PaymentRepositoryImpl.java'),'PaymentRepositoryImpl.java');pt=rd(pay);pms=methods(pt)
+          producer_api_calls=[]
+          for cm in re.finditer(r'\.restoreGooglePurchase\s*\(',pt):
+              op=pt.find('(',cm.start(),cm.end()+2);cp=match(pt,op)
+              if cp is None:continue
+              mo=owner(pms,cm.start());args=split_top(pt[op+1:cp]);producer_api_calls.append({'line':pt[:cm.start()].count('\n')+1,'owner':mo['sig'] if mo else None,'args':[redact(x) for x in args],'slice':sl(pt,cm.start(),24,34)})
+
+          # Locate producer response model and all `.c` uses immediately after restore response.
+          initresp=one(Path('ru/okko/sdk/domain/googlebilling/models/PurchaseRestorationInitiationResponse.java'),'PurchaseRestorationInitiationResponse.java')
+          init_model=model(initresp)
+          restoration_result_slices=[]
+          for mm in re.finditer(r'PurchaseRestorationInitiationResponse',pt):
+              mo=owner(pms,mm.start());restoration_result_slices.append({'owner':mo['sig'] if mo else None,'slice':sl(pt,mm.start(),12,18)})
+              if len(restoration_result_slices)>=40:break
+
+          # Find outer PaymentRepository methods that instantiate inner producer coroutine classes containing restoreGooglePurchase.
+          producer_inner_classes=[]
+          for c in producer_api_calls:
+              # nearest class name before the inner call
+              pos=pt.find('restoreGooglePurchase',max(0,pt.find(c['owner'] or '') if c['owner'] else 0))
+          # simpler: find classes whose body has restoreGooglePurchase, then constructor sites
+          classrx=re.compile(r'\bclass\s+([A-Za-z_$][\w$]*)\b')
+          for cm in classrx.finditer(pt):
+              op=pt.find('{',cm.end());cp=match(pt,op,'{','}') if op>=0 else None
+              if cp is None:continue
+              body=pt[op+1:cp]
+              if 'restoreGooglePurchase(' not in body:continue
+              cls=cm.group(1);ctor_sites=[]
+              nrx=re.compile(r'\bnew\s+(?:(?:[A-Za-z_$][\w$]*\.)*)'+re.escape(cls)+r'\s*\(')
+              for nm in nrx.finditer(pt):
+                  mo=owner(pms,nm.start())
+                  if not mo or mo['name'] in {'create','invoke','invokeSuspend'}:continue
+                  op2=pt.find('(',nm.start(),nm.end()+2);cp2=match(pt,op2);args=split_top(pt[op2+1:cp2]) if cp2 else []
+                  ctor_sites.append({'outer':mo['sig'],'args':[redact(x) for x in args],'slice':sl(pt,nm.start(),10,14)})
+              producer_inner_classes.append({'class':cls,'constructor_sites':ctor_sites,'body_shape':redact(body)[:26000]})
+
+          # ----- External app/usecase callers of producer outer methods -----
+          producer_outer_names=[]
+          for row in producer_inner_classes:
+              for cs in row['constructor_sites']:
+                  mm=re.search(r'\b([A-Za-z_$][\w$]*)\s*\(',cs['outer'])
+                  # signature parser: last method name before opening params
+                  mm2=re.search(r'([A-Za-z_$][\w$]*)\s*\([^()]*\)\s*$',cs['outer'])
+                  if mm2:producer_outer_names.append(mm2.group(1))
+          producer_outer_names=sorted(set(producer_outer_names))
+          external_producer_calls=[]
+          for name in producer_outer_names:
+              rx=re.compile(r'\b([A-Za-z_$][\w$]*)\.'+re.escape(name)+r'\s*\(')
+              for p in SRC.rglob('*.java'):
+                  rp=rel(p)
+                  if rp==rel(pay) or not rp.startswith(FIRST):continue
+                  try:t=rd(p)
+                  except Exception:continue
+                  if name+'(' not in t:continue
+                  ms=methods(t);ft=typemap(t)
+                  for mo in ms:
+                      body=t[mo['start']:mo['end']];types={**ft,**typemap(body)}
+                      for mm in rx.finditer(body):
+                          recv=mm.group(1);typ=types.get(recv,'')
+                          if 'PaymentRepository' not in typ:continue
+                          op=body.find('(',mm.start(),mm.end()+2);cp=match(body,op);args=split_top(body[op+1:cp]) if cp else []
+                          pos=mo['start']+mm.start();external_producer_calls.append({'path':rp,'line':t[:pos].count('\n')+1,'owner':mo['sig'],'receiver_type':typ,'method':name,'args':[redact(x) for x in args],'slice':sl(t,pos,12,18)})
+
+          # ----- Correlate producer return value with p21 setter calls -----
+          correlation=[]
+          for p in SRC.rglob('*.java'):
+              rp=rel(p)
+              if not rp.startswith(FIRST):continue
+              try:t=rd(p)
+              except Exception:continue
+              if 'PaymentRepository' not in t or 'p21' not in t:continue
+              if not any(n+'(' in t for n in producer_outer_names):continue
+              ms=methods(t);ft=typemap(t)
+              for mo in ms:
+                  body=t[mo['start']:mo['end']]
+                  if not any(n+'(' in body for n in producer_outer_names):continue
+                  if not any(re.search(r'\b[A-Za-z_$][\w$]*\.'+re.escape(n)+r'\s*\(',body) for n in p21_names):continue
+                  correlation.append({'path':rp,'owner':mo['sig'],'body_shape':redact(body)[:32000]})
+
+          # ----- restorationId entropy / format / disclosure evidence -----
+          format_markers=[];literal_markers=[]
+          ridrx=re.compile(r'(?i)restorationId')
+          for p in SRC.rglob('*.java'):
+              rp=rel(p)
+              if not rp.startswith(FIRST):continue
+              try:t=rd(p)
+              except Exception:continue
+              if not ridrx.search(t):continue
+              for mm in re.finditer(r'(?i)(UUID\.fromString|UUID\.randomUUID|Pattern\.compile|Regex\(|matches\s*\(|length\s*\(\)|substring\s*\()',t):
+                  format_markers.append({'path':rp,'marker':mm.group(1),'slice':sl(t,mm.start(),7,10)})
+              # any logs/analytics/deep links/intent extras carrying restorationId
+              for mm in re.finditer(r'(?i)(putExtra|addQueryParameter|appendQueryParameter|Log\.|println|analytics|event|bundle|intent|uri|url)',t):
+                  around=t[max(0,mm.start()-1200):min(len(t),mm.start()+1800)]
+                  if ridrx.search(around):literal_markers.append({'path':rp,'marker':mm.group(1),'slice':redact(around)[:5000]})
+                  if len(literal_markers)>=100:break
+
+          # ----- Classify p21.e and likely setters -----
+          e_impl=[];setter_candidates=[]
+          for impl in implementations:
+              for m in impl['methods']:
+                  sig=m['signature'];body=m['body']
+                  mmn=re.search(r'\b([A-Za-z_$][\w$]*)\s*\(',sig);name=mmn.group(1) if mmn else None
+                  if name=='e':e_impl.append({'path':impl['path'],'signature':sig,'body':body})
+                  if re.search(r'\bjava\.lang\.String\b',sig) and re.search(r'\bvoid\b|kotlin\.Unit|java\.lang\.Object',sig) and re.search(r'(?i)(putString|SharedPreferences|edit\s*\()',body):
+                      setter_candidates.append({'path':impl['path'],'signature':sig,'body':body})
+
+          report={
+            'status':'ok','run_rev':'v206.0-restoration-storage',
+            'package_identity':{'version_name':'8.180.0','outer_bytes':45942514,'outer_sha256':'b00bca9cb327ab3ee483b46d390c9120ac28bfc7674c75fda0129c6c594cc1f9','apk_entry_count':1},
+            'network_policy':{'okko_requests':0,'protected_requests':0,'runtime_started':False,'credentials_read':False,'mutations':0,'third_party_accounts':0,'identifier_enumeration':False,'certificate_or_trust_override':False,'static_only':True},
+            'raw_credentials_persisted':False,
+            'p21':p21_info,
+            'p21_implementations':implementations[:80],
+            'p21_bindings':bindings[:150],
+            'p21_fields':p21_fields[:150],
+            'p21_typed_calls':p21_calls[:300],
+            'p21_e_implementations':e_impl,
+            'p21_sharedprefs_setter_candidates':setter_candidates[:80],
+            'producer_api_calls':producer_api_calls,
+            'producer_response_model':init_model,
+            'producer_response_slices':restoration_result_slices[:60],
+            'producer_inner_classes':producer_inner_classes,
+            'producer_outer_method_names':producer_outer_names,
+            'external_producer_calls':external_producer_calls[:150],
+            'producer_store_correlations':correlation[:100],
+            'restoration_format_markers':format_markers[:100],
+            'restoration_disclosure_markers':literal_markers[:100],
+            'summary':{
+              'p21_implementation_count':len(implementations),
+              'p21_binding_count':len(bindings),
+              'p21_typed_call_count':len(p21_calls),
+              'p21_e_implementation_count':len(e_impl),
+              'p21_sharedprefs_setter_candidate_count':len(setter_candidates),
+              'producer_api_call_count':len(producer_api_calls),
+              'producer_outer_method_count':len(producer_outer_names),
+              'external_producer_call_count':len(external_producer_calls),
+              'producer_store_correlation_count':len(correlation),
+              'format_marker_count':len(format_markers),
+              'disclosure_marker_count':len(literal_markers),
+              'vulnerability_proven':False
+            },
+            'decision':{
+              'vulnerability_proven':False,'reportable':False,'runtime_authorized':False,
+              'next_action':'If restorationId is server-issued and stored only in researcher-local preferences with no disclosure/predictability path, fail the cross-account exploitability gate. Otherwise inspect the exact disclosure/control path before any approved runtime request.'
+            }
+          }
+          OUT.write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          print(json.dumps({'summary':report['summary'],'p21':p21_info,'e_impl':e_impl,'setters':setter_candidates[:20],
+                            'producer_api':producer_api_calls,'producer_outer':producer_inner_classes,'external_producer':external_producer_calls[:30],
+                            'correlations':correlation[:20],'format_markers':format_markers[:30],'disclosure_markers':literal_markers[:20]},ensure_ascii=False,indent=2)[:160000])
+          PY
+
+      - name: Upload sanitized evidence
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: okko-restoration-v206
+          path: |
+            /tmp/okko-v206.json
+            /tmp/jadx.stderr
+          if-no-files-found: warn
+          retention-days: 7
+
+# Exact public Okko 8.180.0 static analysis only via trusted official RuStore CDN alias.
+# Zero target/protected traffic, credentials, mutations, third-party data, enumeration or bypasses.
