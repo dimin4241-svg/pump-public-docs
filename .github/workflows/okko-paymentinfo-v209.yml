@@ -1,0 +1,335 @@
+name: Exact subscription authorization and purchase propagation v209
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  static-subscription-flow:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Download exact Okko 8.180.0 and decompile sole APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/okko
+          curl --location --fail --retry 2 --silent --show-error \
+            --header 'User-Agent: okko-standoff365-static-research/1.0' \
+            --output /tmp/okko/okko.pkg \
+            'https://static.rustore.ru/2026/8/14/7b/de764e6d-0184-4e0f-a7c6-0b6a30580a79.zip'
+          python3 - <<'PY'
+          import hashlib,shutil,zipfile
+          from pathlib import Path
+          p=Path('/tmp/okko/okko.pkg');h=hashlib.sha256();n=0
+          with p.open('rb') as f:
+              for b in iter(lambda:f.read(1024*1024),b''):
+                  n+=len(b);h.update(b)
+          assert n==45942514 and h.hexdigest()=='b00bca9cb327ab3ee483b46d390c9120ac28bfc7674c75fda0129c6c594cc1f9'
+          with zipfile.ZipFile(p) as z:
+              apks=[x for x in z.infolist() if x.filename.lower().endswith('.apk')];assert len(apks)==1
+              with z.open(apks[0]) as src,open('/tmp/okko/okko.apk','wb') as dst:shutil.copyfileobj(src,dst,1024*1024)
+          PY
+          URL=$(python3 - <<'PY'
+          import json,urllib.request
+          d=json.load(urllib.request.urlopen('https://api.github.com/repos/skylot/jadx/releases/latest',timeout=30))
+          print([a['browser_download_url'] for a in d['assets'] if a['name'].startswith('jadx-') and a['name'].endswith('.zip')][0])
+          PY
+          )
+          curl -L --fail --retry 2 "$URL" -o /tmp/jadx.zip
+          mkdir -p /tmp/jadx && unzip -q /tmp/jadx.zip -d /tmp/jadx && chmod +x /tmp/jadx/bin/jadx
+          /tmp/jadx/bin/jadx --no-res --no-imports --show-bad-code --threads-count 4 \
+            -d /tmp/okko/jadx /tmp/okko/okko.apk >/tmp/jadx.stdout 2>/tmp/jadx.stderr || true
+          test -d /tmp/okko/jadx/sources
+
+      - name: Trace subscription IDs from app state through payment session and purchase
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from __future__ import annotations
+          import json,re
+          from pathlib import Path
+
+          SRC=Path('/tmp/okko/jadx/sources');OUT=Path('/tmp/okko-v209.json')
+          FIRST=('ru/okko/','ru/more/play/','p003nskobfuscated/','nskobfuscated/')
+          STR_RX=re.compile(r'"([^"\\]*(?:\\.[^"\\]*)*)"')
+          URL_RX=re.compile(r'https?://[^\s\"\'<>]+',re.I)
+          SELS=('renewedUserSubscriptionId','upgradedUserSubscriptionIds')
+          SAFE=set(SELS)|{'subscriptionId','userSubscriptionId','forcedUpgradeSubscriptionId','paymentToken','orderId','client_type','paymentMethod','price','offerId'}
+
+          def rel(p):return str(p.relative_to(SRC)).replace('\\','/')
+          def rd(p):return p.read_text(encoding='utf-8',errors='replace')
+          def red(s):return STR_RX.sub(lambda m:'"'+m.group(1)+'"' if m.group(1) in SAFE or URL_RX.fullmatch(m.group(1)) else '"<lit>"',s)[:20000]
+          def one(path,base):
+              p=SRC/path
+              if p.is_file():return p
+              r=[x for x in SRC.rglob(base) if str(x).replace('\\','/').endswith(str(path).replace('\\','/'))] or list(SRC.rglob(base))
+              if len(r)!=1:raise SystemExit(f'{base}:{len(r)} matches')
+              return r[0]
+          def match(t,op,L='(',R=')'):
+              d=0;q=None;e=False
+              for i in range(op,len(t)):
+                  c=t[i]
+                  if q:
+                      if e:e=False
+                      elif c=='\\':e=True
+                      elif c==q:q=None
+                      continue
+                  if c in ('"',"'"):q=c;continue
+                  if c==L:d+=1
+                  elif c==R:
+                      d-=1
+                      if d==0:return i
+              return None
+          def split(s):
+              out=[];st=0;dp=db=ds=da=0;q=None;e=False
+              for i,c in enumerate(s):
+                  if q:
+                      if e:e=False
+                      elif c=='\\':e=True
+                      elif c==q:q=None
+                      continue
+                  if c in ('"',"'"):q=c
+                  elif c=='(':dp+=1
+                  elif c==')':dp-=1
+                  elif c=='{':db+=1
+                  elif c=='}':db-=1
+                  elif c=='[':ds+=1
+                  elif c==']':ds-=1
+                  elif c=='<':da+=1
+                  elif c=='>':da=max(0,da-1)
+                  elif c==',' and dp==db==ds==da==0:
+                      out.append(s[st:i].strip());st=i+1
+              out.append(s[st:].strip());return [x for x in out if x]
+          def methods(t):
+              out=[];rx=re.compile(r'(?m)^\s*(?:(?:public|private|protected|static|final|synchronized|native|abstract|default)\s+)+[^;={}]{1,4200}?\s+([A-Za-z_$][\w$]*)\s*\(([^;{}]*)\)\s*(?:throws [^{]+)?\{')
+              for m in rx.finditer(t):
+                  op=t.find('{',m.start(),m.end()+2);cp=match(t,op,'{','}') if op>=0 else None
+                  if cp is not None:out.append({'start':m.start(),'end':cp+1,'name':m.group(1),'params':m.group(2),'sig':re.sub(r'\s+',' ',m.group(0)[:-1]).strip()[:4200]})
+              return out
+          def owner(ms,pos):
+              r=[m for m in ms if m['start']<=pos<m['end']];return r[-1] if r else None
+          def sl(t,pos,b=13,a=22):
+              ls=t.splitlines();ln=t[:pos].count('\n')+1;lo=max(1,ln-b);hi=min(len(ls),ln+a)
+              return {'line':ln,'start':lo,'end':hi,'text':'\n'.join(f'{i:05d}: {red(ls[i-1])}' for i in range(lo,hi+1))}
+          def typemap(t):
+              out={}
+              for m in re.finditer(r'\b([A-Za-z_$][\w.$]*(?:<[^;={}()]+>)?)\s+([A-Za-z_$][\w$]*)\s*(?=[;=,)])',t):out[m.group(2)]=re.sub(r'<.*>','',m.group(1)).strip()
+              return out
+          def pnames(params):
+              out=[]
+              for row in split(params):
+                  x=re.sub(r'@[\w.$]+(?:\([^)]*\))?\s*','',row).strip();m=re.search(r'([A-Za-z_$][\w$]*)\s*$',x);out.append(m.group(1) if m else '')
+              return out
+          def model(p):
+              t=rd(p);ls=t.splitlines();fields=[];getters=[];pending=None
+              sr=re.compile(r'(?i)(?:SerialName|SerializedName|JsonProperty)\s*\(\s*"([^"\\]{1,180})"')
+              for i,l in enumerate(ls,1):
+                  sm=sr.search(l)
+                  if sm:pending=(i,sm.group(1))
+                  fm=re.search(r'^\s*(?:(?:public|private|protected|final|static|transient|volatile)\s+)+([A-Za-z0-9_.$<>?, \[\]]+)\s+([A-Za-z_$][\w$]*)\s*(?:;|=)',l)
+                  if fm:
+                      fields.append({'line':i,'type':fm.group(1).strip(),'field':fm.group(2),'serialized':pending[1] if pending and i-pending[0]<=4 else None});pending=None
+                  gm=re.search(r'\b(get|is)([A-Za-z_$][\w$]*)\s*\(\s*\)\s*\{',l)
+                  if gm:getters.append({'line':i,'getter':gm.group(1)+gm.group(2)})
+              return {'path':rel(p),'fields':fields,'getters':getters,'shape':red(t[:32000])}
+
+          psi=one(Path('ru/okko/sdk/domain/entity/payment/PaymentScreenInfo.java'),'PaymentScreenInfo.java')
+          product=one(Path('ru/okko/sdk/domain/entity/products/Product.java'),'Product.java')
+          prodresp=one(Path('ru/okko/sdk/domain/oldEntity/response/ProductResponse.java'),'ProductResponse.java')
+          usersub=one(Path('ru/okko/sdk/domain/entity/settings/UserSubscription.java'),'UserSubscription.java')
+          pay=one(Path('ru/okko/sdk/data/repository/PaymentRepositoryImpl.java'),'PaymentRepositoryImpl.java')
+          api=one(Path('ru/okko/sdk/data/network/api/AuthScreenApi.java'),'AuthScreenApi.java')
+
+          psi_model=model(psi);product_model=model(product);prodresp_model=model(prodresp);usersub_model=model(usersub)
+
+          # 1. Resolve PaymentScreenInfo constructor/copy slot for renewedUserSubscriptionId.
+          psit=rd(psi);psims=methods(psit);renew_field=None
+          gm=re.search(r'(?s)\bgetRenewedUserSubscriptionId\s*\(\s*\)\s*\{(.{0,900}?)\}',psit)
+          if gm:
+              rm=re.search(r'return\s+(?:this\.)?([A-Za-z_$][\w$]*)\s*;',gm.group(1));renew_field=rm.group(1) if rm else None
+          constructors=[];renew_slot=None;renew_arity=None
+          for m in re.finditer(r'(?m)^\s*(?:(?:public|private|protected)\s+)?PaymentScreenInfo\s*\(([^)]*)\)\s*\{',psit):
+              ps=split(m.group(1));names=pnames(m.group(1));op=psit.find('{',m.start(),m.end()+2);cp=match(psit,op,'{','}') if op>=0 else None;body=psit[op+1:cp] if cp else ''
+              idx=None
+              if renew_field:
+                  am=re.search(r'this\.'+re.escape(renew_field)+r'\s*=\s*([A-Za-z_$][\w$]*)\s*;',body)
+                  if am and am.group(1) in names:idx=names.index(am.group(1))
+              constructors.append({'arity':len(ps),'renewed_index':idx,'param_names':names,'synthetic':any('DefaultConstructorMarker' in x for x in ps)})
+              if idx is not None and not any('DefaultConstructorMarker' in x for x in ps):renew_slot,renew_arity=idx,len(ps)
+
+          # 2. Every construction/copy of PaymentScreenInfo, exact source expression at renewed slot.
+          psi_sources=[]
+          for p in SRC.rglob('*.java'):
+              rp=rel(p)
+              if not rp.startswith(FIRST):continue
+              try:t=rd(p)
+              except:continue
+              if 'PaymentScreenInfo' not in t:continue
+              ms=methods(t)
+              nrx=re.compile(r'\bnew\s+(?:[A-Za-z_$][\w$]*\.)*PaymentScreenInfo\s*\(')
+              for nm in nrx.finditer(t):
+                  op=t.find('(',nm.start(),nm.end()+2);cp=match(t,op);args=split(t[op+1:cp]) if cp else []
+                  if renew_slot is None or len(args)!=renew_arity:continue
+                  mo=owner(ms,nm.start());expr=args[renew_slot]
+                  psi_sources.append({'kind':'constructor','path':rp,'owner':mo['sig'] if mo else None,'renewed_expr':red(expr),'slice':sl(t,nm.start(),12,18)})
+              # copy() direct: parameter order follows data class constructor; copy$default is too synthetic/noisy.
+              for cm in re.finditer(r'\.copy\s*\(',t):
+                  op=t.find('(',cm.start(),cm.end()+2);cp=match(t,op);args=split(t[op+1:cp]) if cp else []
+                  if renew_slot is None or len(args)!=renew_arity:continue
+                  mo=owner(ms,cm.start());psi_sources.append({'kind':'copy','path':rp,'owner':mo['sig'] if mo else None,'renewed_expr':red(args[renew_slot]),'slice':sl(t,cm.start(),10,16)})
+
+          # 3. getRenewedUserSubscriptionId usages, with upstream assignment/getter clues.
+          renewed_uses=[]
+          for p in SRC.rglob('*.java'):
+              rp=rel(p)
+              if not rp.startswith(FIRST):continue
+              try:t=rd(p)
+              except:continue
+              if 'getRenewedUserSubscriptionId' not in t:continue
+              ms=methods(t)
+              for mm in re.finditer(r'\.getRenewedUserSubscriptionId\s*\(\s*\)',t):
+                  mo=owner(ms,mm.start());around=t[max(mo['start'] if mo else 0,mm.start()-4000):min(mo['end'] if mo else len(t),mm.start()+5000)]
+                  clues=sorted(set(re.findall(r'\.((?:get|is)[A-Za-z_$][\w$]*(?:Subscription|SubscriptionId|Id|Upgrade)[A-Za-z_$]*)\s*\(',around)))
+                  renewed_uses.append({'path':rp,'owner':mo['sig'] if mo else None,'clue_getters':clues,'slice':sl(t,mm.start(),14,20)})
+
+          # 4. Product upgraded IDs: locate getter field and response/converter mapping.
+          prot=rd(product);prms=methods(prot);up_field=None
+          gm=re.search(r'(?s)\bgetUpgradedUserSubscriptionIds\s*\(\s*\)\s*\{(.{0,900}?)\}',prot)
+          if gm:
+              rm=re.search(r'return\s+(?:this\.)?([A-Za-z_$][\w$]*)\s*;',gm.group(1));up_field=rm.group(1) if rm else None
+          upgraded_mapping=[]
+          for p in SRC.rglob('*.java'):
+              rp=rel(p)
+              if not rp.startswith(FIRST):continue
+              try:t=rd(p)
+              except:continue
+              if not ('ProductResponse' in t and ('UpgradedUserSubscription' in t or 'upgradedUserSubscriptionIds' in t)):continue
+              ms=methods(t)
+              for mm in re.finditer(r'(?i)(getUpgradedUserSubscriptionIds\s*\(|upgradedUserSubscriptionIds)',t):
+                  mo=owner(ms,mm.start());upgraded_mapping.append({'path':rp,'owner':mo['sig'] if mo else None,'slice':sl(t,mm.start(),12,20)})
+                  if len(upgraded_mapping)>=140:break
+
+          # 5. Every AuthScreenApi endpoint carrying renewed/upgraded IDs, including state-changing purchase.
+          apit=rd(api);id_endpoints=[]
+          for hm in re.finditer(r'@(?:retrofit2\.http\.)?(GET|POST|PUT|PATCH|DELETE)\s*\(\s*"([^"]*)"\s*\)',apit):
+              tail=apit[hm.end():hm.end()+9000];semi=tail.find(';')
+              if semi<0:continue
+              decl=tail[:semi+1]
+              if not any(s in decl for s in SELS):continue
+              mm=re.search(r'([A-Za-z_$][\w$]*)\s*\((.*)\)\s*;',decl,re.S);method=mm.group(1) if mm else None
+              ids=[]
+              if mm:
+                  for i,row in enumerate(split(mm.group(2))):
+                      for am in re.finditer(r'@(?:retrofit2\.http\.)?(Path|Query|Field)\s*(?:\(\s*"([^"]*)"\s*\))?',row):
+                          if am.group(2) in SELS:ids.append({'index':i,'kind':am.group(1),'value':am.group(2)})
+              id_endpoints.append({'verb':hm.group(1),'route':hm.group(2),'method':method,'subscription_selectors':ids,'declaration_shape':red(decl)})
+
+          # 6. PaymentRepositoryImpl calls to those endpoints and args at selector slots.
+          payt=rd(pay);payms=methods(payt);endpoint_calls=[]
+          for ep in id_endpoints:
+              if not ep['method']:continue
+              for cm in re.finditer(r'\.'+re.escape(ep['method'])+r'\s*\(',payt):
+                  op=payt.find('(',cm.start(),cm.end()+2);cp=match(payt,op);args=split(payt[op+1:cp]) if cp else []
+                  mo=owner(payms,cm.start());selargs=[]
+                  for s in ep['subscription_selectors']:
+                      if s['index']<len(args):selargs.append({**s,'expr':red(args[s['index']])})
+                  endpoint_calls.append({'endpoint':ep['method'],'verb':ep['verb'],'route':ep['route'],'owner':mo['sig'] if mo else None,'selector_args':selargs,'slice':sl(payt,cm.start(),18,26)})
+
+          # 7. PaymentInfo.token -> payment status / purchase follow-up usages.
+          token_flow=[]
+          for p in SRC.rglob('*.java'):
+              rp=rel(p)
+              if not rp.startswith(FIRST):continue
+              try:t=rd(p)
+              except:continue
+              if 'PaymentInfo' not in t or 'getToken' not in t:continue
+              ms=methods(t)
+              for mm in re.finditer(r'\.getToken\s*\(\s*\)',t):
+                  mo=owner(ms,mm.start());around=t[max(mo['start'] if mo else 0,mm.start()-3500):min(mo['end'] if mo else len(t),mm.start()+5000)]
+                  downstream=sorted(set(re.findall(r'\.([A-Za-z_$][\w$]*(?:Payment|Purchase|Status|Token)[A-Za-z_$]*)\s*\(',around)))
+                  token_flow.append({'path':rp,'owner':mo['sig'] if mo else None,'downstream_markers':downstream,'slice':sl(t,mm.start(),12,20)})
+
+          # 8. UserSubscription IDs and app-layer flow around PaymentScreenInfo source.
+          user_sub_sources=[]
+          usrx=re.compile(r'(?i)(getUserSubscriptionId\s*\(|getForcedUpgradeSubscriptionId\s*\(|getId\s*\()')
+          for p in SRC.rglob('*.java'):
+              rp=rel(p)
+              if not rp.startswith(FIRST):continue
+              try:t=rd(p)
+              except:continue
+              if not ('PaymentScreenInfo' in t and ('UserSubscription' in t or 'Subscription' in t)):continue
+              ms=methods(t)
+              for mm in usrx.finditer(t):
+                  mo=owner(ms,mm.start());user_sub_sources.append({'path':rp,'marker':mm.group(1),'owner':mo['sig'] if mo else None,'slice':sl(t,mm.start(),12,18)})
+                  if len(user_sub_sources)>=160:break
+
+          # 9. Classify PaymentInfo converter exact field mapping (b7i.u).
+          converter=[]
+          for p in SRC.rglob('b7i.java'):
+              t=rd(p);ms=methods(t)
+              for mo in ms:
+                  body=t[mo['start']:mo['end']]
+                  if 'PaymentInfoResponse' in body and 'PaymentInfo' in body:
+                      converter.append({'path':rel(p),'signature':mo['sig'],'body':red(body)[:16000]})
+
+          report={
+            'status':'ok','run_rev':'v209.0-subscription-purchase-propagation',
+            'package_identity':{'version_name':'8.180.0','outer_bytes':45942514,'outer_sha256':'b00bca9cb327ab3ee483b46d390c9120ac28bfc7674c75fda0129c6c594cc1f9','apk_entry_count':1},
+            'network_policy':{'okko_requests':0,'protected_requests':0,'runtime_started':False,'credentials_read':False,'mutations':0,'third_party_accounts':0,'identifier_enumeration':False,'certificate_or_trust_override':False,'static_only':True},
+            'raw_credentials_persisted':False,
+            'payment_screen_info':{'model':psi_model,'renewed_field':renew_field,'constructors':constructors,'renewed_slot':renew_slot,'renewed_arity':renew_arity,'construction_sources':psi_sources[:180]},
+            'renewed_id_usages':renewed_uses[:180],
+            'product':{'model':product_model,'upgraded_field':up_field,'response_model':prodresp_model,'mapping_evidence':upgraded_mapping[:140]},
+            'user_subscription_model':usersub_model,
+            'subscription_id_endpoints':id_endpoints,
+            'payment_repository_endpoint_calls':endpoint_calls[:120],
+            'paymentinfo_token_followup':token_flow[:160],
+            'user_subscription_to_payment_screen_clues':user_sub_sources[:160],
+            'paymentinfo_converter':converter,
+            'summary':{
+              'payment_screen_constructor_source_count':len(psi_sources),
+              'renewed_id_usage_count':len(renewed_uses),
+              'product_upgraded_mapping_count':len(upgraded_mapping),
+              'subscription_id_endpoint_count':len(id_endpoints),
+              'state_changing_subscription_id_endpoint_count':sum(1 for x in id_endpoints if x['verb']!='GET'),
+              'payment_repository_endpoint_call_count':len(endpoint_calls),
+              'paymentinfo_token_followup_count':len(token_flow),
+              'user_subscription_payment_screen_clue_count':len(user_sub_sources),
+              'paymentinfo_converter_count':len(converter),
+              'vulnerability_proven':False
+            },
+            'decision':{
+              'vulnerability_proven':False,'reportable':False,'runtime_authorized':False,
+              'next_action':'Determine whether foreign subscription IDs can influence state-changing purchase/upgrade or merely parameterize a caller-owned new payment session. No runtime substitution without explicit program approval.'
+            }
+          }
+          OUT.write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n')
+          print(json.dumps({'summary':report['summary'],'payment_screen_sources':psi_sources[:30],'renewed_uses':renewed_uses[:30],
+                            'id_endpoints':id_endpoints,'repo_endpoint_calls':endpoint_calls[:30],
+                            'token_followup':token_flow[:30],'user_sub_clues':user_sub_sources[:30],'converter':converter},ensure_ascii=False,indent=2)[:180000])
+          PY
+
+      - name: Upload sanitized evidence
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: okko-paymentinfo-v209
+          path: |
+            /tmp/okko-v209.json
+            /tmp/jadx.stderr
+          if-no-files-found: warn
+          retention-days: 7
+
+# Exact Okko 8.180.0 static analysis only via trusted public RuStore CDN alias.
+# Zero target/protected traffic, credentials, mutations, third-party data, enumeration or bypasses.
