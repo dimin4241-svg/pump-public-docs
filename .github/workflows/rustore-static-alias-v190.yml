@@ -1,4 +1,4 @@
-name: Resolve Rekko sid and local active-profile path v197
+name: Trace active-profile provider and AI token DTO v199
 
 on:
   pull_request:
@@ -54,7 +54,7 @@ jobs:
             -d /tmp/okko/jadx /tmp/okko/okko.apk >/tmp/jadx.stdout 2>/tmp/jadx.stderr || true
           test -d /tmp/okko/jadx/sources
 
-      - name: Resolve sid constant and local profile source
+      - name: Trace active profile provider and token response semantics
         shell: bash
         run: |
           set -euo pipefail
@@ -62,9 +62,10 @@ jobs:
           from __future__ import annotations
           import json,re
           from pathlib import Path
-          SRC=Path('/tmp/okko/jadx/sources');OUT=Path('/tmp/okko-v197.json')
+          SRC=Path('/tmp/okko/jadx/sources');OUT=Path('/tmp/okko-v199.json')
           FIRST=('ru/okko/','ru/more/play/','p003nskobfuscated/','nskobfuscated/')
           STR_RX=re.compile(r'"([^"\\]*(?:\\.[^"\\]*)*)"')
+          SERIAL_RX=re.compile(r'(?i)(?:SerialName|SerializedName|JsonProperty)\s*\(\s*"([^"\\]{1,160})"')
 
           def rel(p): return str(p.relative_to(SRC)).replace('\\','/')
           def rd(p): return p.read_text(encoding='utf-8',errors='replace')
@@ -74,8 +75,10 @@ jobs:
               rows=[x for x in SRC.rglob(base) if str(x).replace('\\','/').endswith(str(path).replace('\\','/'))] or list(SRC.rglob(base))
               if len(rows)!=1: raise SystemExit(f'{base}: {len(rows)}')
               return rows[0]
-          def redact(s): return STR_RX.sub(lambda m:'"'+m.group(1)+'"' if m.group(1) in {'sid','activeMultiProfileId','assistantRequestToken'} else '"<lit>"',s)[:6000]
-          def match_body(t,op):
+          def redact(s):
+              safe={'sid','assistantRequestToken','activeMultiProfileId','assistantClientContext','query','profileId','requestToken'}
+              return STR_RX.sub(lambda m:'"'+m.group(1)+'"' if m.group(1) in safe else '"<lit>"',s)[:7000]
+          def match_block(t,op,L='{',R='}'):
               d=0;q=None;esc=False
               for i in range(op,len(t)):
                   c=t[i]
@@ -85,137 +88,151 @@ jobs:
                       elif c==q:q=None
                       continue
                   if c in ('"',"'"):q=c;continue
-                  if c=='{':d+=1
-                  elif c=='}':
+                  if c==L:d+=1
+                  elif c==R:
                       d-=1
                       if d==0:return i+1
               return None
           def methods(t):
               out=[]
-              rx=re.compile(r'(?m)^\s*(?:(?:public|private|protected|static|final|synchronized|native|abstract|override)\s+)+[^;={}]{1,1800}\([^;{}]*\)\s*(?:throws [^{]+)?\{')
+              rx=re.compile(r'(?m)^\s*(?:(?:public|private|protected|static|final|synchronized|native|abstract|default)\s+)+[^;={}]{1,2200}\([^;{}]*\)\s*(?:throws [^{]+)?\{')
               for m in rx.finditer(t):
-                  op=t.find('{',m.start(),m.end()+2);end=match_body(t,op) if op>=0 else None
-                  if end:out.append({'start':m.start(),'end':end,'sig':re.sub(r'\s+',' ',m.group(0)[:-1]).strip()[:1800]})
+                  op=t.find('{',m.start(),m.end()+2);end=match_block(t,op) if op>=0 else None
+                  if end: out.append({'start':m.start(),'end':end,'sig':re.sub(r'\s+',' ',m.group(0)[:-1]).strip()[:2200]})
               return out
           def owner(ms,pos):
               x=[m for m in ms if m['start']<=pos<m['end']]
               return x[-1] if x else None
-          def line_slice(t,pos,b=10,a=14):
+          def line_slice(t,pos,b=10,a=15):
               ls=t.splitlines();line=t[:pos].count('\n')+1;lo=max(1,line-b);hi=min(len(ls),line+a)
               return {'line':line,'start':lo,'end':hi,'text':'\n'.join(f'{i:05d}: {redact(ls[i-1])}' for i in range(lo,hi+1))}
-          def file_summary(p,need_rx=None):
-              t=rd(p);ms=methods(t);rows=[]
-              if need_rx:
-                  for m in need_rx.finditer(t):
-                      mo=owner(ms,m.start())
-                      rows.append({'match':redact(m.group(0)),'owner':mo['sig'] if mo else None,'slice':line_slice(t,m.start(),10,16)})
-              return {'path':rel(p),'method_signatures':[m['sig'] for m in ms[:120]],'matches':rows[:80]}
+          def model(p):
+              t=rd(p);ls=t.splitlines();fields=[];getters=[];pending=None
+              for i,l in enumerate(ls,1):
+                  sm=SERIAL_RX.search(l)
+                  if sm:pending=(i,sm.group(1))
+                  fm=re.search(r'^\s*(?:(?:public|private|protected|final|static|transient|volatile)\s+)+([A-Za-z0-9_.$<>?, \[\]]+)\s+([A-Za-z_$][\w$]*)\s*(?:;|=)',l)
+                  if fm:
+                      ser=pending[1] if pending and i-pending[0]<=4 else None
+                      fields.append({'line':i,'type':fm.group(1).strip(),'field':fm.group(2),'serialized':ser});pending=None
+              for i,l in enumerate(ls,1):
+                  gm=re.search(r'\b(get|is)([A-Za-z_$][\w$]*)\s*\(\s*\)\s*\{',l)
+                  if gm:
+                      tail='\n'.join(ls[i-1:min(len(ls),i+8)]);rm=re.search(r'return\s+(?:this\.)?([A-Za-z_$][\w$]*)\s*;',tail)
+                      getters.append({'line':i,'getter':gm.group(1)+gm.group(2),'field':rm.group(1) if rm else None})
+              return {'path':rel(p),'fields':fields,'getters':getters,'method_signatures':[m['sig'] for m in methods(t)[:120]]}
 
-          # Resolve NetworkConstants.HEADER_SID exactly.
-          nc=one(Path('ru/okko/sdk/domain/oldEntity/utils/NetworkConstants.java'),'NetworkConstants.java')
-          nt=rd(nc);sid_rows=[]
-          for m in re.finditer(r'(?m)^.*\bHEADER_SID\b.*$',nt):
-              sid_rows.append({'line':nt[:m.start()].count('\n')+1,'text':redact(m.group(0).strip())})
-          sid_literal=None
-          for row in sid_rows:
-              mm=re.search(r'HEADER_SID\s*=\s*"([^"]+)"',row['text'])
-              if mm:sid_literal=mm.group(1)
-
-          gaid=one(Path('ru/okko/sdk/domain/usecase/multiProfile/GetActiveProfileIdUseCase.java'),'GetActiveProfileIdUseCase.java')
-          gap=one(Path('ru/okko/sdk/domain/usecase/multiProfile/GetActiveProfileUseCase.java'),'GetActiveProfileUseCase.java')
-          mpr=one(Path('ru/okko/sdk/domain/repository/MultiProfileRepository.java'),'MultiProfileRepository.java')
-          mpri=one(Path('ru/okko/sdk/data/repository/multiProfile/MultiProfileRepositoryImpl.java'),'MultiProfileRepositoryImpl.java')
-          mp=one(Path('ru/okko/sdk/domain/entity/multiProfile/MultiProfile.java'),'MultiProfile.java')
-          air=one(Path('ru/okko/sdk/data/repository/aiAssistant/AiAssistantRepositoryImpl.java'),'AiAssistantRepositoryImpl.java')
-
-          focus_rx=re.compile(r'(?i)(activeProfile|profileId|MultiProfile|getId\s*\(|invoke\s*\(|getActiveProfile\s*\()')
-          gaid_sum=file_summary(gaid,focus_rx);gap_sum=file_summary(gap,focus_rx);mpr_sum=file_summary(mpr,focus_rx);mpri_sum=file_summary(mpri,focus_rx);mp_sum=file_summary(mp,focus_rx)
-
-          # Find all usages of GetActiveProfileIdUseCase/GetActiveProfileUseCase and direct repository getActiveProfile calls.
-          usages=[]
-          use_rx=re.compile(r'GetActiveProfileIdUseCase|GetActiveProfileUseCase|\.getActiveProfile\s*\(|\.observeActiveProfile\s*\(')
+          # A) Resolve the obfuscated provider used by GetActiveProfileIdUseCase.
+          uoa=one(Path('p003nskobfuscated/uoa.java'),'uoa.java');ut=rd(uoa);ums=methods(ut)
+          uoa_info={'path':rel(uoa),'shape':redact(ut[:22000]),'method_signatures':[m['sig'] for m in ums[:120]]}
+          implementations=[];bindings=[];usages=[]
+          impl_rx=re.compile(r'(?:implements|extends)\s+(?:p003nskobfuscated\.)?uoa\b')
+          bind_rx=re.compile(r'(?i)(?:uoa\.class|p003nskobfuscated\.uoa\.class)')
+          call_rx=re.compile(r'\.b\s*\(\s*\)')
           for p in SRC.rglob('*.java'):
               rp=rel(p)
               if not rp.startswith(FIRST):continue
               try:t=rd(p)
               except Exception:continue
-              if not use_rx.search(t):continue
               ms=methods(t)
-              for m in use_rx.finditer(t):
-                  mo=owner(ms,m.start())
-                  usages.append({'path':rp,'line':t[:m.start()].count('\n')+1,'marker':m.group(0),'owner':mo['sig'] if mo else None,'slice':line_slice(t,m.start(),8,12)})
+              if impl_rx.search(t):
+                  rows=[]
+                  for m in ms:
+                      if re.search(r'\b(?:java\.lang\.)?String\s+b\s*\(\s*\)',m['sig']) or re.search(r'\bb\s*\(\s*\)',m['sig']):
+                          rows.append({'signature':m['sig'],'body':redact(t[m['start']:m['end']])[:12000]})
+                  implementations.append({'path':rp,'methods':rows,'shape':redact(t[:16000])})
+              if bind_rx.search(t):
+                  for bm in bind_rx.finditer(t):bindings.append({'path':rp,'slice':line_slice(t,bm.start(),8,12)})
+              if 'GetActiveProfileIdUseCase' in t and '.a.b()' in t:
+                  for cm in re.finditer(r'GetActiveProfileIdUseCase[^\n]{0,500}?\.a\.b\s*\(\s*\)',t):
+                      mo=owner(ms,cm.start());usages.append({'path':rp,'owner':mo['sig'] if mo else None,'slice':line_slice(t,cm.start(),9,12)})
 
-          # AI repository outer methods that instantiate coroutine classes a/b/c.
-          at=rd(air);ams=methods(at);ai_outer=[]
-          for rx in (re.compile(r'\bnew\s+a\s*\('),re.compile(r'\bnew\s+b\s*\('),re.compile(r'\bnew\s+c\s*\(')):
-              for m in rx.finditer(at):
-                  mo=owner(ams,m.start())
-                  ai_outer.append({'line':at[:m.start()].count('\n')+1,'marker':m.group(0),'owner':mo['sig'] if mo else None,'slice':line_slice(at,m.start(),12,16)})
+          # B) Token response/domain DTO and converter b path.
+          tokresp=one(Path('ru/okko/sdk/domain/oldEntity/response/aiAssistant/AiAssistantAnswerTokenResponse.java'),'AiAssistantAnswerTokenResponse.java')
+          tokdom=one(Path('ru/okko/sdk/domain/entity/aiAssistant/model/AiAssistantTokenAnswer.java'),'AiAssistantTokenAnswer.java')
+          conv=one(Path('ru/okko/sdk/domain/converters/aiAssistant/AiAssistantDomainConverter.java'),'AiAssistantDomainConverter.java')
+          context=one(Path('ru/okko/sdk/data/repository/aiAssistant/model/AiAssistantClientContextRequest.java'),'AiAssistantClientContextRequest.java')
+          scope=one(Path('ru/okko/sdk/domain/entity/aiAssistant/AiAssistantContextScope.java'),'AiAssistantContextScope.java')
+          tokresp_m=model(tokresp);tokdom_m=model(tokdom);context_m=model(context);scope_t=rd(scope)
+          enum_constants=[]
+          em=re.search(r'enum\s+AiAssistantContextScope\s*\{([^;}]*)',scope_t,re.S)
+          if em:
+              for x in re.split(r',',em.group(1)):
+                  x=re.sub(r'/\*.*?\*/','',x,flags=re.S).strip();mm=re.match(r'([A-Z][A-Z0-9_]*)\b',x)
+                  if mm:enum_constants.append(mm.group(1))
+          ct=rd(conv);cms=methods(ct);converter_b=[]
+          for m in cms:
+              sig=m['sig'];body=ct[m['start']:m['end']]
+              if 'AiAssistantAnswerTokenResponse' in sig or ('AiAssistantAnswerTokenResponse' in body and 'AiAssistantTokenAnswer' in body):
+                  converter_b.append({'signature':sig,'body':redact(body)[:16000]})
 
-          # Interface for AI repository, then usages of its method names if they survive decompilation.
-          ai_ifaces=[]
-          for p in SRC.rglob('*AiAssistantRepository*.java'):
-              rp=rel(p)
-              if 'Impl' in p.name or '__Factory' in p.name:continue
-              try:t=rd(p)
-              except Exception:continue
-              ai_ifaces.append({'path':rp,'method_signatures':[m['sig'] for m in methods(t)[:80]],'shape':redact(t[:12000])})
-
-          # Top usages where active-profile usecase and ai-assistant markers coexist in same file/method.
-          correlated=[]
+          # C) Find token response/request token usages and normal producer-related domain/usecase chain.
+          producer_usages=[]
+          marker_rx=re.compile(r'(?i)(AiAssistantTokenAnswer|assistantRequestToken|getAiAssistantAnswerToken|AiAssistantClientContextRequest)')
           for p in SRC.rglob('*.java'):
               rp=rel(p)
               if not rp.startswith(FIRST):continue
               try:t=rd(p)
               except Exception:continue
-              if not re.search(r'GetActiveProfile(?:Id)?UseCase',t):continue
-              if not re.search(r'(?i)AiAssistant|assistantRequestToken',t):continue
+              if not marker_rx.search(t):continue
               ms=methods(t)
-              for mo in ms:
-                  body=t[mo['start']:mo['end']]
-                  if re.search(r'GetActiveProfile(?:Id)?UseCase|activeProfile',body) and re.search(r'(?i)AiAssistant|assistant',body):
-                      correlated.append({'path':rp,'owner':mo['sig'],'slice':line_slice(t,mo['start'],0,35)})
+              hits=[]
+              for mm in marker_rx.finditer(t):
+                  mo=owner(ms,mm.start());hits.append({'marker':mm.group(1),'owner':mo['sig'] if mo else None,'slice':line_slice(t,mm.start(),7,11)})
+                  if len(hits)>=20:break
+              score=sum(k.lower() in (rp+' '+t[:10000]).lower() for k in ['usecase','assistant','repository','interactor','handler'])
+              producer_usages.append({'path':rp,'score':score,'hits':hits})
+          producer_usages.sort(key=lambda x:(x['score'],len(x['hits'])),reverse=True)
+
+          # D) AI repository public/outer methods that create coroutine c (producer) or a (consumer).
+          air=one(Path('ru/okko/sdk/data/repository/aiAssistant/AiAssistantRepositoryImpl.java'),'AiAssistantRepositoryImpl.java');at=rd(air);ams=methods(at);outer=[]
+          for marker,name in [(r'new\s+(?:ru\.okko\.sdk\.data\.repository\.aiAssistant\.AiAssistantRepositoryImpl\.)?a\s*\(','consumer'),(r'new\s+(?:ru\.okko\.sdk\.data\.repository\.aiAssistant\.AiAssistantRepositoryImpl\.)?c\s*\(','producer')]:
+              rx=re.compile(marker)
+              for mm in rx.finditer(at):
+                  mo=owner(ams,mm.start())
+                  if mo and ('create(' in mo['sig'] or 'invoke(' in mo['sig']):continue
+                  outer.append({'kind':name,'owner':mo['sig'] if mo else None,'slice':line_slice(at,mm.start(),12,16)})
 
           report={
-            'status':'ok','run_rev':'v197.0',
+            'status':'ok','run_rev':'v199.0',
             'package_identity':{'version_name':'8.180.0','bytes':45942514,'sha256':'b00bca9cb327ab3ee483b46d390c9120ac28bfc7674c75fda0129c6c594cc1f9'},
             'network_policy':{'okko_requests':0,'protected_requests':0,'runtime_started':False,'credentials_read':False,'mutations':0,'identifier_enumeration':False,'certificate_or_trust_override':False,'static_only':True},
-            'network_constants':{'path':rel(nc),'header_sid_rows':sid_rows,'header_sid_literal':sid_literal},
-            'active_profile_id_usecase':gaid_sum,
-            'active_profile_usecase':gap_sum,
-            'multi_profile_repository':mpr_sum,
-            'multi_profile_repository_impl':mpri_sum,
-            'multi_profile_entity':mp_sum,
-            'active_profile_usages':usages[:250],
-            'ai_repository_outer_calls':ai_outer,
-            'ai_repository_interfaces':ai_ifaces[:20],
-            'profile_ai_correlated_methods':correlated[:100],
+            'active_profile_provider':{'uoa':uoa_info,'implementations':implementations[:50],'bindings':bindings[:100],'get_active_profile_id_usecase_usages':usages[:100]},
+            'token_response':tokresp_m,
+            'token_domain':tokdom_m,
+            'token_converter':converter_b,
+            'client_context_model':context_m,
+            'context_scope':{'path':rel(scope),'enum_constants':enum_constants,'shape':redact(scope_t[:16000])},
+            'producer_usages':producer_usages[:120],
+            'ai_repository_outer_methods':outer,
             'summary':{
-              'header_sid_literal_proven':sid_literal is not None,
-              'header_sid_literal':sid_literal,
-              'active_profile_usecase_found':True,
-              'active_profile_usage_count':len(usages),
-              'ai_outer_call_count':len(ai_outer),
-              'profile_ai_correlated_method_count':len(correlated),
+              'uoa_implementation_count':len(implementations),
+              'uoa_binding_count':len(bindings),
+              'active_profile_id_usage_count':len(usages),
+              'token_response_field_count':len(tokresp_m['fields']),
+              'token_domain_field_count':len(tokdom_m['fields']),
+              'token_converter_path_count':len(converter_b),
+              'context_scope_enum_count':len(enum_constants),
+              'ai_outer_method_count':len(outer),
               'vulnerability_proven':False
             },
             'decision':{'vulnerability_proven':False,'reportable':False,'runtime_authorized':False}
           }
           OUT.write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
-          print(json.dumps({'summary':report['summary'],'network_constants':report['network_constants'],
-                            'active_profile_id_usecase':gaid_sum,'active_profile_usecase':gap_sum,
-                            'ai_outer':ai_outer,'correlated':correlated[:30],'usages':usages[:40]},ensure_ascii=False,indent=2)[:90000])
+          print(json.dumps({'summary':report['summary'],'uoa':uoa_info,'implementations':implementations[:15],'bindings':bindings[:20],
+                            'token_response':tokresp_m,'token_domain':tokdom_m,'token_converter':converter_b,
+                            'context_scope':report['context_scope'],'ai_outer':outer,'producer_usages':producer_usages[:25]},ensure_ascii=False,indent=2)[:120000])
           PY
       - name: Upload derived evidence
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: okko-rekko-profile-local-v197
+          name: okko-rekko-runtime-prereq-v199
           path: |
-            /tmp/okko-v197.json
+            /tmp/okko-v199.json
             /tmp/jadx.stderr
           if-no-files-found: warn
           retention-days: 7
 
-# Exact public Okko 8.180.0 static analysis via trusted RuStore CDN alias only.
-# Zero Okko target requests, credentials, mutations or identifier enumeration.
+# Exact Okko 8.180.0 static analysis only via trusted official RuStore CDN alias.
+# Zero Okko target traffic, credentials, mutations or enumeration.
