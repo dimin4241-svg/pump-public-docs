@@ -1,0 +1,116 @@
+name: Exact reachable sensitive GET frontier v204.1
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  static-frontier-fixed:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Download and verify exact public Okko 8.180.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/okko
+          curl --location --fail --retry 2 --silent --show-error \
+            --header 'User-Agent: okko-standoff365-static-research/1.0' \
+            --output /tmp/okko/okko.pkg \
+            'https://static.rustore.ru/2026/8/14/7b/de764e6d-0184-4e0f-a7c6-0b6a30580a79.zip'
+          python3 - <<'PY'
+          import hashlib,shutil,zipfile
+          from pathlib import Path
+          p=Path('/tmp/okko/okko.pkg');h=hashlib.sha256();n=0
+          with p.open('rb') as f:
+              for b in iter(lambda:f.read(1024*1024),b''):
+                  n+=len(b);h.update(b)
+          got=h.hexdigest();assert n==45942514 and got=='b00bca9cb327ab3ee483b46d390c9120ac28bfc7674c75fda0129c6c594cc1f9'
+          with zipfile.ZipFile(p) as z:
+              apks=[x for x in z.infolist() if x.filename.lower().endswith('.apk')]
+              assert len(apks)==1
+              info=apks[0];out=Path('/tmp/okko/okko.apk')
+              with z.open(info) as src,out.open('wb') as dst:shutil.copyfileobj(src,dst,1024*1024)
+          PY
+
+      - name: Install JADX and decompile sole APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL=$(python3 - <<'PY'
+          import json,urllib.request
+          d=json.load(urllib.request.urlopen('https://api.github.com/repos/skylot/jadx/releases/latest',timeout=30))
+          print([a['browser_download_url'] for a in d['assets'] if a['name'].startswith('jadx-') and a['name'].endswith('.zip')][0])
+          PY
+          )
+          curl -L --fail --retry 2 "$URL" -o /tmp/jadx.zip
+          mkdir -p /tmp/jadx && unzip -q /tmp/jadx.zip -d /tmp/jadx
+          chmod +x /tmp/jadx/bin/jadx
+          /tmp/jadx/bin/jadx --no-res --no-imports --show-bad-code --threads-count 4 \
+            -d /tmp/okko/jadx /tmp/okko/okko.apk >/tmp/jadx.stdout 2>/tmp/jadx.stderr || true
+          test -d /tmp/okko/jadx/sources
+
+      - name: Execute original frontier with parser-only regex fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          wf=Path('.github/workflows/okko-reachable-frontier-v204.yml').read_text(encoding='utf-8')
+          marker="SRC=Path('/tmp/okko/jadx/sources');OUT=Path('/tmp/okko-v204.json')"
+          mi=wf.index(marker)
+          begin=wf.rfind("python3 - <<'PY'",0,mi)
+          if begin<0:raise SystemExit('analysis heredoc start missing')
+          start=wf.index('\n',begin)+1
+          end=wf.index('\n          PY',mi)
+          raw=wf[start:end]
+          lines=[]
+          for line in raw.splitlines():
+              if line.startswith('          '):line=line[10:]
+              lines.append(line)
+          code='\n'.join(lines)+'\n'
+          # OWNER_RX is not referenced anywhere in the frontier. Remove only this malformed,
+          # unused declaration; every scoring/filter/reachability condition remains byte-for-byte otherwise.
+          code,n=re.subn(r'^OWNER_RX=.*$', 'OWNER_RX=None', code, count=1, flags=re.M)
+          if n!=1:raise SystemExit('OWNER_RX patch count mismatch')
+          compile(code,'okko-v204.1-frontier','exec')
+          exec(compile(code,'okko-v204.1-frontier','exec'),{'__name__':'__main__'})
+          PY
+          test -s /tmp/okko-v204.json
+
+      - name: Validate and upload derived frontier evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          p='/tmp/okko-v204.json';d=json.load(open(p,encoding='utf-8'))
+          assert d['status']=='ok'
+          assert d['package_identity']['outer_bytes']==45942514
+          assert d['package_identity']['outer_sha256']=='b00bca9cb327ab3ee483b46d390c9120ac28bfc7674c75fda0129c6c594cc1f9'
+          n=d['network_policy'];assert n['okko_requests']==0 and n['protected_requests']==0 and n['runtime_started'] is False
+          assert n['credentials_read'] is False and n['mutations']==0 and n['identifier_enumeration'] is False
+          print(json.dumps({'summary':d['summary'],'top':[{'score':x['score'],'method':x['endpoint']['method'],'route':x['endpoint']['route'],'response':x['endpoint']['response_type'],'external_callers':x['external_app_caller_count']} for x in d.get('candidates',[])[:20]]},ensure_ascii=False,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: okko-reachable-frontier-v204-1
+          path: |
+            /tmp/okko-v204.json
+            /tmp/jadx.stderr
+          if-no-files-found: warn
+          retention-days: 7
+
+# Parser-only rerun of v204. Zero Okko target/protected traffic, credentials, mutations,
+# third-party data, enumeration, TLS/certificate/WAF bypass or whitelisting.
