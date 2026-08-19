@@ -1,4 +1,4 @@
-name: Trace normal AI producer-poll lifecycle v200
+name: Harden AI producer-consumer reachability v201
 
 on:
   pull_request:
@@ -17,7 +17,6 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
-
       - name: Download exact package and decompile
         shell: bash
         run: |
@@ -27,21 +26,20 @@ jobs:
             --output /tmp/okko/okko.pkg \
             'https://static.rustore.ru/2026/8/14/7b/de764e6d-0184-4e0f-a7c6-0b6a30580a79.zip'
           python3 - <<'PY'
-          import hashlib, shutil, zipfile
+          import hashlib,shutil,zipfile
           from pathlib import Path
-          p=Path('/tmp/okko/okko.pkg'); h=hashlib.sha256(); n=0
+          p=Path('/tmp/okko/okko.pkg');h=hashlib.sha256();n=0
           with p.open('rb') as f:
-              for b in iter(lambda:f.read(1024*1024), b''):
-                  n += len(b); h.update(b)
-          got=h.hexdigest(); print({'bytes':n,'sha256':got})
-          assert n==45942514 and got=='b00bca9cb327ab3ee483b46d390c9120ac28bfc7674c75fda0129c6c594cc1f9'
+              for b in iter(lambda:f.read(1024*1024),b''):
+                  n+=len(b);h.update(b)
+          assert n==45942514 and h.hexdigest()=='b00bca9cb327ab3ee483b46d390c9120ac28bfc7674c75fda0129c6c594cc1f9'
           out=Path('/tmp/okko/okko.apk')
           with zipfile.ZipFile(p) as z:
               apks=[x for x in z.infolist() if x.filename.lower().endswith('.apk')]
               if apks:
                   info=max(apks,key=lambda x:x.file_size)
-                  with z.open(info) as src,out.open('wb') as dst: shutil.copyfileobj(src,dst,1024*1024)
-              else: shutil.copy2(p,out)
+                  with z.open(info) as src,out.open('wb') as dst:shutil.copyfileobj(src,dst,1024*1024)
+              else:shutil.copy2(p,out)
           PY
           URL=$(python3 - <<'PY'
           import json,urllib.request
@@ -56,7 +54,7 @@ jobs:
             -d /tmp/okko/jadx /tmp/okko/okko.apk >/tmp/jadx.stdout 2>/tmp/jadx.stderr || true
           test -d /tmp/okko/jadx/sources
 
-      - name: Trace typed producer to token to consumer lifecycle
+      - name: Scan every decompiled class for real AI callsites
         shell: bash
         run: |
           set -euo pipefail
@@ -64,55 +62,24 @@ jobs:
           from __future__ import annotations
           import json,re
           from pathlib import Path
-
-          SRC=Path('/tmp/okko/jadx/sources'); OUT=Path('/tmp/okko-v200.json')
-          FIRST=('ru/okko/','ru/more/play/','p003nskobfuscated/','nskobfuscated/')
+          SRC=Path('/tmp/okko/jadx/sources');OUT=Path('/tmp/okko-v201.json')
           STR_RX=re.compile(r'"([^"\\]*(?:\\.[^"\\]*)*)"')
-          PRODUCER_TYPES=('GetAiAssistantTokenAnswerUseCase','AiAssistantRepository')
-          CONSUMER_TYPES=('GetAiAssistantAnswerUseCase','AiAssistantRepository')
-          SCOPE_RX=re.compile(r'AiAssistantContextScope\.([A-Z][A-Z0-9_]*)')
-
-          def rel(p): return str(p.relative_to(SRC)).replace('\\','/')
-          def rd(p): return p.read_text(encoding='utf-8',errors='replace')
+          SCOPES=['CONTENT_CARD','ASSISTANT_ANSWER','COLLECTION','MAIN_PAGE','SEARCH_SCREEN','SPORT_HOME_PAGE','SPORT_COLLECTION_PAGE','SPORT_TOURNAMENT_PAGE','SPORT_TEAM_PAGE','SPORT_CARD','UNKNOWN']
+          SUPPORT_RX=re.compile(r'(?i)(AiAssistantRepositoryImpl|AiAssistantRepository\.java$|GetAiAssistant(?:TokenAnswer|Answer)UseCase(?:__Factory)?\.java$|RekkoGatewayApi(?:Lazy)?\.java$|AiAssistantDomainConverter|AiAssistantToken|AiAssistantClientContext|AiAssistantContextScope\.java$|\$\$serializer)')
+          MARKERS={
+            'producer_method':re.compile(r'\bgetAiAssistantTokenAnswer\s*\('),
+            'consumer_method':re.compile(r'\bgetAiAssistantAnswer\s*\('),
+            'producer_usecase':re.compile(r'\bGetAiAssistantTokenAnswerUseCase\b'),
+            'consumer_usecase':re.compile(r'\bGetAiAssistantAnswerUseCase\b'),
+            'token_getter':re.compile(r'\bgetAssistantRequestToken\s*\('),
+            'token_name':re.compile(r'\bassistantRequestToken\b'),
+          }
+          def rel(p):return str(p.relative_to(SRC)).replace('\\','/')
+          def rd(p):return p.read_text(encoding='utf-8',errors='replace')
           def redact(s):
-              safe={'sid','assistantRequestToken','activeMultiProfileId','assistantClientContext','query','profileId'}
-              return STR_RX.sub(lambda m:'"'+m.group(1)+'"' if m.group(1) in safe else '"<lit>"',s)[:9000]
-          def match(t,op,L='(',R=')'):
-              d=0;q=None;esc=False
-              for i in range(op,len(t)):
-                  c=t[i]
-                  if q:
-                      if esc:esc=False
-                      elif c=='\\':esc=True
-                      elif c==q:q=None
-                      continue
-                  if c in ('"',"'"): q=c; continue
-                  if c==L:d+=1
-                  elif c==R:
-                      d-=1
-                      if d==0:return i
-              return None
-          def split_args(s):
-              out=[];st=0;dp=db=ds=da=0;q=None;esc=False
-              for i,c in enumerate(s):
-                  if q:
-                      if esc:esc=False
-                      elif c=='\\':esc=True
-                      elif c==q:q=None
-                      continue
-                  if c in ('"',"'"):q=c
-                  elif c=='(':dp+=1
-                  elif c==')':dp-=1
-                  elif c=='{':db+=1
-                  elif c=='}':db-=1
-                  elif c=='[':ds+=1
-                  elif c==']':ds-=1
-                  elif c=='<':da+=1
-                  elif c=='>':da=max(0,da-1)
-                  elif c==',' and dp==db==ds==da==0:
-                      out.append(s[st:i].strip());st=i+1
-              out.append(s[st:].strip()); return [x for x in out if x]
-          def block_end(t,op):
+              safe={'assistantRequestToken','sid','activeMultiProfileId','query','assistantClientContext','profileId'}
+              return STR_RX.sub(lambda m:'"'+m.group(1)+'"' if m.group(1) in safe else '"<lit>"',s)[:12000]
+          def bend(t,op):
               d=0;q=None;esc=False
               for i in range(op,len(t)):
                   c=t[i]
@@ -128,182 +95,104 @@ jobs:
                       if d==0:return i+1
               return None
           def methods(t):
-              out=[]
-              rx=re.compile(r'(?m)^\s*(?:(?:public|private|protected|static|final|synchronized|native|abstract|default)\s+)+[^;={}]{1,2600}\([^;{}]*\)\s*(?:throws [^{]+)?\{')
+              out=[];rx=re.compile(r'(?m)^\s*(?:(?:public|private|protected|static|final|synchronized|native|abstract|default)\s+)+[^;={}]{1,3000}\([^;{}]*\)\s*(?:throws [^{]+)?\{')
               for m in rx.finditer(t):
-                  op=t.find('{',m.start(),m.end()+2);end=block_end(t,op) if op>=0 else None
-                  if end: out.append({'start':m.start(),'end':end,'sig':re.sub(r'\s+',' ',m.group(0)[:-1]).strip()[:2600]})
+                  op=t.find('{',m.start(),m.end()+2);end=bend(t,op) if op>=0 else None
+                  if end:out.append({'start':m.start(),'end':end,'sig':re.sub(r'\s+',' ',m.group(0)[:-1]).strip()[:3000]})
               return out
           def owner(ms,pos):
-              x=[m for m in ms if m['start']<=pos<m['end']]
-              return x[-1] if x else None
-          def line_slice(t,pos,b=12,a=20):
+              rows=[m for m in ms if m['start']<=pos<m['end']]
+              return rows[-1] if rows else None
+          def sl(t,pos,b=10,a=16):
               ls=t.splitlines();line=t[:pos].count('\n')+1;lo=max(1,line-b);hi=min(len(ls),line+a)
               return {'line':line,'start':lo,'end':hi,'text':'\n'.join(f'{i:05d}: {redact(ls[i-1])}' for i in range(lo,hi+1))}
-          def ftypes(t):
-              out={}
-              # fields and simple locals/params
-              rx=re.compile(r'\b([A-Za-z_$][\w.$]*(?:<[^;={}()]+>)?)\s+([A-Za-z_$][\w$]*)\s*(?=[;=,)])')
-              for m in rx.finditer(t):
-                  typ=re.sub(r'<.*>','',m.group(1)).strip();out[m.group(2)]=typ
-              return out
-          def assignments_before(body,pos,name):
-              return [m.group(1).strip() for m in re.finditer(r'\b'+re.escape(name)+r'\s*=\s*([^;]+);',body[:pos])]
 
-          # Important exact source files for usecase signatures.
-          exact_files={}
-          for base in ('GetAiAssistantTokenAnswerUseCase.java','GetAiAssistantAnswerUseCase.java','AiAssistantRepository.java','AiAssistantRepositoryImpl.java'):
-              rows=list(SRC.rglob(base))
-              exact_files[base]=[{'path':rel(p),'shape':redact(rd(p)[:26000]),'methods':[m['sig'] for m in methods(rd(p))[:80]]} for p in rows[:8]]
-
-          producer_calls=[];consumer_calls=[];lifecycle=[];candidate_files=[]
-          producer_mark=re.compile(r'(?i)(GetAiAssistantTokenAnswerUseCase|getAiAssistantTokenAnswer\s*\(|AiAssistantContextScope\.)')
-          consumer_mark=re.compile(r'(?i)(GetAiAssistantAnswerUseCase|getAiAssistantAnswer\s*\(|assistantRequestToken|getAssistantRequestToken\s*\()')
-          token_mark=re.compile(r'(?i)(AiAssistantTokenAnswer|getQueryConfiguration\s*\(|getAssistantRequestToken\s*\()')
-
+          rows=[];non_support=[];scope_rows=[];all_files=0
           for p in SRC.rglob('*.java'):
-              rp=rel(p)
-              if not rp.startswith(FIRST):continue
+              all_files+=1
               try:t=rd(p)
               except Exception:continue
-              if not (producer_mark.search(t) or consumer_mark.search(t)):continue
-              ms=methods(t); ft=ftypes(t)
-              file_score=0
-              if producer_mark.search(t):file_score+=4
-              if consumer_mark.search(t):file_score+=4
-              if token_mark.search(t):file_score+=5
-              if 'AiAssistantContextScope.' in t:file_score+=2
-              candidate_files.append({'path':rp,'score':file_score})
-
-              # Typed-ish invoke/getAiAssistantTokenAnswer producer calls.
-              for mo in ms:
-                  body=t[mo['start']:mo['end']]
-                  local_ft=ftypes(body); types={**ft,**local_ft}
-                  # receiver.invoke(...)
-                  for cm in re.finditer(r'\b([A-Za-z_$][\w$]*)\.invoke\s*\(',body):
-                      recv=cm.group(1);typ=types.get(recv,'')
-                      if not any(x in typ for x in PRODUCER_TYPES):continue
-                      op=body.find('(',cm.start(),cm.end()+2);cp=match(body,op)
-                      if cp is None:continue
-                      args=split_args(body[op+1:cp]);pos=mo['start']+cm.start()
-                      scopes=sorted(set(SCOPE_RX.findall(body[max(0,cm.start()-2000):min(len(body),cp+2000)])))
-                      producer_calls.append({'path':rp,'owner':mo['sig'],'receiver':recv,'receiver_type':typ,'args':[redact(x) for x in args],
-                                             'scope_constants_near':scopes,'slice':line_slice(t,pos,16,24)})
-                  for cm in re.finditer(r'\.getAiAssistantTokenAnswer\s*\(',body):
-                      op=body.find('(',cm.start(),cm.end()+2);cp=match(body,op)
-                      if cp is None:continue
-                      args=split_args(body[op+1:cp]);pos=mo['start']+cm.start()
-                      scopes=sorted(set(SCOPE_RX.findall(body[max(0,cm.start()-2000):min(len(body),cp+2000)])))
-                      producer_calls.append({'path':rp,'owner':mo['sig'],'receiver':'<repository-or-this>','receiver_type':'AiAssistantRepository-like',
-                                             'args':[redact(x) for x in args],'scope_constants_near':scopes,'slice':line_slice(t,pos,16,24)})
-
-                  # Consumer calls.
-                  for cm in re.finditer(r'\b([A-Za-z_$][\w$]*)\.invoke\s*\(',body):
-                      recv=cm.group(1);typ=types.get(recv,'')
-                      if not any(x in typ for x in CONSUMER_TYPES):continue
-                      # Avoid producer usecase misclassification.
-                      if 'TokenAnswer' in typ:continue
-                      op=body.find('(',cm.start(),cm.end()+2);cp=match(body,op)
-                      if cp is None:continue
-                      args=split_args(body[op+1:cp]);pos=mo['start']+cm.start()
-                      consumer_calls.append({'path':rp,'owner':mo['sig'],'receiver':recv,'receiver_type':typ,'args':[redact(x) for x in args],
-                                             'slice':line_slice(t,pos,16,24)})
-                  for cm in re.finditer(r'\.getAiAssistantAnswer\s*\(',body):
-                      # Skip producer method name getAiAssistantAnswerToken
-                      if body[cm.start():cm.start()+40].startswith('.getAiAssistantAnswerToken'):continue
-                      op=body.find('(',cm.start(),cm.end()+2);cp=match(body,op)
-                      if cp is None:continue
-                      args=split_args(body[op+1:cp]);pos=mo['start']+cm.start()
-                      consumer_calls.append({'path':rp,'owner':mo['sig'],'receiver':'<repository-or-this>','receiver_type':'AiAssistantRepository-like',
-                                             'args':[redact(x) for x in args],'slice':line_slice(t,pos,16,24)})
-
-                  # Same-method lifecycle correlation: token object/extraction + producer + consumer/poll markers.
-                  has_prod=bool(re.search(r'(?i)(getAiAssistantTokenAnswer|GetAiAssistantTokenAnswerUseCase)',body))
-                  has_tok=bool(token_mark.search(body))
-                  has_cons=bool(re.search(r'(?i)(getAiAssistantAnswer\s*\(|GetAiAssistantAnswerUseCase)',body))
-                  if sum([has_prod,has_tok,has_cons])>=2:
-                      scopes=sorted(set(SCOPE_RX.findall(body)))
-                      extracts=[]
-                      for em in re.finditer(r'(?i)(getAssistantRequestToken\s*\(\)|assistantRequestToken)',body):
-                          extracts.append({'marker':em.group(1),'slice':redact(body[max(0,em.start()-700):min(len(body),em.start()+1200)])})
-                          if len(extracts)>=8:break
-                      lifecycle.append({'path':rp,'owner':mo['sig'],'has_producer':has_prod,'has_token_extraction':has_tok,'has_consumer':has_cons,
-                                        'scope_constants':scopes,'token_extracts':extracts,'method_shape':redact(body)[:30000]})
-
-          candidate_files.sort(key=lambda x:x['score'],reverse=True)
-
-          # Cross-method/coroutine class correlation in same outer class/file: capture token from one result and poll later.
-          correlated_files=[]
-          for row in candidate_files[:250]:
-              p=SRC/row['path'];t=rd(p)
-              if not token_mark.search(t):continue
-              scopes=sorted(set(SCOPE_RX.findall(t)))
-              markers=[]
-              for rx,label in [(re.compile(r'getAiAssistantTokenAnswer\s*\('),'producer'),(re.compile(r'getAiAssistantAnswer\s*\('),'consumer'),
-                               (re.compile(r'getAssistantRequestToken\s*\('),'token-getter'),(re.compile(r'GetAiAssistantTokenAnswerUseCase'),'producer-usecase'),
-                               (re.compile(r'GetAiAssistantAnswerUseCase'),'consumer-usecase')]:
+              rp=rel(p);ms=methods(t);hits=[]
+              for kind,rx in MARKERS.items():
                   for m in rx.finditer(t):
-                      markers.append({'kind':label,'line':t[:m.start()].count('\n')+1,'slice':line_slice(t,m.start(),10,14)})
-                      if len(markers)>=30:break
-              kinds={x['kind'] for x in markers}
-              if 'token-getter' in kinds and (('producer' in kinds or 'producer-usecase' in kinds) and ('consumer' in kinds or 'consumer-usecase' in kinds)):
-                  correlated_files.append({'path':row['path'],'score':row['score'],'scope_constants':scopes,'markers':markers})
+                      # avoid producer name being counted as consumer prefix
+                      if kind=='consumer_method' and t[m.start():m.start()+38].startswith('getAiAssistantAnswerToken'):continue
+                      mo=owner(ms,m.start())
+                      hits.append({'kind':kind,'line':t[:m.start()].count('\n')+1,'owner':mo['sig'] if mo else None,'slice':sl(t,m.start(),9,13)})
+                      if len(hits)>=80:break
+              scopes=[]
+              for s in SCOPES:
+                  rx=re.compile(r'(?<![A-Za-z0-9_$])(?:ru\.okko\.sdk\.domain\.entity\.aiAssistant\.)?AiAssistantContextScope\.'+re.escape(s)+r'\b')
+                  for m in rx.finditer(t):
+                      mo=owner(ms,m.start());scopes.append({'scope':s,'line':t[:m.start()].count('\n')+1,'owner':mo['sig'] if mo else None,'slice':sl(t,m.start(),9,13)})
+              if hits or scopes:
+                  support=bool(SUPPORT_RX.search(rp))
+                  row={'path':rp,'support_or_definition':support,'hits':hits,'scope_usages':scopes}
+                  rows.append(row)
+                  if not support and any(h['kind'] in {'producer_method','consumer_method','producer_usecase','consumer_usecase','token_getter'} for h in hits):non_support.append(row)
+                  scope_rows += [{'path':rp,**x,'support_or_definition':support} for x in scopes]
 
-          # Find enum constant usages globally and rank by AI context.
-          scope_usages=[]
+          # Specifically preserve a8.java; v200 ranked it but did not explain why.
+          a8=[]
+          for p in SRC.rglob('a8.java'):
+              rp=rel(p)
+              if rp.endswith('/a8.java'):
+                  t=rd(p);a8.append({'path':rp,'shape':redact(t)[:40000]})
+
+          # DI injection references to usecases/repository outside support classes.
+          injections=[]
+          injrx=re.compile(r'(GetAiAssistantTokenAnswerUseCase|GetAiAssistantAnswerUseCase|AiAssistantRepository)')
           for p in SRC.rglob('*.java'):
               rp=rel(p)
-              if not rp.startswith(FIRST):continue
+              if SUPPORT_RX.search(rp):continue
               try:t=rd(p)
               except Exception:continue
-              if 'AiAssistantContextScope.' not in t:continue
-              ms=methods(t)
-              for sm in SCOPE_RX.finditer(t):
-                  mo=owner(ms,sm.start())
-                  around=t[max(0,sm.start()-4000):min(len(t),sm.start()+5000)]
-                  score=0
-                  for token,w in [('GetAiAssistantTokenAnswerUseCase',10),('getAiAssistantTokenAnswer',10),('AiAssistantTokenAnswer',6),('assistant',4),('query',2)]:
-                      if token.lower() in around.lower():score+=w
-                  scope_usages.append({'path':rp,'scope':sm.group(1),'score':score,'owner':mo['sig'] if mo else None,'slice':line_slice(t,sm.start(),12,18)})
-          scope_usages.sort(key=lambda x:x['score'],reverse=True)
+              for m in injrx.finditer(t):
+                  ms=methods(t);mo=owner(ms,m.start());injections.append({'path':rp,'symbol':m.group(1),'owner':mo['sig'] if mo else None,'slice':sl(t,m.start(),8,12)})
+                  if len(injections)>=250:break
 
+          # Conservative reachability: a real app caller must exist outside declarations/support files.
+          real_prod=[];real_cons=[]
+          for r in non_support:
+              for h in r['hits']:
+                  if h['kind'] in {'producer_method','producer_usecase'}:real_prod.append({'path':r['path'],**h})
+                  if h['kind'] in {'consumer_method','consumer_usecase'}:real_cons.append({'path':r['path'],**h})
           report={
-            'status':'ok','run_rev':'v200.0',
+            'status':'ok','run_rev':'v201.0',
             'package_identity':{'version_name':'8.180.0','bytes':45942514,'sha256':'b00bca9cb327ab3ee483b46d390c9120ac28bfc7674c75fda0129c6c594cc1f9'},
             'network_policy':{'okko_requests':0,'protected_requests':0,'runtime_started':False,'credentials_read':False,'mutations':0,'identifier_enumeration':False,'certificate_or_trust_override':False,'static_only':True},
-            'exact_usecase_files':exact_files,
-            'producer_calls':producer_calls[:200],
-            'consumer_calls':consumer_calls[:200],
-            'same_method_lifecycle_candidates':lifecycle[:120],
-            'correlated_lifecycle_files':correlated_files[:100],
-            'scope_usages':scope_usages[:200],
-            'ranked_candidate_files':candidate_files[:120],
+            'files_scanned':all_files,'all_marker_files':rows,'non_support_marker_files':non_support,
+            'real_producer_candidates':real_prod,'real_consumer_candidates':real_cons,
+            'scope_usages':scope_rows,'non_support_injections':injections,'a8_candidates':a8,
             'summary':{
-              'producer_call_count':len(producer_calls),
-              'consumer_call_count':len(consumer_calls),
-              'same_method_lifecycle_candidate_count':len(lifecycle),
-              'correlated_lifecycle_file_count':len(correlated_files),
-              'scope_usage_count':len(scope_usages),
-              'top_scope':scope_usages[0]['scope'] if scope_usages else None,
+              'files_scanned':all_files,
+              'marker_file_count':len(rows),
+              'non_support_marker_file_count':len(non_support),
+              'real_producer_candidate_count':len(real_prod),
+              'real_consumer_candidate_count':len(real_cons),
+              'scope_usage_count':len(scope_rows),
+              'non_support_injection_count':len(injections),
+              'normal_producer_reachability_proven':len(real_prod)>0,
+              'normal_consumer_reachability_proven':len(real_cons)>0,
               'vulnerability_proven':False
             },
-            'decision':{'vulnerability_proven':False,'reportable':False,'runtime_authorized':False}
+            'decision':{'vulnerability_proven':False,'reportable':False,'runtime_authorized':False,
+                        'reason':'Reachability inventory only. If no non-support caller exists, the exact APK contains the repository/network capability but no proven normal application invocation path.'}
           }
           OUT.write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
-          print(json.dumps({'summary':report['summary'],'producer_calls':producer_calls[:35],'consumer_calls':consumer_calls[:35],
-                            'lifecycle':lifecycle[:25],'correlated_files':correlated_files[:20],'scope_usages':scope_usages[:50]},ensure_ascii=False,indent=2)[:140000])
+          print(json.dumps({'summary':report['summary'],'real_prod':real_prod[:50],'real_cons':real_cons[:50],
+                            'injections':injections[:50],'scope_usages':scope_rows[:80],'a8':a8},ensure_ascii=False,indent=2)[:150000])
           PY
-
       - name: Upload derived evidence
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: okko-ai-lifecycle-v200
+          name: okko-ai-reachability-v201
           path: |
-            /tmp/okko-v200.json
+            /tmp/okko-v201.json
             /tmp/jadx.stderr
           if-no-files-found: warn
           retention-days: 7
 
-# Exact Okko 8.180.0 static analysis only via trusted official RuStore CDN alias.
-# Zero target requests, credentials, mutations or identifier enumeration.
+# Exact Okko 8.180.0 static reachability analysis only via trusted official RuStore CDN alias.
+# Zero target traffic, credentials, mutations or enumeration.
