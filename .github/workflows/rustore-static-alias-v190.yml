@@ -1,4 +1,4 @@
-name: Harden AI producer-consumer reachability v201
+name: Verify exact RuStore APK split structure v202.1
 
 on:
   pull_request:
@@ -8,191 +8,80 @@ permissions:
   contents: read
 
 jobs:
-  static:
+  package-structure:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '21'
-      - name: Download exact package and decompile
+      - name: Download exact public package and inventory APK entries
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p /tmp/okko
           curl --location --fail --retry 2 --silent --show-error \
+            --header 'User-Agent: okko-standoff365-static-research/1.0' \
             --output /tmp/okko/okko.pkg \
             'https://static.rustore.ru/2026/8/14/7b/de764e6d-0184-4e0f-a7c6-0b6a30580a79.zip'
           python3 - <<'PY'
-          import hashlib,shutil,zipfile
+          import hashlib,json,zipfile
           from pathlib import Path
-          p=Path('/tmp/okko/okko.pkg');h=hashlib.sha256();n=0
+
+          p=Path('/tmp/okko/okko.pkg'); h=hashlib.sha256(); n=0
           with p.open('rb') as f:
               for b in iter(lambda:f.read(1024*1024),b''):
                   n+=len(b);h.update(b)
-          assert n==45942514 and h.hexdigest()=='b00bca9cb327ab3ee483b46d390c9120ac28bfc7674c75fda0129c6c594cc1f9'
-          out=Path('/tmp/okko/okko.apk')
+          got=h.hexdigest()
+          assert n==45942514
+          assert got=='b00bca9cb327ab3ee483b46d390c9120ac28bfc7674c75fda0129c6c594cc1f9'
+          if not zipfile.is_zipfile(p):
+              raise SystemExit('exact RuStore package is not a ZIP container')
+
           with zipfile.ZipFile(p) as z:
-              apks=[x for x in z.infolist() if x.filename.lower().endswith('.apk')]
-              if apks:
-                  info=max(apks,key=lambda x:x.file_size)
-                  with z.open(info) as src,out.open('wb') as dst:shutil.copyfileobj(src,dst,1024*1024)
-              else:shutil.copy2(p,out)
-          PY
-          URL=$(python3 - <<'PY'
-          import json,urllib.request
-          d=json.load(urllib.request.urlopen('https://api.github.com/repos/skylot/jadx/releases/latest',timeout=30))
-          print([a['browser_download_url'] for a in d['assets'] if a['name'].startswith('jadx-') and a['name'].endswith('.zip')][0])
-          PY
-          )
-          curl -L --fail --retry 2 "$URL" -o /tmp/jadx.zip
-          mkdir -p /tmp/jadx && unzip -q /tmp/jadx.zip -d /tmp/jadx
-          chmod +x /tmp/jadx/bin/jadx
-          /tmp/jadx/bin/jadx --no-res --no-imports --show-bad-code --threads-count 4 \
-            -d /tmp/okko/jadx /tmp/okko/okko.apk >/tmp/jadx.stdout 2>/tmp/jadx.stderr || true
-          test -d /tmp/okko/jadx/sources
+              rows=[]
+              for x in z.infolist():
+                  if not x.filename.lower().endswith('.apk'): continue
+                  rows.append({
+                    'name':x.filename,
+                    'file_size':x.file_size,
+                    'compress_size':x.compress_size,
+                    'crc32':f'{x.CRC:08x}',
+                    'compression_type':x.compress_type,
+                  })
+              rows.sort(key=lambda x:x['file_size'],reverse=True)
+              all_entries=len(z.infolist())
 
-      - name: Scan every decompiled class for real AI callsites
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from __future__ import annotations
-          import json,re
-          from pathlib import Path
-          SRC=Path('/tmp/okko/jadx/sources');OUT=Path('/tmp/okko-v201.json')
-          STR_RX=re.compile(r'"([^"\\]*(?:\\.[^"\\]*)*)"')
-          SCOPES=['CONTENT_CARD','ASSISTANT_ANSWER','COLLECTION','MAIN_PAGE','SEARCH_SCREEN','SPORT_HOME_PAGE','SPORT_COLLECTION_PAGE','SPORT_TOURNAMENT_PAGE','SPORT_TEAM_PAGE','SPORT_CARD','UNKNOWN']
-          SUPPORT_RX=re.compile(r'(?i)(AiAssistantRepositoryImpl|AiAssistantRepository\.java$|GetAiAssistant(?:TokenAnswer|Answer)UseCase(?:__Factory)?\.java$|RekkoGatewayApi(?:Lazy)?\.java$|AiAssistantDomainConverter|AiAssistantToken|AiAssistantClientContext|AiAssistantContextScope\.java$|\$\$serializer)')
-          MARKERS={
-            'producer_method':re.compile(r'\bgetAiAssistantTokenAnswer\s*\('),
-            'consumer_method':re.compile(r'\bgetAiAssistantAnswer\s*\('),
-            'producer_usecase':re.compile(r'\bGetAiAssistantTokenAnswerUseCase\b'),
-            'consumer_usecase':re.compile(r'\bGetAiAssistantAnswerUseCase\b'),
-            'token_getter':re.compile(r'\bgetAssistantRequestToken\s*\('),
-            'token_name':re.compile(r'\bassistantRequestToken\b'),
-          }
-          def rel(p):return str(p.relative_to(SRC)).replace('\\','/')
-          def rd(p):return p.read_text(encoding='utf-8',errors='replace')
-          def redact(s):
-              safe={'assistantRequestToken','sid','activeMultiProfileId','query','assistantClientContext','profileId'}
-              return STR_RX.sub(lambda m:'"'+m.group(1)+'"' if m.group(1) in safe else '"<lit>"',s)[:12000]
-          def bend(t,op):
-              d=0;q=None;esc=False
-              for i in range(op,len(t)):
-                  c=t[i]
-                  if q:
-                      if esc:esc=False
-                      elif c=='\\':esc=True
-                      elif c==q:q=None
-                      continue
-                  if c in ('"',"'"):q=c;continue
-                  if c=='{':d+=1
-                  elif c=='}':
-                      d-=1
-                      if d==0:return i+1
-              return None
-          def methods(t):
-              out=[];rx=re.compile(r'(?m)^\s*(?:(?:public|private|protected|static|final|synchronized|native|abstract|default)\s+)+[^;={}]{1,3000}\([^;{}]*\)\s*(?:throws [^{]+)?\{')
-              for m in rx.finditer(t):
-                  op=t.find('{',m.start(),m.end()+2);end=bend(t,op) if op>=0 else None
-                  if end:out.append({'start':m.start(),'end':end,'sig':re.sub(r'\s+',' ',m.group(0)[:-1]).strip()[:3000]})
-              return out
-          def owner(ms,pos):
-              rows=[m for m in ms if m['start']<=pos<m['end']]
-              return rows[-1] if rows else None
-          def sl(t,pos,b=10,a=16):
-              ls=t.splitlines();line=t[:pos].count('\n')+1;lo=max(1,line-b);hi=min(len(ls),line+a)
-              return {'line':line,'start':lo,'end':hi,'text':'\n'.join(f'{i:05d}: {redact(ls[i-1])}' for i in range(lo,hi+1))}
-
-          rows=[];non_support=[];scope_rows=[];all_files=0
-          for p in SRC.rglob('*.java'):
-              all_files+=1
-              try:t=rd(p)
-              except Exception:continue
-              rp=rel(p);ms=methods(t);hits=[]
-              for kind,rx in MARKERS.items():
-                  for m in rx.finditer(t):
-                      # avoid producer name being counted as consumer prefix
-                      if kind=='consumer_method' and t[m.start():m.start()+38].startswith('getAiAssistantAnswerToken'):continue
-                      mo=owner(ms,m.start())
-                      hits.append({'kind':kind,'line':t[:m.start()].count('\n')+1,'owner':mo['sig'] if mo else None,'slice':sl(t,m.start(),9,13)})
-                      if len(hits)>=80:break
-              scopes=[]
-              for s in SCOPES:
-                  rx=re.compile(r'(?<![A-Za-z0-9_$])(?:ru\.okko\.sdk\.domain\.entity\.aiAssistant\.)?AiAssistantContextScope\.'+re.escape(s)+r'\b')
-                  for m in rx.finditer(t):
-                      mo=owner(ms,m.start());scopes.append({'scope':s,'line':t[:m.start()].count('\n')+1,'owner':mo['sig'] if mo else None,'slice':sl(t,m.start(),9,13)})
-              if hits or scopes:
-                  support=bool(SUPPORT_RX.search(rp))
-                  row={'path':rp,'support_or_definition':support,'hits':hits,'scope_usages':scopes}
-                  rows.append(row)
-                  if not support and any(h['kind'] in {'producer_method','consumer_method','producer_usecase','consumer_usecase','token_getter'} for h in hits):non_support.append(row)
-                  scope_rows += [{'path':rp,**x,'support_or_definition':support} for x in scopes]
-
-          # Specifically preserve a8.java; v200 ranked it but did not explain why.
-          a8=[]
-          for p in SRC.rglob('a8.java'):
-              rp=rel(p)
-              if rp.endswith('/a8.java'):
-                  t=rd(p);a8.append({'path':rp,'shape':redact(t)[:40000]})
-
-          # DI injection references to usecases/repository outside support classes.
-          injections=[]
-          injrx=re.compile(r'(GetAiAssistantTokenAnswerUseCase|GetAiAssistantAnswerUseCase|AiAssistantRepository)')
-          for p in SRC.rglob('*.java'):
-              rp=rel(p)
-              if SUPPORT_RX.search(rp):continue
-              try:t=rd(p)
-              except Exception:continue
-              for m in injrx.finditer(t):
-                  ms=methods(t);mo=owner(ms,m.start());injections.append({'path':rp,'symbol':m.group(1),'owner':mo['sig'] if mo else None,'slice':sl(t,m.start(),8,12)})
-                  if len(injections)>=250:break
-
-          # Conservative reachability: a real app caller must exist outside declarations/support files.
-          real_prod=[];real_cons=[]
-          for r in non_support:
-              for h in r['hits']:
-                  if h['kind'] in {'producer_method','producer_usecase'}:real_prod.append({'path':r['path'],**h})
-                  if h['kind'] in {'consumer_method','consumer_usecase'}:real_cons.append({'path':r['path'],**h})
           report={
-            'status':'ok','run_rev':'v201.0',
-            'package_identity':{'version_name':'8.180.0','bytes':45942514,'sha256':'b00bca9cb327ab3ee483b46d390c9120ac28bfc7674c75fda0129c6c594cc1f9'},
+            'status':'ok','run_rev':'v202.1-package-structure',
+            'package_identity':{'version_name':'8.180.0','bytes':n,'sha256':got},
             'network_policy':{'okko_requests':0,'protected_requests':0,'runtime_started':False,'credentials_read':False,'mutations':0,'identifier_enumeration':False,'certificate_or_trust_override':False,'static_only':True},
-            'files_scanned':all_files,'all_marker_files':rows,'non_support_marker_files':non_support,
-            'real_producer_candidates':real_prod,'real_consumer_candidates':real_cons,
-            'scope_usages':scope_rows,'non_support_injections':injections,'a8_candidates':a8,
+            'zip_entry_count':all_entries,
+            'apk_entry_count':len(rows),
+            'apk_entries':rows,
+            'largest_apk':rows[0] if rows else None,
             'summary':{
-              'files_scanned':all_files,
-              'marker_file_count':len(rows),
-              'non_support_marker_file_count':len(non_support),
-              'real_producer_candidate_count':len(real_prod),
-              'real_consumer_candidate_count':len(real_cons),
-              'scope_usage_count':len(scope_rows),
-              'non_support_injection_count':len(injections),
-              'normal_producer_reachability_proven':len(real_prod)>0,
-              'normal_consumer_reachability_proven':len(real_cons)>0,
+              'single_apk_container':len(rows)==1,
+              'multiple_apk_splits_present':len(rows)>1,
+              'reachability_scan_largest_apk_is_container_complete':len(rows)==1,
               'vulnerability_proven':False
             },
-            'decision':{'vulnerability_proven':False,'reportable':False,'runtime_authorized':False,
-                        'reason':'Reachability inventory only. If no non-support caller exists, the exact APK contains the repository/network capability but no proven normal application invocation path.'}
+            'decision':{
+              'vulnerability_proven':False,
+              'reportable':False,
+              'runtime_authorized':False,
+              'next_action':'If apk_entry_count is 1, v201 largest-APK reachability is split-complete. If more than 1, scan every code-bearing APK for AI caller markers before drawing a reachability conclusion.'
+            }
           }
-          OUT.write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
-          print(json.dumps({'summary':report['summary'],'real_prod':real_prod[:50],'real_cons':real_cons[:50],
-                            'injections':injections[:50],'scope_usages':scope_rows[:80],'a8':a8},ensure_ascii=False,indent=2)[:150000])
+          Path('/tmp/okko-package-structure-v202.json').write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          print(json.dumps(report,ensure_ascii=False,indent=2))
           PY
-      - name: Upload derived evidence
+      - name: Upload derived package evidence
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: okko-ai-reachability-v201
-          path: |
-            /tmp/okko-v201.json
-            /tmp/jadx.stderr
+          name: okko-package-structure-v202
+          path: /tmp/okko-package-structure-v202.json
           if-no-files-found: warn
           retention-days: 7
 
-# Exact Okko 8.180.0 static reachability analysis only via trusted official RuStore CDN alias.
-# Zero target traffic, credentials, mutations or enumeration.
+# Exact public Okko 8.180.0 package inventory only via trusted official RuStore CDN alias.
+# Native TLS verification remains enabled. Zero Okko target traffic, credentials, mutations or enumeration.
