@@ -1,0 +1,341 @@
+name: Exact reachable sensitive GET frontier v204
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  static-frontier:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Download and verify exact public Okko 8.180.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/okko
+          curl --location --fail --retry 2 --silent --show-error \
+            --header 'User-Agent: okko-standoff365-static-research/1.0' \
+            --output /tmp/okko/okko.pkg \
+            'https://static.rustore.ru/2026/8/14/7b/de764e6d-0184-4e0f-a7c6-0b6a30580a79.zip'
+          python3 - <<'PY'
+          import hashlib,shutil,zipfile
+          from pathlib import Path
+          p=Path('/tmp/okko/okko.pkg');h=hashlib.sha256();n=0
+          with p.open('rb') as f:
+              for b in iter(lambda:f.read(1024*1024),b''):
+                  n+=len(b);h.update(b)
+          got=h.hexdigest();assert n==45942514 and got=='b00bca9cb327ab3ee483b46d390c9120ac28bfc7674c75fda0129c6c594cc1f9'
+          with zipfile.ZipFile(p) as z:
+              apks=[x for x in z.infolist() if x.filename.lower().endswith('.apk')]
+              assert len(apks)==1, f'expected sole APK, got {len(apks)}'
+              info=apks[0];out=Path('/tmp/okko/okko.apk')
+              with z.open(info) as src,out.open('wb') as dst:shutil.copyfileobj(src,dst,1024*1024)
+              print({'apk':info.filename,'apk_bytes':info.file_size})
+          PY
+
+      - name: Install JADX and decompile sole APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL=$(python3 - <<'PY'
+          import json,urllib.request
+          d=json.load(urllib.request.urlopen('https://api.github.com/repos/skylot/jadx/releases/latest',timeout=30))
+          print([a['browser_download_url'] for a in d['assets'] if a['name'].startswith('jadx-') and a['name'].endswith('.zip')][0])
+          PY
+          )
+          curl -L --fail --retry 2 "$URL" -o /tmp/jadx.zip
+          mkdir -p /tmp/jadx && unzip -q /tmp/jadx.zip -d /tmp/jadx
+          chmod +x /tmp/jadx/bin/jadx
+          /tmp/jadx/bin/jadx --no-res --no-imports --show-bad-code --threads-count 4 \
+            -d /tmp/okko/jadx /tmp/okko/okko.apk >/tmp/jadx.stdout 2>/tmp/jadx.stderr || true
+          test -d /tmp/okko/jadx/sources
+
+      - name: Build reachable sensitive GET frontier
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from __future__ import annotations
+          import json,re
+          from pathlib import Path
+
+          SRC=Path('/tmp/okko/jadx/sources');OUT=Path('/tmp/okko-v204.json')
+          FIRST=('ru/okko/','ru/more/play/','p003nskobfuscated/','nskobfuscated/')
+          HTTP_RX=re.compile(r'@(?:retrofit2\.http\.)?(GET|POST|PUT|PATCH|DELETE|HEAD)\s*\(\s*"([^"]*)"\s*\)')
+          PARAM_ANN_RX=re.compile(r'@(?:retrofit2\.http\.)?(Path|Query|QueryName|Header|Field|Body)\s*(?:\(\s*"([^"]*)"\s*\))?')
+          STR_RX=re.compile(r'"([^"\\]*(?:\\.[^"\\]*)*)"')
+          OWNER_RX=re.compile(r'(?i)(?:^|_)(?:active)?(?:multi)?profileid$|(?i)^(?:user|account|subscription|order|payment|purchase|receipt|restoration|transaction|entitlement|device|card|customer|benefit|loyalty)(?:id|ids|token|key)?$')
+          OWNER_LOOSE_RX=re.compile(r'(?i)(activeMultiProfileId|profileId|multiProfileId|userId|accountId|subscriptionId|orderId|paymentToken|purchaseToken|receiptId|restorationId|transactionId|entitlementId|deviceId|cardId|customerId)')
+          MEDIA_RX=re.compile(r'(?i)(movie|film|video|content|element|item|catalog|collection|playset|episode|season|sport|tournament|team|broadcast|channel|asset|image|trailer|search|genre|actor|person|author|book|music|track)')
+          CLOSED_RX=re.compile(r'(?i)(rekko|assistant|devicelink|device.?links|teleport|widevine|playready|drm|license|oauth|social|authcode|captcha)')
+          SENSITIVE_RX=re.compile(r'(?i)(profile|user|account|subscription|payment|purchase|order|device|notification|history|bookmark|favorite|watch|progress|resume|entitlement|receipt|restoration|transaction|card|loyalty|benefit|personal|customer|address)')
+          PRIVATE_RESPONSE_RX=re.compile(r'(?i)(Profile|User|Account|Subscription|Payment|Purchase|Order|Device|Notification|History|Bookmark|Favorite|Progress|Resume|Entitlement|Receipt|Restoration|Transaction|Card|Loyalty|Benefit|Customer|Personal|Address)')
+          SUPPORT_PATH_RX=re.compile(r'(?i)(__Factory|\$\$serializer|/internal/di/|/lazyApi/|/network/api/|ApiLazy\.java$|ApiProvider\.java$|/converters?/|/oldEntity/response/)')
+
+          def rel(p):return str(p.relative_to(SRC)).replace('\\','/')
+          def rd(p):return p.read_text(encoding='utf-8',errors='replace')
+          def redact(s):return STR_RX.sub('"<lit>"',s)[:9000]
+          def split_top(s):
+              out=[];st=0;dp=db=ds=da=0;q=None;esc=False
+              for i,c in enumerate(s):
+                  if q:
+                      if esc:esc=False
+                      elif c=='\\':esc=True
+                      elif c==q:q=None
+                      continue
+                  if c in ('"',"'"):q=c
+                  elif c=='(':dp+=1
+                  elif c==')':dp-=1
+                  elif c=='{':db+=1
+                  elif c=='}':db-=1
+                  elif c=='[':ds+=1
+                  elif c==']':ds-=1
+                  elif c=='<':da+=1
+                  elif c=='>':da=max(0,da-1)
+                  elif c==',' and dp==db==ds==da==0:
+                      out.append(s[st:i].strip());st=i+1
+              out.append(s[st:].strip());return [x for x in out if x]
+          def match(t,op,L='(',R=')'):
+              d=0;q=None;esc=False
+              for i in range(op,len(t)):
+                  c=t[i]
+                  if q:
+                      if esc:esc=False
+                      elif c=='\\':esc=True
+                      elif c==q:q=None
+                      continue
+                  if c in ('"',"'"):q=c;continue
+                  if c==L:d+=1
+                  elif c==R:
+                      d-=1
+                      if d==0:return i
+              return None
+          def bend(t,op):
+              return match(t,op,'{','}')
+          def methods(t):
+              out=[]
+              rx=re.compile(r'(?m)^\s*(?:(?:public|private|protected|static|final|synchronized|native|abstract|default)\s+)+([^;={}]{1,2600}?)\s+([A-Za-z_$][\w$]*)\s*\(([^;{}]*)\)\s*(?:throws [^{]+)?\{')
+              for m in rx.finditer(t):
+                  op=t.find('{',m.start(),m.end()+2);cp=bend(t,op) if op>=0 else None
+                  if cp is None:continue
+                  out.append({'start':m.start(),'end':cp+1,'name':m.group(2),'params':m.group(3),'sig':re.sub(r'\s+',' ',m.group(0)[:-1]).strip()[:2600]})
+              return out
+          def owner(ms,pos):
+              rows=[m for m in ms if m['start']<=pos<m['end']]
+              return rows[-1] if rows else None
+          def type_map(t):
+              out={}
+              # Handles fields, locals and params sufficiently for strict receiver checks.
+              for m in re.finditer(r'\b([A-Za-z_$][\w.$]*(?:<[^;={}()]+>)?)\s+([A-Za-z_$][\w$]*)\s*(?=[;=,)])',t):
+                  typ=re.sub(r'<.*>','',m.group(1)).strip();out[m.group(2)]=typ
+              return out
+          def nearest_class(t,pos):
+              prefix=t[:pos]
+              rows=list(re.finditer(r'\b(?:class|interface|enum)\s+([A-Za-z_$][\w$]*)',prefix))
+              return rows[-1].group(1) if rows else None
+          def safe_path(rp):
+              return rp.startswith(FIRST)
+          def external_app_path(rp):
+              if SUPPORT_PATH_RX.search(rp):return False
+              if '/data/repository/' in rp:return False
+              return True
+
+          # ---------- Retrofit GET inventory ----------
+          endpoints=[]
+          by_method={}
+          for p in SRC.rglob('*.java'):
+              rp=rel(p)
+              if not safe_path(rp):continue
+              try:t=rd(p)
+              except Exception:continue
+              if '@GET(' not in t and '@retrofit2.http.GET(' not in t:continue
+              pkgm=re.search(r'(?m)^package\s+([\w.]+);',t);pkg=pkgm.group(1) if pkgm else ''
+              clm=re.search(r'\b(?:interface|class)\s+([A-Za-z_$][\w$]*)',t);cls=clm.group(1) if clm else p.stem
+              fqcn=(pkg+'.'+cls).strip('.')
+              for hm in HTTP_RX.finditer(t):
+                  if hm.group(1)!='GET':continue
+                  tail=t[hm.end():hm.end()+7000]
+                  semi=tail.find(';')
+                  if semi<0:continue
+                  decl=tail[:semi+1]
+                  mm=re.search(r'([A-Za-z_$][\w$]*)\s*\((.*)\)\s*;',decl,re.S)
+                  if not mm:continue
+                  method=mm.group(1);params_raw=mm.group(2);params=[]
+                  for idx,row in enumerate(split_top(params_raw)):
+                      anns=[]
+                      for am in PARAM_ANN_RX.finditer(row):anns.append({'kind':am.group(1),'value':am.group(2)})
+                      clean=re.sub(r'@[\w.$]+(?:\([^)]*\))?\s*','',row).strip()
+                      nm=re.search(r'([A-Za-z_$][\w$]*)\s*$',clean)
+                      params.append({'index':idx,'name':nm.group(1) if nm else None,'declaration':redact(clean),'annotations':anns})
+                  cont=re.search(r'Continuation\s*<\s*\?\s*super\s+([^>]+)>',decl)
+                  response=cont.group(1).strip() if cont else None
+                  selector=[]
+                  for pa in params:
+                      for a in pa['annotations']:
+                          val=a.get('value') or ''
+                          if a['kind'] in {'Query','Path','QueryName'} and (OWNER_LOOSE_RX.search(val) or OWNER_LOOSE_RX.search(pa.get('declaration') or '')):
+                              if not MEDIA_RX.search(val):selector.append({'index':pa['index'],'kind':a['kind'],'value':val,'name':pa['name'],'declaration':pa['declaration']})
+                  desc=' '.join([method,hm.group(2),response or '',json.dumps(params,ensure_ascii=False)])
+                  if CLOSED_RX.search(desc):continue
+                  ep={'api_path':rp,'api_class':fqcn,'api_simple':cls,'method':method,'verb':'GET','route':hm.group(2),
+                      'response_type':response,'params':params,'ownership_selectors':selector,
+                      'sensitive_semantics':bool(SENSITIVE_RX.search(desc)),'private_response_semantics':bool(response and PRIVATE_RESPONSE_RX.search(response)),
+                      'media_semantics':bool(MEDIA_RX.search(method+' '+hm.group(2)))}
+                  if not selector:continue
+                  if ep['media_semantics'] and not ep['sensitive_semantics']:continue
+                  endpoints.append(ep);by_method.setdefault(method,[]).append(ep)
+
+          # ---------- Typed endpoint callsites ----------
+          callsites=[]
+          names=sorted(by_method,key=len,reverse=True)
+          if names:
+              callrx=re.compile(r'\b([A-Za-z_$][\w$]*)\.('+'|'.join(re.escape(x) for x in names)+r')\s*\(')
+              for p in SRC.rglob('*.java'):
+                  rp=rel(p)
+                  if not safe_path(rp):continue
+                  try:t=rd(p)
+                  except Exception:continue
+                  if not any((n+'(') in t for n in names):continue
+                  ms=methods(t);ft=type_map(t)
+                  for mo in ms:
+                      body=t[mo['start']:mo['end']];lt=type_map(body);types={**ft,**lt}
+                      for cm in callrx.finditer(body):
+                          recv,target=cm.group(1),cm.group(2);typ=types.get(recv,'')
+                          candidates=by_method.get(target,[])
+                          matched=[]
+                          for ep in candidates:
+                              if typ==ep['api_class'] or typ==ep['api_simple'] or typ.endswith('.'+ep['api_simple']):matched.append(ep)
+                          if not matched:continue
+                          op=body.find('(',cm.start(),cm.end()+2);cp=match(body,op) if op>=0 else None
+                          if cp is None:continue
+                          args=split_top(body[op+1:cp]);pos=mo['start']+cm.start();inner=nearest_class(t,pos)
+                          for ep in matched:
+                              callsites.append({'endpoint_key':ep['api_class']+'#'+ep['method'],'path':rp,'line':t[:pos].count('\n')+1,
+                                               'method':mo['name'],'method_sig':mo['sig'],'receiver':recv,'receiver_type':typ,
+                                               'args':[redact(x) for x in args],'inner_class':inner,
+                                               'auth_context':bool(re.search(r'(?i)(sessionToken|getSessionToken|accessKey|getAccessKey|Authorization|sid)',body))})
+
+          # ---------- Map invokeSuspend inner class to outer repository method ----------
+          for c in callsites:
+              p=SRC/c['path'];t=rd(p);ms=methods(t);outer=[]
+              if c['method']!='invokeSuspend' or not c.get('inner_class'):
+                  outer=[{'name':c['method'],'sig':c['method_sig'],'line':c['line']}]
+              else:
+                  cls=c['inner_class']
+                  rx=re.compile(r'\bnew\s+(?:(?:[A-Za-z_$][\w$]*\.)*)'+re.escape(cls)+r'\s*\(')
+                  for nm in rx.finditer(t):
+                      mo=owner(ms,nm.start())
+                      if not mo or mo['name'] in {'create','invoke','invokeSuspend'}:continue
+                      outer.append({'name':mo['name'],'sig':mo['sig'],'line':t[:nm.start()].count('\n')+1})
+              # dedupe
+              seen=set();c['outer_methods']=[]
+              for x in outer:
+                  k=(x['name'],x['sig'])
+                  if k in seen:continue
+                  seen.add(k);c['outer_methods'].append(x)
+
+          # ---------- External typed callers of mapped repository methods ----------
+          external_by_call={}
+          for ci,c in enumerate(callsites):
+              repo_stem=Path(c['path']).stem
+              repo_base=re.sub(r'Impl$','',repo_stem)
+              ext=[]
+              for om in c.get('outer_methods') or []:
+                  name=om['name']
+                  if not name or name in {'a','b','c','d','e','f','g','h','i','j'}:continue
+                  crx=re.compile(r'\b([A-Za-z_$][\w$]*)\.'+re.escape(name)+r'\s*\(')
+                  for p in SRC.rglob('*.java'):
+                      rp=rel(p)
+                      if rp==c['path'] or not safe_path(rp) or not external_app_path(rp):continue
+                      try:t=rd(p)
+                      except Exception:continue
+                      if name+'(' not in t:continue
+                      ms=methods(t);ft=type_map(t)
+                      for mo in ms:
+                          body=t[mo['start']:mo['end']];types={**ft,**type_map(body)}
+                          for m in crx.finditer(body):
+                              recv=m.group(1);typ=types.get(recv,'')
+                              if not (typ.endswith(repo_stem) or typ.endswith(repo_base) or repo_base in typ):continue
+                              pos=mo['start']+m.start()
+                              ext.append({'path':rp,'line':t[:pos].count('\n')+1,'caller_method':mo['name'],'caller_sig':mo['sig'],
+                                          'receiver':recv,'receiver_type':typ})
+              # dedupe
+              uniq=[];seen=set()
+              for x in ext:
+                  k=(x['path'],x['line'],x['caller_sig'])
+                  if k not in seen:seen.add(k);uniq.append(x)
+              external_by_call[ci]=uniq[:60]
+
+          # ---------- Join and rank ----------
+          epmap={e['api_class']+'#'+e['method']:e for e in endpoints}
+          rows=[]
+          for key,ep in epmap.items():
+              cs=[]
+              for i,c in enumerate(callsites):
+                  if c['endpoint_key']!=key:continue
+                  cc=dict(c);cc['external_app_callers']=external_by_call.get(i,[]);cs.append(cc)
+              typed=len(cs)>0
+              mapped=any(c.get('outer_methods') for c in cs)
+              ext=sum(len(c.get('external_app_callers') or []) for c in cs)
+              if not typed or not mapped or ext==0:continue
+              if not (ep['private_response_semantics'] or ep['sensitive_semantics']):continue
+              score=0
+              score+=20
+              score+=min(20,ext*4)
+              score+=10 if ep['private_response_semantics'] else 0
+              score+=8 if ep['sensitive_semantics'] else 0
+              score+=8 if any(c['auth_context'] for c in cs) else 0
+              score+=4*min(3,len(ep['ownership_selectors']))
+              if ep['media_semantics']:score-=8
+              rows.append({'score':score,'endpoint':ep,'typed_callsite_count':len(cs),'external_app_caller_count':ext,
+                           'explicit_auth_context':any(c['auth_context'] for c in cs),'callsites':cs[:12]})
+          rows.sort(key=lambda x:(x['score'],x['external_app_caller_count'],x['typed_callsite_count']),reverse=True)
+
+          report={
+            'status':'ok','run_rev':'v204.0-reachable-sensitive-frontier',
+            'package_identity':{'version_name':'8.180.0','outer_bytes':45942514,'outer_sha256':'b00bca9cb327ab3ee483b46d390c9120ac28bfc7674c75fda0129c6c594cc1f9','apk_entry_count':1},
+            'network_policy':{'okko_requests':0,'protected_requests':0,'runtime_started':False,'credentials_read':False,'mutations':0,'third_party_accounts':0,'identifier_enumeration':False,'certificate_or_trust_override':False,'static_only':True},
+            'raw_credentials_persisted':False,
+            'summary':{
+              'ownership_get_endpoint_count':len(endpoints),
+              'typed_endpoint_callsite_count':len(callsites),
+              'strict_reachable_sensitive_candidate_count':len(rows),
+              'vulnerability_proven':False
+            },
+            'criteria':{
+              'required':['GET','ownership-named Path/Query selector','sensitive/private response semantics','typed Retrofit call','mapped outer method','typed external app-layer caller'],
+              'excluded':['Rekko/AI','DRM/license','DeviceLinks','Teleport','OAuth/social','obvious media-only selectors']
+            },
+            'candidates':rows[:50],
+            'decision':{
+              'vulnerability_proven':False,'reportable':False,'runtime_authorized':False,
+              'next_action':'Resolve exact production host and selector provenance for the top reachable candidates. Do not send target traffic from this frontier.'
+            }
+          }
+          OUT.write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          print(json.dumps({'summary':report['summary'],'top':[{'score':r['score'],'endpoint':r['endpoint'],'external_app_caller_count':r['external_app_caller_count'],'callsites':r['callsites'][:3]} for r in rows[:20]]},ensure_ascii=False,indent=2)[:140000])
+          PY
+
+      - name: Upload derived frontier evidence
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: okko-reachable-frontier-v204
+          path: |
+            /tmp/okko-v204.json
+            /tmp/jadx.stderr
+          if-no-files-found: warn
+          retention-days: 7
+
+# Exact public Okko 8.180.0 static analysis only via trusted official RuStore CDN alias.
+# Zero Okko target/protected traffic, credentials, mutations, third-party data or enumeration.
