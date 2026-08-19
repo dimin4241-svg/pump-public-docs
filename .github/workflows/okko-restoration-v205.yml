@@ -1,0 +1,337 @@
+name: Exact Google purchase restoration provenance v205
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  static-restoration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Download and verify exact public Okko 8.180.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/okko
+          curl --location --fail --retry 2 --silent --show-error \
+            --header 'User-Agent: okko-standoff365-static-research/1.0' \
+            --output /tmp/okko/okko.pkg \
+            'https://static.rustore.ru/2026/8/14/7b/de764e6d-0184-4e0f-a7c6-0b6a30580a79.zip'
+          python3 - <<'PY'
+          import hashlib,shutil,zipfile
+          from pathlib import Path
+          p=Path('/tmp/okko/okko.pkg');h=hashlib.sha256();n=0
+          with p.open('rb') as f:
+              for b in iter(lambda:f.read(1024*1024),b''):
+                  n+=len(b);h.update(b)
+          got=h.hexdigest();assert n==45942514 and got=='b00bca9cb327ab3ee483b46d390c9120ac28bfc7674c75fda0129c6c594cc1f9'
+          with zipfile.ZipFile(p) as z:
+              apks=[x for x in z.infolist() if x.filename.lower().endswith('.apk')]
+              assert len(apks)==1
+              info=apks[0];out=Path('/tmp/okko/okko.apk')
+              with z.open(info) as src,out.open('wb') as dst:shutil.copyfileobj(src,dst,1024*1024)
+          PY
+
+      - name: Install JADX and decompile sole APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL=$(python3 - <<'PY'
+          import json,urllib.request
+          d=json.load(urllib.request.urlopen('https://api.github.com/repos/skylot/jadx/releases/latest',timeout=30))
+          print([a['browser_download_url'] for a in d['assets'] if a['name'].startswith('jadx-') and a['name'].endswith('.zip')][0])
+          PY
+          )
+          curl -L --fail --retry 2 "$URL" -o /tmp/jadx.zip
+          mkdir -p /tmp/jadx && unzip -q /tmp/jadx.zip -d /tmp/jadx
+          chmod +x /tmp/jadx/bin/jadx
+          /tmp/jadx/bin/jadx --no-res --no-imports --show-bad-code --threads-count 4 \
+            -d /tmp/okko/jadx /tmp/okko/okko.apk >/tmp/jadx.stdout 2>/tmp/jadx.stderr || true
+          test -d /tmp/okko/jadx/sources
+
+      - name: Trace restorationId, host, response and producer paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from __future__ import annotations
+          import json,re
+          from pathlib import Path
+
+          SRC=Path('/tmp/okko/jadx/sources');OUT=Path('/tmp/okko-v205.json')
+          FIRST=('ru/okko/','ru/more/play/','p003nskobfuscated/','nskobfuscated/')
+          STR_RX=re.compile(r'"([^"\\]*(?:\\.[^"\\]*)*)"')
+          URL_RX=re.compile(r'https?://[^\s\"\'<>]+',re.I)
+          HTTP_RX=re.compile(r'@(?:retrofit2\.http\.)?(GET|POST|PUT|PATCH|DELETE|HEAD)\s*\(\s*"([^"]*)"\s*\)')
+          PARAM_ANN_RX=re.compile(r'@(?:retrofit2\.http\.)?(Path|Query|QueryName|Header|Field|Body)\s*(?:\(\s*"([^"]*)"\s*\))?')
+
+          def rel(p):return str(p.relative_to(SRC)).replace('\\','/')
+          def rd(p):return p.read_text(encoding='utf-8',errors='replace')
+          def redact(s):
+              safe={'restorationId','client_type','paymentToken','purchaseToken','orderId'}
+              return STR_RX.sub(lambda m:'"'+m.group(1)+'"' if m.group(1) in safe or URL_RX.fullmatch(m.group(1)) else '"<lit>"',s)[:12000]
+          def one(path,base):
+              p=SRC/path
+              if p.is_file():return p
+              rows=[x for x in SRC.rglob(base) if str(x).replace('\\','/').endswith(str(path).replace('\\','/'))] or list(SRC.rglob(base))
+              if len(rows)!=1:raise SystemExit(f'{base}: {len(rows)} matches')
+              return rows[0]
+          def match(t,op,L='(',R=')'):
+              d=0;q=None;esc=False
+              for i in range(op,len(t)):
+                  c=t[i]
+                  if q:
+                      if esc:esc=False
+                      elif c=='\\':esc=True
+                      elif c==q:q=None
+                      continue
+                  if c in ('"',"'"):q=c;continue
+                  if c==L:d+=1
+                  elif c==R:
+                      d-=1
+                      if d==0:return i
+              return None
+          def split_top(s):
+              out=[];st=0;dp=db=ds=da=0;q=None;esc=False
+              for i,c in enumerate(s):
+                  if q:
+                      if esc:esc=False
+                      elif c=='\\':esc=True
+                      elif c==q:q=None
+                      continue
+                  if c in ('"',"'"):q=c
+                  elif c=='(':dp+=1
+                  elif c==')':dp-=1
+                  elif c=='{':db+=1
+                  elif c=='}':db-=1
+                  elif c=='[':ds+=1
+                  elif c==']':ds-=1
+                  elif c=='<':da+=1
+                  elif c=='>':da=max(0,da-1)
+                  elif c==',' and dp==db==ds==da==0:
+                      out.append(s[st:i].strip());st=i+1
+              out.append(s[st:].strip());return [x for x in out if x]
+          def methods(t):
+              out=[]
+              rx=re.compile(r'(?m)^\s*(?:(?:public|private|protected|static|final|synchronized|native|abstract|default)\s+)+[^;={}]{1,3000}?\s+([A-Za-z_$][\w$]*)\s*\(([^;{}]*)\)\s*(?:throws [^{]+)?\{')
+              for m in rx.finditer(t):
+                  op=t.find('{',m.start(),m.end()+2);cp=match(t,op,'{','}') if op>=0 else None
+                  if cp is None:continue
+                  out.append({'start':m.start(),'end':cp+1,'name':m.group(1),'params':m.group(2),'sig':re.sub(r'\s+',' ',m.group(0)[:-1]).strip()[:3000]})
+              return out
+          def owner(ms,pos):
+              rows=[m for m in ms if m['start']<=pos<m['end']]
+              return rows[-1] if rows else None
+          def line_slice(t,pos,b=12,a=20):
+              ls=t.splitlines();line=t[:pos].count('\n')+1;lo=max(1,line-b);hi=min(len(ls),line+a)
+              return {'line':line,'start':lo,'end':hi,'text':'\n'.join(f'{i:05d}: {redact(ls[i-1])}' for i in range(lo,hi+1))}
+          def model(p):
+              t=rd(p);ls=t.splitlines();fields=[];getters=[];pending=None
+              ser_rx=re.compile(r'(?i)(?:SerialName|SerializedName|JsonProperty)\s*\(\s*"([^"\\]{1,160})"')
+              for i,l in enumerate(ls,1):
+                  sm=ser_rx.search(l)
+                  if sm:pending=(i,sm.group(1))
+                  fm=re.search(r'^\s*(?:(?:public|private|protected|final|static|transient|volatile)\s+)+([A-Za-z0-9_.$<>?, \[\]]+)\s+([A-Za-z_$][\w$]*)\s*(?:;|=)',l)
+                  if fm:
+                      ser=pending[1] if pending and i-pending[0]<=4 else None
+                      fields.append({'line':i,'type':fm.group(1).strip(),'field':fm.group(2),'serialized':ser});pending=None
+              for i,l in enumerate(ls,1):
+                  gm=re.search(r'\b(get|is)([A-Za-z_$][\w$]*)\s*\(\s*\)\s*\{',l)
+                  if gm:
+                      tail='\n'.join(ls[i-1:min(len(ls),i+8)]);rm=re.search(r'return\s+(?:this\.)?([A-Za-z_$][\w$]*)\s*;',tail)
+                      getters.append({'line':i,'getter':gm.group(1)+gm.group(2),'field':rm.group(1) if rm else None})
+              enum=[]
+              em=re.search(r'\benum\s+[A-Za-z_$][\w$]*\s*\{([^;}]*)',t,re.S)
+              if em:
+                  for x in split_top(em.group(1)):
+                      mm=re.match(r'\s*([A-Z][A-Z0-9_]*)\b',x)
+                      if mm:enum.append(mm.group(1))
+              return {'path':rel(p),'fields':fields,'getters':getters,'enum_constants':enum,'shape':redact(t[:18000])}
+
+          api=one(Path('ru/okko/sdk/data/network/api/AuthScreenApi.java'),'AuthScreenApi.java')
+          provider=one(Path('ru/okko/commonApp/internal/di/modules/lazyApi/AuthScreenApiProvider.java'),'AuthScreenApiProvider.java')
+          pay=one(Path('ru/okko/sdk/data/repository/PaymentRepositoryImpl.java'),'PaymentRepositoryImpl.java')
+          awaitu=one(Path('ru/okko/sdk/domain/googlebilling/usecase/AwaitPurchaseRestorationUseCase.java'),'AwaitPurchaseRestorationUseCase.java')
+          response=one(Path('ru/okko/sdk/domain/googlebilling/models/PurchaseRestorationStatusResponse.java'),'PurchaseRestorationStatusResponse.java')
+          domain=one(Path('ru/okko/sdk/domain/googlebilling/models/PurchaseRestorationStatus.java'),'PurchaseRestorationStatus.java')
+
+          # ---- exact endpoint declaration ----
+          at=rd(api);endpoint=None
+          hm=re.search(r'@(?:retrofit2\.http\.)?GET\s*\(\s*"v1/googlepurchasesrestoration/\{client_type\}/1/\{restorationId\}"\s*\)',at)
+          if hm:
+              tail=at[hm.end():hm.end()+3500];semi=tail.find(';');decl=tail[:semi+1] if semi>=0 else tail
+              endpoint={'route':'v1/googlepurchasesrestoration/{client_type}/1/{restorationId}','declaration_shape':redact(re.sub(r'\s+',' ',decl))}
+
+          # ---- repository mapping and caller boundary ----
+          pt=rd(pay);pms=methods(pt);repo_calls=[]
+          for cm in re.finditer(r'\.checkGooglePurchaseRestoration\s*\(',pt):
+              op=pt.find('(',cm.start(),cm.end()+2);cp=match(pt,op)
+              if cp is None:continue
+              mo=owner(pms,cm.start());args=split_top(pt[op+1:cp])
+              repo_calls.append({'line':pt[:cm.start()].count('\n')+1,'owner':mo['sig'] if mo else None,'args':[redact(x) for x in args],'slice':line_slice(pt,cm.start(),22,30)})
+          captures=[]
+          for m in re.finditer(r'this\.\$([A-Za-z_$][\w$]*)\s*=\s*([A-Za-z_$][\w$]*)\s*;',pt):
+              if 'restor' not in m.group(1).lower():continue
+              mo=owner(pms,m.start());captures.append({'capture':m.group(1),'from_param':m.group(2),'owner':mo['sig'] if mo else None,'slice':line_slice(pt,m.start(),8,10)})
+          outer=[]
+          for m in re.finditer(r'\bcheckPurchaseRestoration\s*\(',pt):
+              mo=owner(pms,m.start())
+              if mo and mo['name']=='checkPurchaseRestoration':outer.append({'signature':mo['sig'],'slice':line_slice(pt,mo['start'],0,35)})
+          # constructor creations of inner class b within outer method
+          bnews=[]
+          for m in re.finditer(r'\bnew\s+(?:(?:[A-Za-z_$][\w$]*\.)*)b\s*\(',pt):
+              mo=owner(pms,m.start());
+              if not mo or mo['name']!='checkPurchaseRestoration':continue
+              op=pt.find('(',m.start(),m.end()+2);cp=match(pt,op);args=split_top(pt[op+1:cp]) if cp else []
+              bnews.append({'owner':mo['sig'],'args':[redact(x) for x in args],'slice':line_slice(pt,m.start(),8,12)})
+
+          # ---- AwaitPurchaseRestorationUseCase exact calls and restoration ID source expressions ----
+          aw=rd(awaitu);ams=methods(aw);await_calls=[]
+          for cm in re.finditer(r'\.checkPurchaseRestoration\s*\(',aw):
+              op=aw.find('(',cm.start(),cm.end()+2);cp=match(aw,op)
+              if cp is None:continue
+              mo=owner(ams,cm.start());args=split_top(aw[op+1:cp]);expr=args[0] if args else None
+              # last assignments for a simple local before call
+              assignments=[]
+              if expr and re.fullmatch(r'[A-Za-z_$][\w$]*',expr):
+                  body=aw[mo['start']:cm.start()] if mo else aw[:cm.start()]
+                  assignments=[redact(x.group(1).strip()) for x in re.finditer(r'\b'+re.escape(expr)+r'\s*=\s*([^;]+);',body)][-8:]
+              await_calls.append({'line':aw[:cm.start()].count('\n')+1,'owner':mo['sig'] if mo else None,'args':[redact(x) for x in args],
+                                  'selector_expression':redact(expr or ''),'prior_assignments':assignments,'slice':line_slice(aw,cm.start(),24,30)})
+
+          # ---- all restoration identifiers / producer candidates across exact APK ----
+          occ=[];retro=[];creators=[]
+          marker=re.compile(r'(?i)(restorationId|PurchaseRestoration|purchasesrestoration)')
+          for p in SRC.rglob('*.java'):
+              rp=rel(p)
+              if not rp.startswith(FIRST):continue
+              try:t=rd(p)
+              except Exception:continue
+              if not marker.search(t):continue
+              ms=methods(t)
+              hits=[]
+              for mm in marker.finditer(t):
+                  mo=owner(ms,mm.start());hits.append({'marker':mm.group(1),'line':t[:mm.start()].count('\n')+1,'owner':mo['sig'] if mo else None,'slice':line_slice(t,mm.start(),7,10)})
+                  if len(hits)>=16:break
+              occ.append({'path':rp,'hits':hits})
+              for hm2 in HTTP_RX.finditer(t):
+                  around=t[hm2.start():hm2.end()+3500]
+                  if marker.search(around):retro.append({'path':rp,'verb':hm2.group(1),'route':hm2.group(2),'shape':redact(re.sub(r'\s+',' ',around[:2600]))})
+              if re.search(r'(?i)(UUID\.randomUUID|SecureRandom|Random\(|nextBytes|restorationId\s*=|new\s+.*Restoration)',t):
+                  for mm in re.finditer(r'(?i)(UUID\.randomUUID\s*\(|SecureRandom|restorationId\s*=|new\s+[A-Za-z_$][\w$]*Restoration[A-Za-z_$]*\s*\()',t):
+                      creators.append({'path':rp,'marker':mm.group(1),'slice':line_slice(t,mm.start(),8,12)})
+
+          # ---- response/domain semantics and repository conversion ----
+          response_model=model(response);domain_model=model(domain)
+          conversion=[]
+          for mm in re.finditer(r'PurchaseRestorationStatusResponse|PurchaseRestorationStatus',pt):
+              mo=owner(pms,mm.start())
+              conversion.append({'marker':mm.group(0),'owner':mo['sig'] if mo else None,'slice':line_slice(pt,mm.start(),10,14)})
+              if len(conversion)>=30:break
+
+          # ---- generic ConfigModelResponse getter -> prod URL resolver from provider baseUrl ----
+          provt=rd(provider);provider_base=[]
+          for bm in re.finditer(r'\.baseUrl\s*\(([^;]+?)\)',provt,re.S):
+              expr=bm.group(1);provider_base.append({'expression':redact(re.sub(r'\s+',' ',expr)),'slice':line_slice(provt,bm.start(),12,18)})
+          getter_names=sorted(set(re.findall(r'get([A-Z][A-Za-z0-9_$]*)\s*\(\s*\)',provt)))
+
+          # generic host mapper: find getters in ConfigModelResponse and map constructor slot -> DefaultConfigModelResponse prod arg.
+          host_map=[]
+          cmr_rows=list(SRC.rglob('ConfigModelResponse.java'));dflt_rows=list(SRC.rglob('DefaultConfigModelResponse.java'))
+          if len(cmr_rows)==1 and len(dflt_rows)==1:
+              cmr=cmr_rows[0];dflt=dflt_rows[0];ct=rd(cmr);dt=rd(dflt)
+              for g in getter_names:
+                  gm=re.search(r'(?s)\bget'+re.escape(g)+r'\s*\(\s*\)\s*\{(.{0,1200}?)\}',ct)
+                  if not gm:continue
+                  rm=re.search(r'return\s+(?:this\.)?([A-Za-z_$][\w$]*)\s*;',gm.group(1))
+                  if not rm:continue
+                  field=rm.group(1);slot=None;arity=None
+                  crx=re.compile(r'(?m)^\s*(?:(?:public|private|protected)\s+)?ConfigModelResponse\s*\(([^)]*)\)\s*\{')
+                  for cm in crx.finditer(ct):
+                      params=split_top(cm.group(1));names=[]
+                      for row in params:
+                          x=re.sub(r'@[\w.$]+(?:\([^)]*\))?\s*','',row).strip();nm=re.search(r'([A-Za-z_$][\w$]*)\s*$',x);names.append(nm.group(1) if nm else '')
+                      op=ct.find('{',cm.start(),cm.end()+2);cp=match(ct,op,'{','}') if op>=0 else None
+                      body=ct[op+1:cp] if cp else ''
+                      am=re.search(r'this\.'+re.escape(field)+r'\s*=\s*([A-Za-z_$][\w$]*)\s*;',body)
+                      if am and am.group(1) in names and not any('DefaultConstructorMarker' in x for x in params):slot=names.index(am.group(1));arity=len(params);break
+                  if slot is None:continue
+                  for nm in re.finditer(r'\bnew\s+(?:[A-Za-z_$][\w$]*\.)*ConfigModelResponse\s*\(',dt):
+                      op=dt.find('(',nm.start(),nm.end()+2);cp=match(dt,op)
+                      if cp is None:continue
+                      args=split_top(dt[op+1:cp])
+                      if len(args)!=arity or slot>=len(args):continue
+                      left=dt[max(0,nm.start()-400):nm.start()];assign=None
+                      am=re.search(r'([A-Za-z_$][\w$]*)\s*=\s*$',left)
+                      if am:assign=am.group(1)
+                      urls=URL_RX.findall(args[slot])
+                      host_map.append({'getter':'get'+g,'field':field,'slot':slot,'assignment_target':assign,'argument':redact(args[slot]),'urls':urls})
+
+          prod_urls=sorted(set(u for x in host_map if x.get('assignment_target')=='prod' for u in x.get('urls',[])))
+
+          report={
+            'status':'ok','run_rev':'v205.0-restoration-provenance',
+            'package_identity':{'version_name':'8.180.0','outer_bytes':45942514,'outer_sha256':'b00bca9cb327ab3ee483b46d390c9120ac28bfc7674c75fda0129c6c594cc1f9','apk_entry_count':1},
+            'network_policy':{'okko_requests':0,'protected_requests':0,'runtime_started':False,'credentials_read':False,'mutations':0,'third_party_accounts':0,'identifier_enumeration':False,'certificate_or_trust_override':False,'static_only':True},
+            'raw_credentials_persisted':False,
+            'endpoint':endpoint,
+            'repository_calls':repo_calls,
+            'restoration_capture_assignments':captures,
+            'outer_method':outer,
+            'outer_coroutine_construction':bnews,
+            'await_usecase_calls':await_calls,
+            'restoration_occurrences':occ[:150],
+            'restoration_retrofit_endpoints':retro[:100],
+            'local_creator_markers':creators[:100],
+            'response_model':response_model,
+            'domain_model':domain_model,
+            'repository_conversion_evidence':conversion,
+            'provider':{'path':rel(provider),'baseurl_expressions':provider_base,'config_getters':getter_names},
+            'host_mapping':host_map,
+            'derived':{'production_base_urls':prod_urls},
+            'summary':{
+              'repository_typed_call_count':len(repo_calls),
+              'await_usecase_call_count':len(await_calls),
+              'restoration_occurrence_file_count':len(occ),
+              'restoration_related_retrofit_endpoint_count':len(retro),
+              'local_creator_marker_count':len(creators),
+              'response_field_count':len(response_model['fields']),
+              'domain_field_count':len(domain_model['fields']),
+              'production_base_url_count':len(prod_urls),
+              'exact_single_production_base_url_proven':len(prod_urls)==1,
+              'vulnerability_proven':False
+            },
+            'decision':{
+              'vulnerability_proven':False,'reportable':False,'runtime_authorized':False,
+              'next_action':'Classify restorationId origin/entropy and response sensitivity. If the ID is only a server-issued opaque bearer with no normal disclosure path, fail the exploitability gate. If it is a normal researcher-controlled selector, resolve auth binding before any approved owned A/B.'
+            }
+          }
+          OUT.write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          print(json.dumps({'summary':report['summary'],'prod_urls':prod_urls,'provider':report['provider'],
+                            'await_calls':await_calls,'response':response_model,'domain':domain_model,
+                            'retro':retro[:30],'creators':creators[:30]},ensure_ascii=False,indent=2)[:140000])
+          PY
+
+      - name: Upload sanitized restoration evidence
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: okko-restoration-v205
+          path: |
+            /tmp/okko-v205.json
+            /tmp/jadx.stderr
+          if-no-files-found: warn
+          retention-days: 7
+
+# Exact public Okko 8.180.0 static analysis only via trusted official RuStore CDN alias.
+# Zero target/protected traffic, credentials, mutations, third-party data, enumeration or bypasses.
