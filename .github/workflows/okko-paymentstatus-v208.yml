@@ -1,0 +1,170 @@
+name: Exact paymentToken provenance gate v208
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  static-paymentstatus:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Download exact package and decompile
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/okko
+          curl --location --fail --retry 2 --silent --show-error --output /tmp/okko/okko.pkg \
+            'https://static.rustore.ru/2026/8/14/7b/de764e6d-0184-4e0f-a7c6-0b6a30580a79.zip'
+          python3 - <<'PY'
+          import hashlib,shutil,zipfile
+          from pathlib import Path
+          p=Path('/tmp/okko/okko.pkg');h=hashlib.sha256();n=0
+          with p.open('rb') as f:
+              for b in iter(lambda:f.read(1024*1024),b''):n+=len(b);h.update(b)
+          assert n==45942514 and h.hexdigest()=='b00bca9cb327ab3ee483b46d390c9120ac28bfc7674c75fda0129c6c594cc1f9'
+          with zipfile.ZipFile(p) as z:
+              apks=[x for x in z.infolist() if x.filename.lower().endswith('.apk')];assert len(apks)==1
+              with z.open(apks[0]) as src,open('/tmp/okko/okko.apk','wb') as dst:shutil.copyfileobj(src,dst,1024*1024)
+          PY
+          URL=$(python3 - <<'PY'
+          import json,urllib.request
+          d=json.load(urllib.request.urlopen('https://api.github.com/repos/skylot/jadx/releases/latest',timeout=30))
+          print([a['browser_download_url'] for a in d['assets'] if a['name'].startswith('jadx-') and a['name'].endswith('.zip')][0])
+          PY
+          )
+          curl -L --fail --retry 2 "$URL" -o /tmp/jadx.zip
+          mkdir -p /tmp/jadx && unzip -q /tmp/jadx.zip -d /tmp/jadx && chmod +x /tmp/jadx/bin/jadx
+          /tmp/jadx/bin/jadx --no-res --no-imports --show-bad-code --threads-count 4 -d /tmp/okko/jadx /tmp/okko/okko.apk >/tmp/jadx.stdout 2>/tmp/jadx.stderr || true
+          test -d /tmp/okko/jadx/sources
+      - name: Trace paymentToken producer, storage, callers and response
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json,re
+          from pathlib import Path
+          SRC=Path('/tmp/okko/jadx/sources');OUT=Path('/tmp/okko-v208.json')
+          FIRST=('ru/okko/','ru/more/play/','p003nskobfuscated/','nskobfuscated/')
+          STR=re.compile(r'"([^"\\]*(?:\\.[^"\\]*)*)"')
+          def rel(p):return str(p.relative_to(SRC)).replace('\\','/')
+          def rd(p):return p.read_text(encoding='utf-8',errors='replace')
+          def red(s):return STR.sub(lambda m:'"'+m.group(1)+'"' if m.group(1) in {'paymentToken','client_type','orderId','status'} else '"<lit>"',s)[:16000]
+          def one(path,base):
+              p=SRC/path
+              if p.is_file():return p
+              r=[x for x in SRC.rglob(base) if str(x).replace('\\','/').endswith(str(path).replace('\\','/'))] or list(SRC.rglob(base))
+              if len(r)!=1:raise SystemExit(f'{base}:{len(r)}')
+              return r[0]
+          def match(t,op,L='(',R=')'):
+              d=0;q=None;e=False
+              for i in range(op,len(t)):
+                  c=t[i]
+                  if q:
+                      if e:e=False
+                      elif c=='\\':e=True
+                      elif c==q:q=None
+                      continue
+                  if c in ('"',"'"):q=c;continue
+                  if c==L:d+=1
+                  elif c==R:
+                      d-=1
+                      if d==0:return i
+              return None
+          def split(s):
+              out=[];st=0;d=[0,0,0,0];q=None;e=False
+              for i,c in enumerate(s):
+                  if q:
+                      if e:e=False
+                      elif c=='\\':e=True
+                      elif c==q:q=None
+                      continue
+                  if c in ('"',"'"):q=c
+                  elif c=='(':d[0]+=1
+                  elif c==')':d[0]-=1
+                  elif c=='{':d[1]+=1
+                  elif c=='}':d[1]-=1
+                  elif c=='[':d[2]+=1
+                  elif c==']':d[2]-=1
+                  elif c=='<':d[3]+=1
+                  elif c=='>':d[3]=max(0,d[3]-1)
+                  elif c==',' and not any(d):out.append(s[st:i].strip());st=i+1
+              out.append(s[st:].strip());return [x for x in out if x]
+          def methods(t):
+              out=[];rx=re.compile(r'(?m)^\s*(?:(?:public|private|protected|static|final|synchronized|native|abstract|default)\s+)+[^;={}]{1,3200}?\s+([A-Za-z_$][\w$]*)\s*\(([^;{}]*)\)\s*(?:throws [^{]+)?\{')
+              for m in rx.finditer(t):
+                  op=t.find('{',m.start(),m.end()+2);cp=match(t,op,'{','}') if op>=0 else None
+                  if cp is not None:out.append({'start':m.start(),'end':cp+1,'name':m.group(1),'sig':re.sub(r'\s+',' ',m.group(0)[:-1]).strip()})
+              return out
+          def owner(ms,pos):
+              r=[m for m in ms if m['start']<=pos<m['end']];return r[-1] if r else None
+          def sl(t,pos,b=12,a=20):
+              ls=t.splitlines();ln=t[:pos].count('\n')+1;lo=max(1,ln-b);hi=min(len(ls),ln+a)
+              return {'line':ln,'text':'\n'.join(f'{i:05d}: {red(ls[i-1])}' for i in range(lo,hi+1))}
+          def model(p):
+              t=rd(p);ls=t.splitlines();fields=[];getters=[]
+              for i,l in enumerate(ls,1):
+                  fm=re.search(r'^\s*(?:(?:public|private|protected|final|static)\s+)+([A-Za-z0-9_.$<>?, \[\]]+)\s+([A-Za-z_$][\w$]*)\s*(?:;|=)',l)
+                  if fm:fields.append({'line':i,'type':fm.group(1).strip(),'field':fm.group(2)})
+                  gm=re.search(r'\b(get|is)([A-Za-z_$][\w$]*)\s*\(\s*\)\s*\{',l)
+                  if gm:getters.append({'line':i,'getter':gm.group(1)+gm.group(2)})
+              return {'path':rel(p),'fields':fields,'getters':getters,'shape':red(t[:24000])}
+
+          api=one(Path('ru/okko/sdk/data/network/api/AuthScreenApi.java'),'AuthScreenApi.java')
+          pay=one(Path('ru/okko/sdk/data/repository/PaymentRepositoryImpl.java'),'PaymentRepositoryImpl.java')
+          use=one(Path('ru/okko/sdk/domain/usecase/PaymentCheckStatusUseCase.java'),'PaymentCheckStatusUseCase.java')
+          at=rd(api);pt=rd(pay);ut=rd(use);pms=methods(pt);ums=methods(ut)
+          endpoint=[]
+          for m in re.finditer(r'(?s)(@(?:retrofit2\.http\.)?GET\s*\(\s*"v1/paymentstatus/\{client_type\}/2"\s*\).*?\bgetPaymentStatus\s*\((.*?)\)\s*;)',at):endpoint.append(red(m.group(1)))
+          repo=[]
+          for m in re.finditer(r'\.getPaymentStatus\s*\(',pt):
+              op=pt.find('(',m.start(),m.end()+2);cp=match(pt,op);mo=owner(pms,m.start());args=split(pt[op+1:cp]) if cp else []
+              repo.append({'owner':mo['sig'] if mo else None,'args':[red(x) for x in args],'slice':sl(pt,m.start(),22,30)})
+          outer=[]
+          for mo in pms:
+              if mo['name']=='getPaymentStatus':outer.append({'signature':mo['sig'],'slice':sl(pt,mo['start'],0,34)})
+          ucalls=[]
+          for m in re.finditer(r'\.getPaymentStatus\s*\(',ut):
+              op=ut.find('(',m.start(),m.end()+2);cp=match(ut,op);mo=owner(ums,m.start());args=split(ut[op+1:cp]) if cp else []
+              ucalls.append({'owner':mo['sig'] if mo else None,'args':[red(x) for x in args],'slice':sl(ut,m.start(),24,30)})
+          occ=[];producer=[]
+          for p in SRC.rglob('*.java'):
+              rp=rel(p)
+              if not rp.startswith(FIRST):continue
+              try:t=rd(p)
+              except:continue
+              if 'paymentToken' not in t:continue
+              ms=methods(t);hits=[]
+              for m in re.finditer(r'paymentToken',t):
+                  mo=owner(ms,m.start());hits.append({'owner':mo['sig'] if mo else None,'slice':sl(t,m.start(),8,12)})
+                  if len(hits)>=12:break
+              occ.append({'path':rp,'hits':hits})
+              if re.search(r'(?i)(response|result|purchase|payment|order)',t):
+                  for m in re.finditer(r'(?i)(paymentToken\s*=|getPaymentToken\s*\(|\.paymentToken\b|"paymentToken")',t):
+                      producer.append({'path':rp,'marker':red(m.group(0)),'slice':sl(t,m.start(),8,12)})
+                      if len(producer)>=160:break
+          models=[]
+          for base in ('PaymentStatus.java','PaymentStatusResponse.java','PaymentResponse.java','PaymentInfo.java'):
+              for p in list(SRC.rglob(base))[:5]:models.append(model(p))
+          report={'status':'ok','run_rev':'v208.0-paymentstatus','package_identity':{'version_name':'8.180.0','outer_bytes':45942514,'outer_sha256':'b00bca9cb327ab3ee483b46d390c9120ac28bfc7674c75fda0129c6c594cc1f9','apk_entry_count':1},'network_policy':{'okko_requests':0,'protected_requests':0,'runtime_started':False,'credentials_read':False,'mutations':0,'identifier_enumeration':False,'static_only':True},'endpoint':endpoint,'repository_calls':repo,'outer_methods':outer,'payment_check_status_calls':ucalls,'payment_token_occurrences':occ[:120],'payment_token_producer_markers':producer[:160],'models':models,'summary':{'repository_call_count':len(repo),'usecase_call_count':len(ucalls),'payment_token_occurrence_file_count':len(occ),'producer_marker_count':len(producer),'model_count':len(models),'vulnerability_proven':False},'decision':{'vulnerability_proven':False,'reportable':False,'runtime_authorized':False,'next_action':'Classify token origin and response sensitivity. Opaque server-issued payment token plus status-only response fails exploitability/impact.'}}
+          OUT.write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n')
+          print(json.dumps({'summary':report['summary'],'repo':repo,'usecase':ucalls,'models':models,'producer':producer[:30]},ensure_ascii=False,indent=2)[:100000])
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: okko-paymentstatus-v208
+          path: |
+            /tmp/okko-v208.json
+            /tmp/jadx.stderr
+          retention-days: 7
+
+# Exact static analysis only. Zero Okko target traffic, credentials, mutations or enumeration.
